@@ -1,0 +1,14 @@
+base_environment = [ "./table-anno.toml", "./top-simple-1.toml" ]
+
+[annotations]
+com.sarus.parallax_imagestore = "parallax_imagestore_edf"
+com.sarus.parallax_mount_program = "parallax_mount_program_edf"
+com.sarus.parallax_path = "parallax_path_edf"
+com.sarus.perfmon = true
+com.sarus.podman_module = "hpc_edf"
+com.sarus.podman_path = "podman_path_edf"
+com.sarus.podman_tmp_path = "podman_tmp_path_edf"
+com.sarus.runtime_path = "crun_edf"
+com.sarus.skybox_enabled = false
+com.sarus.tracking_enabled = "false"
+com.sarus.tracking_tool = "${PWD}/tracking_tool_edf"

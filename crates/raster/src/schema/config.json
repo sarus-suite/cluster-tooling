@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/product.schema.json",
+  "title": "Configuration",
+  "description": "A configuration for Sarus Suite",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "edf_system_search_path": {
+      "description": "filesystem path where to load EDF files from",
+      "type": "string"
+    },
+    "parallax_imagestore": {
+      "description": "shared filesystem path where to store/load images",
+      "type": "string"
+    },
+    "parallax_mount_program": {
+      "description": "filesystem path to the utilty that handles shared images mounts",
+      "type": "string"
+    },
+    "parallax_path": {
+      "description": "filesystem path to parallax tool",
+      "type": "string"
+    },
+    "podman_module": {
+      "description": "podman module name to be used for running containers",
+      "type": "string"
+    },
+    "podman_path": {
+      "description": "filesystem path to podman tool",
+      "type": "string"
+    },
+    "podman_tmp_path": {
+      "description": "filesystem path where to store podman temporary files",
+      "type": "string"
+    },
+    "runtime_path": {
+      "description": "filesystem path to OCI container runtime",
+      "type": "string"
+    },
+    "skybox_enabled": {
+      "description": "enable/disable skybox slurm plugin",
+      "type": "boolean"
+    },
+    "tracking_enabled": {
+      "description": "enable/disable tracking",
+      "type": "boolean"
+    },
+    "tracking_tool": {
+      "description": "filesystem path to the tool used for tracking",
+      "type": "string"
+    }
+  }
+}

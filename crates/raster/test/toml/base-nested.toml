@@ -1,0 +1,4 @@
+base_environment = "./base-single.toml"
+
+[annotations]
+minus_one = "hot"
