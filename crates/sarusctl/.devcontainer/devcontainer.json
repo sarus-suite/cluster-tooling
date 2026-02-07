@@ -1,0 +1,29 @@
+{
+  "name": "rust-musl-build",
+  "build": {
+    "dockerfile": "Containerfile",
+    "context": ".."
+  },
+  // Use podman named volumes as caches
+  "mounts": [
+    "type=volume,src=${localWorkspaceFolderBasename}-rustup,dst=/usr/local/rustup",
+    "type=volume,src=${localWorkspaceFolderBasename}-cargo-registry,dst=/usr/local/cargo/registry",
+    "type=volume,src=${localWorkspaceFolderBasename}-cargo-git,dst=/usr/local/cargo/git"
+  ],
+  "customizations": {
+    // tests vscode integrations
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "fill-labs.dependi",
+        "ms-azuretools.vscode-docker",
+        "ms-azuretools.vscode-containers"
+      ],
+      "settings": {
+        "rust-analyzer.check.command": "clippy",
+        "editor.formatOnSave": true
+      }
+    }
+  }
+}
