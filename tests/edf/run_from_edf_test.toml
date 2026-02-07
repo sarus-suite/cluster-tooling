@@ -1,0 +1,14 @@
+image = "ubuntu:24.04"
+mounts = ["/home/user/test:/develop", "/src2:/dst2"]
+devices = ["/dev/fuse", "nvidia.com/gpu=all"]
+workdir = "/develop"
+writable = false
+entrypoint = false
+
+[env]
+TEST_1 = "EDF!"
+TEST_2 = "foobar"
+
+[annotations]
+com.hooks.test1.enabled = "true"
+com.hooks.test2.enabled = "false"
