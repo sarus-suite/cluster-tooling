@@ -1,0 +1,38 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*' 
+
+jobs:
+  build:
+    if: github.actor == 'matteo-chesi'
+    strategy:
+      matrix:
+        slurm_version: [24.05.3-1, 25.05.4-1]
+        build_os: [opensuse-15.5, opensuse-15.6]
+        arch: [ x86_64, aarch64 ]
+    runs-on: ${{ matrix.arch == 'x86_64' && 'chesim-zinal-login' || matrix.arch == 'aarch64' && 'chesim-starlex-login' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        env:
+          BUILD_OS: ${{ matrix.build_os }}
+          SLURM_VERSION: ${{ matrix.slurm_version }}
+        run: |
+          .github/release/build.sh
+          .github/release/build_rpm.sh
+
+      - name: Release
+        uses: ncipollo/release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          artifacts: ".github/release/dist/RPMS/${{ matrix.arch }}/*.rpm"
+          allowUpdates: true
+          replacesArtifacts: false
+          draft: false
+          prerelease: false
