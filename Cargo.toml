@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/sarusctl",
+  "crates/skybox",
+  "crates/podman-driver",
+  "crates/raster",
+]
