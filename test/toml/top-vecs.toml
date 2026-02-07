@@ -1,0 +1,3 @@
+image = "ubuntu:vecs"
+devices = [ "dev4", "dev5" ]
+mounts = [ "/hhh:/iii", "./jjj:./kkk" ]

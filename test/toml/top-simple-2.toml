@@ -1,0 +1,2 @@
+image = "ubuntu:simple-2"
+entrypoint = false 

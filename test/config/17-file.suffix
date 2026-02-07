@@ -1,0 +1,5 @@
+podman_path = "podman17"
+runtime_path = crun17
+skybox_enabled = false
+tracking_enabled = true
+tracking_tool = "tracking17"

@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/product.schema.json",
+  "title": "Environment",
+  "description": "An environment for containers",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "annotations": {
+      "description": "OCI-like annotations for the container.",
+      "type": "object"
+    },
+    "base_environment": {
+      "description": "Ordered list of EDFs that this file inherits from. Parameters from listed environments are evaluated sequentially. Supports up to 10 levels of recursion.",
+      "type": ["string", "array"]
+    },
+    "devices": {
+      "description": "List of devices.",
+      "type": "array",
+      "default": []
+    },
+    "entrypoint": {
+      "description": "If true, run the entrypoint from the container image.",
+      "type": "boolean",
+      "default": false
+    },
+    "env": {
+      "description": "Environment variables to set in the container.",
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "image": {
+      "description": "The container image to use. If empty, CE doesn’t enter a container. Can reference a remote Docker/OCI registry or a local Squashfs file as a filesystem path.",
+      "type": "string"
+    },
+    "mounts": {
+      "description": "List of mounts in the format SOURCE:DESTINATION[:FLAGS].",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string",
+        "pattern": "^[^:]+:[^:]+(:[^:]+)?$"
+      }
+    },
+    "workdir": {
+      "description": "Initial working directory when the container starts.",
+      "type": "string"
+    },
+    "writable": {
+      "description": "If false, the container filesystem is read-only.",
+      "type": "boolean",
+      "default": true
+    }
+  },
+  "anyOf": [
+   { "required": ["base_environment"] },
+   { "required": ["image"] }
+  ]
+}

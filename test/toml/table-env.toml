@@ -1,0 +1,6 @@
+image = "ubuntu:env"
+
+[env]
+two_plus_two = "four"
+minus_one = "three"
+quick = "maths"

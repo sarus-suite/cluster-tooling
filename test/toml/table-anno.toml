@@ -1,0 +1,6 @@
+image = "ubuntu:anno"
+
+[annotations]
+two_plus_two = "four"
+minus_one = "three"
+quick = "maths"

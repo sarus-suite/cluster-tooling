@@ -1,0 +1,8 @@
+base_environment = [ "./table-anno.toml", "./top-simple-1.toml", "./table-env.toml" ]
+image = "ubuntu:multi-2"
+
+[annotations]
+quick = "algebra"
+
+[env]
+quick = "counting"
