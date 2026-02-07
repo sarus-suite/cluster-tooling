@@ -6,3 +6,9 @@ members = [
   "crates/podman-driver",
   "crates/raster",
 ]
+
+[patch."https://github.com/sarus-suite/podman-driver"]
+sarus-suite-podman-driver = { path = "crates/podman-driver" }
+
+[patch."https://github.com/sarus-suite/raster"]
+raster = { path = "crates/raster" }
