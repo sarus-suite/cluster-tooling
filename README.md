@@ -85,8 +85,8 @@ CPATH=/usr/local/include:/usr/local/include/slurm:/usr/include
 From the repository root:
 
 ```bash
-devcontainer up --workspace-folder .
-devcontainer exec --workspace-folder . -- bash
+devcontainer up --workspace-folder . --config .devcontainer/opensuse/devcontainer.json
+devcontainer exec --workspace-folder . --config .devcontainer/opensuse/devcontainer.json -- bash
 ```
 
 You are now inside the prepared build environment.

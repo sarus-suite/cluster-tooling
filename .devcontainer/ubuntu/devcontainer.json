@@ -1,0 +1,17 @@
+{
+  "name": "skybox-dev (ubuntu 24.04 + rust + slurm-dev)",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+
+  "platform": "linux/amd64",
+  "runArgs": ["--platform=linux/amd64"],
+
+  "mounts": [
+    "type=volume,source=skybox-target-ubuntu,target=/workspaces/target"
+  ],
+
+  "postCreateCommand": "rustup component add rustfmt clippy || true"
+}
