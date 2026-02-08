@@ -83,7 +83,7 @@ jobs:
 
           # No account enforcement in CI
           AccountingStorageType=accounting_storage/none
-          AccountingStorageEnforce=none
+          JobSubmitPlugins=none
 
           # Logging
           SlurmctldLogFile=/var/log/slurm/slurmctld.log
