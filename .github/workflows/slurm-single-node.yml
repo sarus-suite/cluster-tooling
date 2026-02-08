@@ -204,11 +204,17 @@ jobs:
           squeue -j "$jid" || true
 
           for i in $(seq 1 60); do
-            if ! squeue -j "$jid" >/dev/null 2>&1; then
-              break
-            fi
-            squeue -j "$jid" || true
-            scontrol show job -dd "$jid" || true
+            state="$(scontrol show job -o "$jid" 2>/dev/null | sed -n 's/.*JobState=\([^ ]*\).*/\1/p' || true)"
+            echo "[$i/60] JobState=${state:-UNKNOWN}"
+            case "$state" in
+              COMPLETED|FAILED|CANCELLED|TIMEOUT|NODE_FAIL|OUT_OF_MEMORY|PREEMPTED)
+                break
+                ;;
+              "")
+                # job no longer known to slurmctld (finished and purged)
+                break
+                ;;
+            esac
             sleep 1
           done
 
