@@ -343,3 +343,94 @@ jobs:
           # Run a tiny container rootless
           podman run --rm docker.io/library/alpine:3.20 echo "ok (rootless podman)"
 
+      - name: Install Parallax + mount program (v0.9.9 release binaries)
+        run: |
+          set -euxo pipefail
+
+          sudo install -d /usr/local/bin
+
+          # parallax binary
+          sudo curl -fsSL \
+            -o /usr/local/bin/parallax \
+            https://github.com/sarus-suite/parallax/releases/download/v0.9.9/parallax-v0.9.9-ubuntu-24.04-amd64
+          sudo chmod 0755 /usr/local/bin/parallax
+
+          # mount program (script)
+          sudo curl -fsSL \
+            -o /usr/local/bin/parallax-mount-program \
+            https://github.com/sarus-suite/parallax/releases/download/v0.9.9/parallax-mount-program-v0.9.9.sh
+          sudo chmod 0755 /usr/local/bin/parallax-mount-program
+
+          # sanity
+          parallax --version || true
+          /usr/local/bin/parallax-mount-program --help >/dev/null 2>&1 || true
+
+      - name: Install Bats locally
+        run: |
+          set -euxo pipefail
+          TMP_DIR="$(mktemp -d)"
+          echo "TMP_DIR=$TMP_DIR" >> "$GITHUB_ENV"
+
+          git clone --depth 1 https://github.com/bats-core/bats-core.git "$TMP_DIR/bats-core"
+          "$TMP_DIR/bats-core/install.sh" "$TMP_DIR/bats"
+
+      - name: Parallax basic smoke test (with rootless Podman)
+        run: |
+          set -euxo pipefail
+
+          export PODMAN_BINARY="$(command -v podman)"
+          export PARALLAX_BINARY="$(command -v parallax)"
+          export MOUNT_PROGRAM_PATH="$(command -v parallax-mount-program)"
+          export MKSQUASHFS_PATH="$(command -v mksquashfs)"
+
+          export PODMAN_ROOT="$(mktemp -d)"
+          export PODMAN_RUNROOT="$(mktemp -d)"
+          export RO_STORAGE="$(mktemp -d)"
+          export CLEAN_ROOT="$(mktemp -d)"
+
+          "$PODMAN_BINARY" --root "$PODMAN_ROOT" --runroot "$PODMAN_RUNROOT" pull busybox:latest
+
+          "$PARALLAX_BINARY" \
+            --podmanRoot "$PODMAN_ROOT" \
+            --roStoragePath "$RO_STORAGE" \
+            --mksquashfsPath "$MKSQUASHFS_PATH" \
+            --log-level info \
+            --migrate \
+            --image busybox:latest
+
+          "$PODMAN_BINARY" \
+            --root "$CLEAN_ROOT" \
+            --runroot "$PODMAN_RUNROOT" \
+            --storage-opt additionalimagestore="$RO_STORAGE" \
+            --storage-opt mount_program="$MOUNT_PROGRAM_PATH" \
+            images
+
+          "$PODMAN_BINARY" \
+            --root "$CLEAN_ROOT" \
+            --runroot "$PODMAN_RUNROOT" \
+            --storage-opt additionalimagestore="$RO_STORAGE" \
+            --storage-opt mount_program="$MOUNT_PROGRAM_PATH" \
+            run --rm busybox:latest echo "ok (parallax ro-store)"
+
+          # Cleanup (best-effort)
+          "$PODMAN_BINARY" \
+            --root "$PODMAN_ROOT" \
+            --runroot "$PODMAN_RUNROOT" \
+            --storage-opt mount_program="$MOUNT_PROGRAM_PATH" \
+            rmi --all || true
+
+          rm -rf "$PODMAN_ROOT" "$PODMAN_RUNROOT" "$CLEAN_ROOT" "$RO_STORAGE"
+
+      - name: Run Parallax Bats tests
+        run: |
+          set -euxo pipefail
+          export PODMAN_BINARY="$(command -v podman)"
+          export PARALLAX_BINARY="$(command -v parallax)"
+          export MOUNT_PROGRAM_PATH="$(command -v parallax-mount-program)"
+
+          # Matches upstream CI expectation for squashfuse mount flags
+          export PARALLAX_MP_SQUASHFUSE_FLAG="-o nonempty"
+
+          "${TMP_DIR}/bats/bin/bats" tests
+
+
