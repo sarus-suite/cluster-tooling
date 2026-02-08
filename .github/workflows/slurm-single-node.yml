@@ -218,3 +218,18 @@ jobs:
             sleep 1
           done
 
+          echo "=== Job output (slurm-${jid}.out) ==="
+          if [ -f "slurm-${jid}.out" ]; then
+            cat "slurm-${jid}.out"
+          else
+            echo "No slurm-${jid}.out found in $(pwd); listing directory:"
+            ls -la
+
+            out_path="$(scontrol show job -dd "$jid" 2>/dev/null | sed -n 's/^ *StdOut=\(.*\)$/\1/p' | tail -n 1 || true)"
+            if [ -n "$out_path" ] && [ -f "$out_path" ]; then
+              echo "=== Job output (from StdOut=$out_path) ==="
+              cat "$out_path"
+            else
+              echo "Could not locate job stdout file."
+            fi
+          fi
