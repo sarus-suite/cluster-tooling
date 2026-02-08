@@ -29,6 +29,32 @@ jobs:
           zgrep CONFIG_USER_NS /proc/config.gz 2>/dev/null || true
           grep CONFIG_USER_NS "/boot/config-$(uname -r)" 2>/dev/null || true
 
+      - name: Why unshare fails
+        run: |
+          set -euxo pipefail
+      
+          echo "== /proc/self/status (seccomp + nnp) =="
+          grep -E 'Seccomp|NoNewPrivs' /proc/self/status || true
+      
+          echo "== kernel/userns knobs =="
+          cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || true
+          cat /proc/sys/user/max_user_namespaces 2>/dev/null || true
+          grep CONFIG_USER_NS "/boot/config-$(uname -r)" 2>/dev/null || true
+      
+          echo "== cgroup / init info =="
+          cat /proc/1/cgroup | sed -n '1,120p' || true
+          ps -p 1 -o pid,comm,args || true
+      
+          echo "== AppArmor =="
+          cat /sys/module/apparmor/parameters/enabled 2>/dev/null || true
+          if command -v aa-status >/dev/null 2>&1; then aa-status | sed -n '1,80p'; fi
+      
+          echo "== strace unshare =="
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends strace
+          strace -f -e trace=unshare,setns,clone3,clone unshare -Ur true || true
+          false
+
       - name: Install Slurm + Munge (+ SlurmDBD + MariaDB)
         run: |
           set -euxo pipefail
