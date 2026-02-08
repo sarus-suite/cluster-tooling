@@ -233,3 +233,79 @@ jobs:
               echo "Could not locate job stdout file."
             fi
           fi
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            lsb-release \
+            wget \
+            tar \
+            gzip \
+            git \
+            btrfs-progs \
+            libbtrfs-dev \
+            lvm2 \
+            libdevmapper-dev \
+            squashfs-tools \
+            fuse-overlayfs \
+            squashfuse \
+            inotify-tools \
+            build-essential
+
+      - name: Install Podman (static binary from mgoltzsche/podman-static)
+        run: |
+          set -euxo pipefail
+
+          # Ensure we have curl + tar
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends curl ca-certificates tar gzip
+
+          # Ubuntu runners are amd64
+          curl -fsSL -o /tmp/podman-linux-amd64.tar.gz \
+            https://github.com/mgoltzsche/podman-static/releases/latest/download/podman-linux-amd64.tar.gz
+
+          mkdir -p /tmp/podman-static
+          tar -xzf /tmp/podman-linux-amd64.tar.gz -C /tmp/podman-static
+
+          sudo cp -r /tmp/podman-static/podman-linux-amd64/usr /tmp/podman-static/podman-linux-amd64/etc /
+
+          # Sanity check
+          podman --version
+          podman info || true
+
+      - name: Rootless Podman host prerequisites (uidmap + subuid/subgid + slirp4netns)
+        run: |
+          set -euxo pipefail
+
+          # 1) newuidmap/newgidmap (rootless prerequisite)
+          # 3) slirp4netns (common rootless networking helper)
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends uidmap slirp4netns
+
+          # 2) Ensure subordinate ID ranges exist for the runner user
+          if ! grep -qE '^runner:' /etc/subuid; then
+            echo "runner:100000:65536" | sudo tee -a /etc/subuid >/dev/null
+          fi
+          if ! grep -qE '^runner:' /etc/subgid; then
+            echo "runner:100000:65536" | sudo tee -a /etc/subgid >/dev/null
+          fi
+
+          # Sanity checks
+          command -v newuidmap
+          command -v newgidmap
+          podman info
+
+      - name: Rootless Podman smoke test
+        run: |
+          set -euxo pipefail
+
+          podman --version
+          podman info
+
+          # Rootless sanity checks
+          podman system migrate || true
+
+          # Run a tiny container rootless
+          podman run --rm docker.io/library/alpine:3.20 echo "ok (rootless podman)"
+
