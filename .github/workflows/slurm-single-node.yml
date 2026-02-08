@@ -1,0 +1,177 @@
+name: slurm-single-node
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  slurm:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Slurm + Munge
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            munge \
+            slurmctld slurmd slurm-client
+
+      - name: Configure Munge
+        run: |
+          set -euxo pipefail
+
+          # Create a fresh key
+          sudo dd if=/dev/urandom of=/etc/munge/munge.key bs=1 count=1024 status=none
+          sudo chown munge:munge /etc/munge/munge.key
+          sudo chmod 0400 /etc/munge/munge.key
+
+          # Start munge w new key
+          sudo systemctl enable munge
+          sudo systemctl restart munge
+          sudo systemctl status --no-pager munge
+
+      - name: Configure single-node Slurm (slurmctld + slurmd on same host)
+        run: |
+          set -euxo pipefail
+
+          # Use the actual hostname for NodeName/SlurmctldHost
+          HOST="$(hostname -s)"
+
+          # Ensure HOST resolves locally!
+          if ! getent hosts "$HOST" >/dev/null 2>&1; then
+            echo "127.0.1.1 $HOST" | sudo tee -a /etc/hosts >/dev/null
+          fi
+
+          # Create slurm service user (if not present)
+          if ! id -u slurm >/dev/null 2>&1; then
+            sudo useradd -r -m -U -d /var/lib/slurm -s /usr/sbin/nologin slurm
+          fi
+
+          # Compute resources for NodeName line
+          CPUS="$(nproc)"
+          MEM_MB="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)"
+
+          # Paths commonly used by distro packages
+          sudo install -d -o slurm -g slurm /var/lib/slurm/slurmctld
+          sudo install -d -o slurm -g slurm /var/lib/slurm/slurmd
+          sudo install -d -o slurm -g slurm /var/log/slurm
+          sudo install -d -o root  -g root  /etc/slurm
+
+          # Minimal slurm.conf for same node acting as both controller + compute
+          sudo tee /etc/slurm/slurm.conf >/dev/null <<EOF
+          ClusterName=ci
+          SlurmctldHost=${HOST}
+          SlurmUser=slurm
+
+          AuthType=auth/munge
+          StateSaveLocation=/var/lib/slurm/slurmctld
+          SlurmdSpoolDir=/var/lib/slurm/slurmd
+
+          SlurmctldPort=6817
+          SlurmdPort=6818
+
+          # Scheduling/allocation
+          SelectType=select/cons_tres
+          SelectTypeParameters=CR_Core
+
+          # Keep it simple for CI (no cgroup enforcement)
+          ProctrackType=proctrack/linuxproc
+          TaskPlugin=task/none
+
+          # Logging
+          SlurmctldLogFile=/var/log/slurm/slurmctld.log
+          SlurmdLogFile=/var/log/slurm/slurmd.log
+
+          # Single-node definition
+          NodeName=${HOST} CPUs=${CPUS} RealMemory=${MEM_MB} State=UNKNOWN
+          PartitionName=debug Nodes=${HOST} Default=YES MaxTime=INFINITE State=UP
+          EOF
+
+          # Some package builds look in /etc/slurm-llnl; make it point to /etc/slurm just in case.
+          if [ -d /etc/slurm-llnl ] && [ ! -L /etc/slurm-llnl ]; then
+            sudo rm -rf /etc/slurm-llnl
+          fi
+          if [ ! -e /etc/slurm-llnl ]; then
+            sudo ln -s /etc/slurm /etc/slurm-llnl
+          fi
+
+          # Ensure permissions
+          sudo chown -R slurm:slurm /var/lib/slurm /var/log/slurm
+
+          # Show config for debugging
+          echo "=== hostname -s ==="
+          echo "$HOST"
+          echo "=== /etc/hosts (tail) ==="
+          tail -n 20 /etc/hosts || true
+          echo "=== /etc/slurm/slurm.conf ==="
+          sed -n '1,200p' /etc/slurm/slurm.conf
+
+      - name: Start Slurm daemons
+        run: |
+          set -euxo pipefail
+
+          sudo systemctl enable --now slurmctld
+          sudo systemctl enable --now slurmd
+
+          sudo systemctl status --no-pager slurmctld
+          sudo systemctl status --no-pager slurmd
+
+      - name: Smoke test (sinfo / scontrol / sbatch)
+        run: |
+          set -euxo pipefail
+
+          echo "=== Initial cluster state ==="
+          sinfo -Nel || true
+          scontrol show node || true
+
+          HOST="$(hostname -s)"
+
+          # Wait for the node to become usable
+          echo "Waiting for node '$HOST' to become ready..."
+          for i in $(seq 1 60); do
+            # show state for this node if present
+            state="$(sinfo -h -N -n "$HOST" -o "%T" 2>/dev/null || true)"
+            echo "[$i/60] state='${state}'"
+            case "$state" in
+              idle|mix|alloc|completing)
+                echo "Node is ready: $state"
+                break
+                ;;
+              "")
+                # node not visible yet
+                ;;
+              *)
+                # keep waiting (unknown/down/drain/etc.)
+                ;;
+            esac
+            sleep 1
+          done
+
+          echo "=== Post-wait cluster state ==="
+          sinfo -Nel
+          scontrol show node
+
+          # quick sbatch
+          cat > job.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+          echo "Hello from Slurm on $(hostname)"
+          EOF
+          chmod +x job.sh
+
+          jid="$(sbatch --parsable -p debug -J ci-test --wrap "./job.sh")"
+          echo "Submitted: $jid"
+          squeue -j "$jid" || true
+
+          # wait for completion
+          for i in $(seq 1 60); do
+            if ! squeue -j "$jid" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+
