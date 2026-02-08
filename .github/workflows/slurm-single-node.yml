@@ -307,6 +307,29 @@ jobs:
             echo "No apparmor_parser or /etc/apparmor.d/podman found; skipping AppArmor adjustment."
           fi
 
+      - name: Configure rootless Podman defaults (runtime + network)
+        run: |
+          set -euxo pipefail
+
+          mkdir -p "$HOME/.config/containers"
+
+          cat > "$HOME/.config/containers/containers.conf" <<'EOF'
+          # Use runc by default
+          [engine]
+          runtime = "runc"
+
+          # Tell podman where to find runc
+          [engine.runtimes]
+          runc = [
+            "/usr/local/bin/runc",
+          ]
+
+          # Make host networking the default (equivalent to: --network=host)
+          [containers]
+          netns = "host"
+          EOF
+
+
       - name: Rootless Podman smoke test
         run: |
           set -euxo pipefail
@@ -314,13 +337,9 @@ jobs:
           podman --version
           podman info
 
-          RUNTIME="/usr/local/bin/runc"
-          echo "Using runtime: $RUNTIME"
-          "$RUNTIME" --version || true
-
           # Rootless sanity checks
           podman system migrate || true
 
           # Run a tiny container rootless
-          podman run --rm --runtime "$RUNTIME" --network=host docker.io/library/alpine:3.20 echo "ok (rootless podman)"
+          podman run --rm docker.io/library/alpine:3.20 echo "ok (rootless podman)"
 
