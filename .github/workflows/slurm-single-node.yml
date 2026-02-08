@@ -208,6 +208,7 @@ jobs:
               break
             fi
             squeue -j "$jid" || true
+            scontrol show job -dd "$jid" || true
             sleep 1
           done
 
