@@ -11,23 +11,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-- name: Check user namespaces availability
-  run: |
-    set -euxo pipefail
-    echo "== sysctls =="
-    cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || true
-    cat /proc/sys/user/max_user_namespaces 2>/dev/null || true
-
-    echo "== unshare probe =="
-    if unshare -Ur true 2>/dev/null; then
-      echo "unshare -Ur: OK (user namespaces usable)"
-    else
-      echo "unshare -Ur: FAIL (user namespaces not usable here)"
-    fi
-
-    echo "== kernel config hint =="
-    zgrep CONFIG_USER_NS /proc/config.gz 2>/dev/null || true
-    grep CONFIG_USER_NS "/boot/config-$(uname -r)" 2>/dev/null || true
+      - name: Check user namespaces availability
+        run: |
+          set -euxo pipefail
+          echo "== sysctls =="
+          cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || true
+          cat /proc/sys/user/max_user_namespaces 2>/dev/null || true
+      
+          echo "== unshare probe =="
+          if unshare -Ur true 2>/dev/null; then
+            echo "unshare -Ur: OK (user namespaces usable)"
+          else
+            echo "unshare -Ur: FAIL (user namespaces not usable here)"
+          fi
+      
+          echo "== kernel config hint =="
+          zgrep CONFIG_USER_NS /proc/config.gz 2>/dev/null || true
+          grep CONFIG_USER_NS "/boot/config-$(uname -r)" 2>/dev/null || true
 
       - name: Install Slurm + Munge (+ SlurmDBD + MariaDB)
         run: |
