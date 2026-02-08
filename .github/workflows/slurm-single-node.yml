@@ -171,6 +171,7 @@ jobs:
             if ! squeue -j "$jid" >/dev/null 2>&1; then
               break
             fi
+            squeue -j "$jid" || true
             sleep 1
           done
 
