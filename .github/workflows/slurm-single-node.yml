@@ -140,10 +140,22 @@ jobs:
         run: |
           set -euxo pipefail
 
-          # Validate configs early (clearer failures than systemd)
-          sudo slurmdbd -t
+          # Validate slurmctld config (supported)
           sudo slurmctld -t
 
+          # "Validate" slurmdbd config: start in foreground briefly.
+          # If config is good, it will keep running and timeout returns 124.
+          # If config is bad, slurmdbd exits quickly with a non-124 error.
+          set +e
+          timeout 2s sudo slurmdbd -D -s -v
+          rc=$?
+          set -e
+          if [ "$rc" -ne 124 ] && [ "$rc" -ne 0 ]; then
+            echo "slurmdbd failed to start (rc=$rc) — config likely invalid"
+            exit "$rc"
+          fi
+
+          sudo systemctl enable --now mariadb
           sudo systemctl enable --now slurmdbd
           sudo systemctl enable --now slurmctld
           sudo systemctl enable --now slurmd
@@ -152,6 +164,7 @@ jobs:
           sudo systemctl status --no-pager slurmdbd
           sudo systemctl status --no-pager slurmctld
           sudo systemctl status --no-pager slurmd
+
 
       - name: Bootstrap accounting (cluster/account/user)
         run: |
