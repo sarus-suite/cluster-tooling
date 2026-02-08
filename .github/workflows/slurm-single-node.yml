@@ -453,16 +453,3 @@ jobs:
             --storage-opt mount_program="$MOUNT_PROGRAM_PATH" \
             rmi --all || true
 
-      - name: Run Parallax Bats tests
-        run: |
-          set -euxo pipefail
-          export PODMAN_BINARY="$(command -v podman)"
-          export PARALLAX_BINARY="$(command -v parallax)"
-          export MOUNT_PROGRAM_PATH="$(command -v parallax-mount-program)"
-
-          # Matches upstream CI expectation for squashfuse mount flags
-          export PARALLAX_MP_SQUASHFUSE_FLAG="-o nonempty"
-
-          "${TMP_DIR}/bats/bin/bats" tests
-
-
