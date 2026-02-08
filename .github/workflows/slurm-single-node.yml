@@ -77,9 +77,13 @@ jobs:
           SelectType=select/cons_tres
           SelectTypeParameters=CR_Core
 
-          # Keep it simple for CI (no cgroup enforcement)
+          # No cgroup enforcement
           ProctrackType=proctrack/linuxproc
           TaskPlugin=task/none
+
+          # No account enforcement in CI
+          AccountingStorageType=accounting_storage/none
+          AccountingStorageEnforce=none
 
           # Logging
           SlurmctldLogFile=/var/log/slurm/slurmctld.log
