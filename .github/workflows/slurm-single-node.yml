@@ -322,5 +322,5 @@ jobs:
           podman system migrate || true
 
           # Run a tiny container rootless
-          podman run --rm --network=host docker.io/library/alpine:3.20 echo "ok (rootless podman)"
+          podman run --rm --runtime "$RUNTIME" --network=host docker.io/library/alpine:3.20 echo "ok (rootless podman)"
 
