@@ -296,6 +296,17 @@ jobs:
           command -v newgidmap
           podman info
 
+      - name: Fix AppArmor profile for /usr/local/bin/podman
+        run: |
+          set -euxo pipefail
+
+          if command -v apparmor_parser >/dev/null 2>&1 && [ -f /etc/apparmor.d/podman ]; then
+            sudo sed -Ei 's!^profile podman /usr/bin/podman !profile podman /usr/{bin,local/bin}/podman !' /etc/apparmor.d/podman
+            sudo apparmor_parser -r /etc/apparmor.d/podman
+          else
+            echo "No apparmor_parser or /etc/apparmor.d/podman found; skipping AppArmor adjustment."
+          fi
+
       - name: Rootless Podman smoke test
         run: |
           set -euxo pipefail
