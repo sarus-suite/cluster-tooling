@@ -11,6 +11,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Allow unprivileged user namespaces (work around Ubuntu 24.04 AppArmor restriction)
+        run: |
+          set -euxo pipefail
+
+          # Disable Ubuntu's AppArmor restriction that can make `unshare(CLONE_NEWUSER)` fail with EPERM
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          fi
+
+          # Show status
+          sysctl kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true
+          sysctl kernel.unprivileged_userns_clone 2>/dev/null || true
+          sysctl user.max_user_namespaces 2>/dev/null || true
+
+
       - name: Check user namespaces availability
         run: |
           set -euxo pipefail
