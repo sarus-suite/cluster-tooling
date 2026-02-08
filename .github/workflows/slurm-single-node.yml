@@ -453,8 +453,6 @@ jobs:
             --storage-opt mount_program="$MOUNT_PROGRAM_PATH" \
             rmi --all || true
 
-          rm -rf "$PODMAN_ROOT" "$PODMAN_RUNROOT" "$CLEAN_ROOT" "$RO_STORAGE"
-
       - name: Run Parallax Bats tests
         run: |
           set -euxo pipefail
