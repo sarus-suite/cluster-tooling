@@ -280,7 +280,7 @@ jobs:
           echo "=== Associations ==="
           sudo sacctmgr -n show assoc format=Cluster,Account,User || true
 
-      - name: Smoke test (sinfo / scontrol / sbatch)
+      - name: Smoke test slurm (sinfo / scontrol / sbatch)
         run: |
           set -euxo pipefail
 
@@ -534,3 +534,12 @@ jobs:
             --storage-opt mount_program="$MOUNT_PROGRAM_PATH" \
             rmi --all || true
 
+          # Try the container exec under Slurm
+          srun -p debug -A default -J srun-podman-rostore -n 1 bash -lc '
+            "$PODMAN_BINARY" \
+              --root "$CLEAN_ROOT" \
+              --runroot "$PODMAN_RUNROOT" \
+              --storage-opt additionalimagestore="$RO_STORAGE" \
+              --storage-opt mount_program="$MOUNT_PROGRAM_PATH" \
+              run --rm busybox:latest echo "ok (srun + parallax ro-store)"
+          '
