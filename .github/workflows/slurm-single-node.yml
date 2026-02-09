@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   slurm:
     runs-on: ubuntu-24.04
@@ -44,6 +48,39 @@ jobs:
           zgrep CONFIG_USER_NS /proc/config.gz 2>/dev/null || true
           grep CONFIG_USER_NS "/boot/config-$(uname -r)" 2>/dev/null || true
 
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build libskybox.so in devcontainer (fail early on build)
+        uses: devcontainers/ci@v0.3
+        imageName: ghcr.io/${{ github.repository }}/skybox-devcontainer
+        push: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') }}
+        with:
+          configFile: .devcontainer/ubuntu/devcontainer.json
+          runCmd: |
+            set -euxo pipefail
+      
+            cargo clean
+            cargo update
+            cargo build -p skybox --release
+      
+            # Copy artifact into the workspace
+            mkdir -p dist
+            cp -f target/release/libskybox.so dist/libskybox.so
+            ls -l dist/libskybox.so
+      
+      - name: Install libskybox.so into /usr/lib64/slurm on runner
+        shell: bash
+        run: |
+          set -euxo pipefail
+      
+          sudo mkdir -p /usr/lib64/slurm
+          sudo install -m 0755 dist/libskybox.so /usr/lib64/slurm/libskybox.so
+          ls -l /usr/lib64/slurm/libskybox.so
 
 
       - name: Install Slurm + Munge (+ SlurmDBD + MariaDB)
@@ -225,30 +262,6 @@ jobs:
           sudo cat /etc/sarus-suite/sarus-suite.conf
 
 
-      - name: Build libskybox.so in devcontainer
-        uses: devcontainers/ci@v0.3
-        with:
-          configFile: .devcontainer/ubuntu/devcontainer.json
-          runCmd: |
-            set -euxo pipefail
-      
-            cargo clean
-            cargo update
-            cargo build -p skybox --release
-      
-            # Copy artifact into the workspace
-            mkdir -p dist
-            cp -f target/release/libskybox.so dist/libskybox.so
-            ls -l dist/libskybox.so
-      
-      - name: Install libskybox.so into /usr/lib64/slurm on runner
-        shell: bash
-        run: |
-          set -euxo pipefail
-      
-          sudo mkdir -p /usr/lib64/slurm
-          sudo install -m 0755 dist/libskybox.so /usr/lib64/slurm/libskybox.so
-          ls -l /usr/lib64/slurm/libskybox.so
 
 
       - name: Start Slurm daemons (mariadb -> slurmdbd -> slurmctld -> slurmd)
