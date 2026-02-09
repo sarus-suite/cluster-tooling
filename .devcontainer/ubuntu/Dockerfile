@@ -2,6 +2,9 @@ FROM --platform=linux/amd64 ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# can be set at build time with --build-arg SLURM_VERSION=24.05.8
+ARG SLURM_VERSION=""
+
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       build-essential \
@@ -41,15 +44,34 @@ USER root
 
 WORKDIR /tmp
 
-# ---- Slurm 24.05.8 headers (incl. SPANK) ----
-RUN wget -q https://download.schedmd.com/slurm/slurm-24.05.8.tar.bz2 && \
-    tar -xjf slurm-24.05.8.tar.bz2 && \
-    cd slurm-24.05.8 && \
-    ./configure --disable-dependency-tracking && \
-    mkdir -p /usr/local/include/slurm && \
-    cp -a slurm/. /usr/local/include/slurm/ && \
-    cp -a contribs/spank/. /usr/local/include/slurm/ || true && \
-    if [ -f slurm/slurm_version.h ]; then cp -a slurm/slurm_version.h /usr/local/include/slurm/; fi
+# Slurm (either tarball if SLURM_VERSION is set or from apt if not)
+RUN set -eux; \
+    if [ -n "${SLURM_VERSION}" ]; then \
+      echo "Installing Slurm headers from tarball: ${SLURM_VERSION}"; \
+      wget -q "https://download.schedmd.com/slurm/slurm-${SLURM_VERSION}.tar.bz2"; \
+      tar -xjf "slurm-${SLURM_VERSION}.tar.bz2"; \
+      cd "slurm-${SLURM_VERSION}"; \
+      ./configure --disable-dependency-tracking; \
+      mkdir -p /usr/local/include/slurm; \
+      cp -a slurm/. /usr/local/include/slurm/; \
+      cp -a contribs/spank/. /usr/local/include/slurm/ || true; \
+      if [ -f slurm/slurm_version.h ]; then cp -a slurm/slurm_version.h /usr/local/include/slurm/; fi; \
+    else \
+      echo "Installing Slurm from apt (services + client) and dev headers"; \
+      apt-get update; \
+      apt-get install -y --no-install-recommends \
+        munge \
+        slurmctld slurmd slurm-client \
+        libslurm-dev \
+      ; \
+      rm -rf /var/lib/apt/lists/*; \
+      # Some Ubuntu builds place headers under /usr/include/slurm; ensure it's present (helpful for tools expecting it)
+      if [ -d /usr/include/slurm ]; then \
+        mkdir -p /usr/local/include; \
+        ln -sfn /usr/include/slurm /usr/local/include/slurm; \
+      fi; \
+    fi; \
+    rm -rf /tmp/*
 
 
 # Match your include path behavior
