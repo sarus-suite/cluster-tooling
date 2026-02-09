@@ -45,39 +45,16 @@ jobs:
           grep CONFIG_USER_NS "/boot/config-$(uname -r)" 2>/dev/null || true
 
 
-      - name: Install Munge + MariaDB + Slurm 24.05.8 (SchedMD deb packages)
+
+      - name: Install Slurm + Munge (+ SlurmDBD + MariaDB)
         run: |
           set -euxo pipefail
-      
+
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            munge libmunge-dev \
-            mariadb-server \
-            build-essential fakeroot devscripts equivs \
-            wget bzip2 ca-certificates
-      
-          # Build SchedMD Debian packages for Slurm 24.05.8 (installs as slurm-smd*)
-          cd /tmp
-          wget -q https://download.schedmd.com/slurm/slurm-24.05.8.tar.bz2
-          tar -xjf slurm-24.05.8.tar.bz2
-          cd slurm-24.05.8
-      
-          # Install packaging deps declared by Slurm's debian/control
-          sudo mk-build-deps -i -t "apt-get -y --no-install-recommends" debian/control
-      
-          # Build .deb packages
-          debuild -b -uc -us
-      
-          # Install the needed Slurm components (no Ubuntu slurm* packages involved)
-          cd /tmp
-          sudo apt-get install -y --no-install-recommends \
-            ./slurm-smd_*.deb \
-            ./slurm-smd-client_*.deb \
-            ./slurm-smd-slurmctld_*.deb \
-            ./slurm-smd-slurmd_*.deb \
-            ./slurm-smd-slurmdbd_*.deb
-
-          scontrol -V
+            munge \
+            slurmctld slurmd slurm-client slurmdbd \
+            mariadb-server
 
 
       - name: Configure Munge
