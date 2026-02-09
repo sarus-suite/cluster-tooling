@@ -246,7 +246,6 @@ jobs:
           sudo mkdir -p /usr/lib64/slurm
           sudo install -m 0755 dist/libskybox.so /usr/lib64/slurm/libskybox.so
           ls -l /usr/lib64/slurm/libskybox.so
-          false
 
 
       - name: Start Slurm daemons (mariadb -> slurmdbd -> slurmctld -> slurmd)
