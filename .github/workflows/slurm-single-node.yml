@@ -221,6 +221,34 @@ jobs:
           echo "=== /etc/sarus-suite/sarus-suite.conf ==="
           sudo cat /etc/sarus-suite/sarus-suite.conf
 
+
+      - name: Build libskybox.so in devcontainer
+        uses: devcontainers/ci@v0.3
+        with:
+          configFile: .devcontainer/ubuntu/devcontainer.json
+          runCmd: |
+            set -euxo pipefail
+      
+            cargo clean
+            cargo update
+            cargo build -p skybox --release
+      
+            # Copy artifact into the workspace
+            mkdir -p dist
+            cp -f target/release/libskybox.so dist/libskybox.so
+            ls -l dist/libskybox.so
+      
+      - name: Install libskybox.so into /usr/lib64/slurm on runner
+        shell: bash
+        run: |
+          set -euxo pipefail
+      
+          sudo mkdir -p /usr/lib64/slurm
+          sudo install -m 0755 dist/libskybox.so /usr/lib64/slurm/libskybox.so
+          ls -l /usr/lib64/slurm/libskybox.so
+          false
+
+
       - name: Start Slurm daemons (mariadb -> slurmdbd -> slurmctld -> slurmd)
         run: |
           set -euxo pipefail
