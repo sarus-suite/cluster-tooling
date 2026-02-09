@@ -113,6 +113,9 @@ jobs:
           SlurmctldPort=6817
           SlurmdPort=6818
 
+          # Spank plugin config
+          PlugStackConfig=/etc/slurm/plugstack.conf
+
           # Scheduling/allocation
           SelectType=select/cons_tres
           SelectTypeParameters=CR_Core
@@ -169,6 +172,54 @@ jobs:
           sed -n '1,220p' /etc/slurm/slurm.conf
           echo "=== /etc/slurm/slurmdbd.conf (exists) ==="
           sudo ls -l /etc/slurm/slurmdbd.conf
+
+
+      - name: Install SPANK plugstack + sarus-suite config (Zinal layout)
+        run: |
+          set -euxo pipefail
+
+          # Create the directory structure
+          sudo install -d -m 0755 /etc/slurm
+          sudo install -d -m 0755 /etc/slurm/plugstack.conf.d
+          sudo install -d -m 0755 /etc/sarus-suite
+
+          # plugstack.conf
+          sudo tee /etc/slurm/plugstack.conf >/dev/null <<'EOF'
+          #
+          # SPANK config file
+          #
+          include /etc/slurm/plugstack.conf.d/*
+          EOF
+          sudo chmod 0644 /etc/slurm/plugstack.conf
+
+          # --- plugstack.conf.d entries (create all three) ---
+
+          # skybox.conf
+          sudo tee /etc/slurm/plugstack.conf.d/skybox.conf >/dev/null <<'EOF'
+          required /usr/lib64/slurm/libskybox.so config_path=/etc/sarus-suite
+          EOF
+          sudo chmod 0644 /etc/slurm/plugstack.conf.d/skybox.conf
+
+          # /etc/sarus-suite/sarus-suite.conf like in zinal
+          sudo tee /etc/sarus-suite/sarus-suite.conf >/dev/null <<'EOF'
+          edf_system_search_path = "/tmp/containers/edf"
+          parallax_imagestore = "/tmp/.parallax_imagestore"
+          parallax_path = "/usr/local/bin/parallax"
+          parallax_mount_program = "/usr/local/bin/parallax-mount-program"
+          skybox_enabled = true
+          tracking_enabled = false
+          tracking_tool = "/usr/local/opt/pyxis_tracking_tool/pyxis_tracking_tool"
+          EOF
+          sudo chmod 0644 /etc/sarus-suite/sarus-suite.conf
+
+          echo "=== /etc/slurm/plugstack.conf ==="
+          sudo cat /etc/slurm/plugstack.conf
+          echo "=== /etc/slurm/plugstack.conf.d ==="
+          sudo ls -la /etc/slurm/plugstack.conf.d
+          echo "=== /etc/slurm/plugstack.conf.d/skybox.conf ==="
+          sudo cat /etc/slurm/plugstack.conf.d/skybox.conf
+          echo "=== /etc/sarus-suite/sarus-suite.conf ==="
+          sudo cat /etc/sarus-suite/sarus-suite.conf
 
       - name: Start Slurm daemons (mariadb -> slurmdbd -> slurmctld -> slurmd)
         run: |
