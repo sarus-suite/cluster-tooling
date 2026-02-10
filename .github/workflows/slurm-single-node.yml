@@ -519,7 +519,7 @@ jobs:
           show_ver "aardvark-dns (PATH)"   aardvark-dns
 
           echo "=== output for squashfuse ==="
-          squashfuse --version |& head -n 1
+          squashfuse --version |& head -n 1 || true
           echo
 
           echo "=== Podman view of runtime / helpers (podman info) ==="
