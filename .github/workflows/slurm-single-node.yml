@@ -11,6 +11,7 @@ permissions:
 jobs:
   slurm:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
@@ -739,7 +740,7 @@ jobs:
           set +e
           # dev pts crash debug
           #/usr/local/bin/podman --log-level=debug --module hpc \
-          /usr/local/bin/podman --log-level=debug --module hpc \
+          "$PODMAN_BINARY" --module hpc \
             run --rm \
             --runtime-flag log=/tmp/crun.log \
             busybox:latest echo "default ok" || rc=$?
@@ -748,7 +749,7 @@ jobs:
           #sudo sed -n '1,200p' /tmp/crun.log || true
 
           #/usr/local/bin/podman --log-level=debug --module hpc \
-          /usr/local/bin/podman --log-level=debug --module hpc \
+          "$PODMAN_BINARY" --module hpc \
             run --rm --pid=private\
             --runtime-flag log=/tmp/crun.log \
             busybox:latest echo "private ok" || rc=$?
@@ -757,7 +758,7 @@ jobs:
           #sudo sed -n '1,200p' /tmp/crun.log || true
 
 
-          srun -p debug -A default -J srun-skybox -n 1 --edf=busybox echo 'ok :D'
+          srun -p debug -t 3 -A default -J srun-skybox -n 1 --edf=busybox echo 'ok :D'
 
           echo "=== slurmd log tail ==="
           sudo tail -n 200 /var/log/slurm/slurmd.log || true
