@@ -158,6 +158,12 @@ jobs:
           # Spank plugin config
           PlugStackConfig=/etc/slurm/plugstack.conf
 
+          # activate debug level for skybox
+          SlurmdDebug=debug2
+
+          # no mpi
+          MpiDefault=none
+
           # Scheduling/allocation
           SelectType=select/cons_tres
           SelectTypeParameters=CR_Core
@@ -177,7 +183,7 @@ jobs:
           SlurmdLogFile=/var/log/slurm/slurmd.log
 
           # Single-node definition
-          NodeName=${HOST} CPUs=${CPUS} RealMemory=${MEM_MB} State=UNKNOWN
+          NodeName=${HOST} CPUs=${CPUS} Sockets=1 CoresPerSocket=2 ThreadsPerCore=2 RealMemory=${MEM_MB} State=UNKNOWN
           PartitionName=debug Nodes=${HOST} Default=YES MaxTime=INFINITE State=UP
           EOF
 
