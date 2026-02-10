@@ -482,6 +482,8 @@ jobs:
           # This shows which runtime, conmon, network helper, etc. podman actually picked.
           /usr/local/bin/podman info --debug || true
 
+          false
+
 
 
       - name: Rootless Podman host prerequisites (uidmap + subuid/subgid + slirp4netns)
