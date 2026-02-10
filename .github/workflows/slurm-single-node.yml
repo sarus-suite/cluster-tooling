@@ -385,9 +385,67 @@ jobs:
             libdevmapper-dev \
             squashfs-tools \
             fuse-overlayfs \
-            squashfuse \
             inotify-tools \
             build-essential
+
+
+      - name: Install latest squashfuse from vasi/squashfuse (build from release)
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # Build deps + runtime deps for common compression backends
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            curl \
+            pkg-config \
+            libfuse3-dev \
+            zlib1g-dev \
+            liblzma-dev \
+            liblzo2-dev \
+            liblz4-dev \
+            libzstd-dev \
+            libattr1-dev \
+            tar
+
+          # Discover the latest release tarball asset from GitHub API
+          rel_json="$(curl -fsSL https://api.github.com/repos/vasi/squashfuse/releases/latest)"
+          tar_url="$(python3 - <<'PY'
+          import json, sys
+          j = json.load(sys.stdin)
+          assets = j.get("assets", [])
+          # Prefer the source tarball asset if present (e.g. squashfuse-0.6.1.tar.gz)
+          cands = [a for a in assets if a.get("name","").endswith(".tar.gz")]
+          if not cands:
+            raise SystemExit("No .tar.gz asset found in latest release assets")
+          # Pick the first matching tar.gz
+          print(cands[0]["browser_download_url"])
+          PY
+          <<<"$rel_json")"
+
+          echo "Latest squashfuse tarball: $tar_url"
+
+          work="$(mktemp -d)"
+          curl -fsSL -o "$work/squashfuse.tar.gz" "$tar_url"
+          tar -xzf "$work/squashfuse.tar.gz" -C "$work"
+          srcdir="$(find "$work" -maxdepth 1 -type d -name 'squashfuse-*' | head -n 1)"
+          test -n "$srcdir"
+
+          pushd "$srcdir"
+          ./configure --prefix=/usr/local
+          make -j"$(nproc)"
+          sudo make install
+          popd
+
+          # Verify what we will use
+          command -v squashfuse
+          squashfuse --version || true
+          squashfuse_ll --version || true
+
+
+
 
       - name: Install Podman (static binary from mgoltzsche/podman-static)
         run: |
