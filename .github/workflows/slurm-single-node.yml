@@ -451,19 +451,64 @@ jobs:
 
           cat > "$HOME/.config/containers/containers.conf" <<'EOF'
           # Use runc by default
-          [engine]
-          runtime = "runc"
+          #          [engine]
+          #          runtime = "runc"
 
           # Tell podman where to find runc
-          [engine.runtimes]
-          runc = [
-            "/usr/local/bin/runc",
-          ]
+          #          [engine.runtimes]
+          #          runc = [
+          #            "/usr/local/bin/runc",
+          #          ]
 
           # Make host networking the default (equivalent to: --network=host)
-          [containers]
-          netns = "host"
+          #          [containers]
+          #          netns = "host"
           EOF
+
+
+          - name: Create Podman module: hpc
+            shell: bash
+            run: |
+              set -euo pipefail
+          
+              # Resolve actual installed binary paths
+              CRUN_PATH="$(command -v crun)"
+              CONMON_PATH="$(command -v conmon)"
+          
+              echo "Detected crun:   ${CRUN_PATH}"
+              echo "Detected conmon: ${CONMON_PATH}"
+          
+              # Create the modules directory Podman searches
+              sudo mkdir -p /etc/containers/containers.conf.modules
+          
+              # Write the 'hpc' module file
+              sudo tee /etc/containers/containers.conf.modules/hpc >/dev/null <<EOF
+              [containers]
+              ipcns = "host"
+              netns = "host"
+              pidns = "host"
+              utsns = "host"
+              userns = "keep-id"
+              cgroupns = "host"
+              cgroups = "no-conmon"
+          
+              tz = "local"
+          
+              # Mounting /tmp as a temporary measure to propagate Slurm PMIx dirs until we have dedicated hook
+              mounts = ["type=bind,src=/tmp,dst=/tmp"]
+          
+              [engine]
+              runtime = "crun"
+              conmon_path = ["${CONMON_PATH}"]
+          
+              [engine.runtimes]
+              crun = ["${CRUN_PATH}"]
+              EOF
+          
+              # Sanity check: show what we wrote
+              sudo ls -l /etc/containers/containers.conf.modules/hpc
+              sudo sed -n '1,200p' /etc/containers/containers.conf.modules/hpc
+
 
 
       - name: Rootless Podman smoke test
