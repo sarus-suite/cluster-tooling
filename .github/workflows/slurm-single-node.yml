@@ -758,7 +758,7 @@ jobs:
           #sudo sed -n '1,200p' /tmp/crun.log || true
 
 
-          srun -p debug -t 3 -A default -J srun-skybox -n 1 --edf=busybox echo 'ok :D'
+          srun -p debug -t 3 -A default -J srun-skybox --chdir=/tmp -n 1 --edf=busybox echo 'ok :D'
 
           echo "=== slurmd log tail ==="
           sudo tail -n 200 /var/log/slurm/slurmd.log || true
