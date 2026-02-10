@@ -590,10 +590,10 @@ jobs:
           set -euo pipefail
       
           # Resolve actual installed binary paths
-          CRUN_PATH="$(command -v runc)"
+          CRUN_PATH="$(command -v crun)"
           CONMON_PATH="$(command -v conmon)"
       
-          echo "Detected runc:   ${CRUN_PATH}"
+          echo "Detected crun:   ${CRUN_PATH}"
           echo "Detected conmon: ${CONMON_PATH}"
       
           # Create the modules directory Podman searches
@@ -616,11 +616,11 @@ jobs:
           mounts = ["type=bind,src=/tmp,dst=/tmp"]
       
           [engine]
-          runtime = "runc"
+          runtime = "crun"
           conmon_path = ["${CONMON_PATH}"]
       
           [engine.runtimes]
-          runc = ["${CRUN_PATH}"]
+          crun = ["${CRUN_PATH}"]
           EOF
       
           # Sanity check: show what we wrote
