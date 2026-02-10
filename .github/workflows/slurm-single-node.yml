@@ -609,6 +609,11 @@ jobs:
           cat "$HOME/.edf/busybox.toml"
 
           set +e
+          # dev pts crash debug
+          "$PODMAN_BINARY" --module hpc run --rm busybox:latest true
+          "$PODMAN_BINARY" --module hpc run --rm --pid=private busybox:latest true
+
+
           srun -p debug -A default -J srun-skybox -n 1 --edf=busybox echo 'ok :D'
 
           echo "=== slurmd log tail ==="
