@@ -558,3 +558,14 @@ jobs:
               --storage-opt mount_program="$MOUNT_PROGRAM_PATH" \
               run --rm busybox:latest echo "ok (from srun + parallax ro-store)"
           '
+
+          # EDF
+          mkdir -p "$HOME/.edf"
+          cat > "$HOME/.edf/busybox.toml" <<'EOF'
+          image = "busybox:latest"
+          EOF
+          echo "=== $HOME/.edf/busybox.toml ==="
+          cat "$HOME/.edf/busybox.toml"
+
+          srun -p debug -A default -J srun-skybox -n 1 --edf=busybox echo 'ok :D'
+
