@@ -477,7 +477,9 @@ jobs:
           show_ver "slirp4netns (PATH)"    slirp4netns
           show_ver "netavark (PATH)"       netavark
           show_ver "aardvark-dns (PATH)"   aardvark-dns
-      
+
+          squashfuse --version |& head -n 1
+
           echo "=== Podman view of runtime / helpers (podman info) ==="
           # This shows which runtime, conmon, network helper, etc. podman actually picked.
           /usr/local/bin/podman info --debug || true
