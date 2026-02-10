@@ -443,6 +443,19 @@ jobs:
             echo "No apparmor_parser or /etc/apparmor.d/podman found; skipping AppArmor adjustment."
           fi
 
+      - name: Write /etc/containers/containers.conf (global)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /etc/containers
+          sudo tee /etc/containers/containers.conf >/dev/null <<'EOF'
+          [engine]
+          runtime = "crun"
+      
+          [engine.runtimes]
+          crun = ["/usr/local/bin/crun"]
+          EOF
+
       - name: Create Podman module hpc
         shell: bash
         run: |
