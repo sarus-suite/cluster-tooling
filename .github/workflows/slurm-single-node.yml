@@ -443,7 +443,7 @@ jobs:
             echo "No apparmor_parser or /etc/apparmor.d/podman found; skipping AppArmor adjustment."
           fi
 
-      - name: Create Podman module: hpc
+      - name: Create Podman module hpc
         shell: bash
         run: |
           set -euo pipefail
