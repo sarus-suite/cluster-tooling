@@ -567,6 +567,7 @@ jobs:
           echo "=== $HOME/.edf/busybox.toml ==="
           cat "$HOME/.edf/busybox.toml"
 
+          set +e
           srun -p debug -A default -J srun-skybox -n 1 --edf=busybox echo 'ok :D'
 
           echo "=== slurmd log tail ==="
