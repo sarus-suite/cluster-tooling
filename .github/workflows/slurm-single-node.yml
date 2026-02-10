@@ -410,6 +410,80 @@ jobs:
           podman --version
           podman info || true
 
+
+      - name: Tool versions (podman + fuse/squash tools)
+        shell: bash
+        run: |
+          set -euo pipefail
+      
+          echo "=== OS / Kernel ==="
+          uname -a || true
+          cat /etc/os-release || true
+          echo
+      
+          # Helper: print "name: path" then try common version flags
+          show_ver() {
+            local label="$1"; shift
+            local bin="$1"; shift || true
+      
+            echo "--- ${label} ---"
+            if [[ "$bin" == /* ]]; then
+              if [[ ! -x "$bin" ]]; then
+                echo "path: $bin (missing or not executable)"
+                echo
+                return 0
+              fi
+              echo "path: $bin"
+            else
+              if ! command -v "$bin" >/dev/null 2>&1; then
+                echo "path: (not found in PATH)"
+                echo
+                return 0
+              fi
+              echo "path: $(command -v "$bin")"
+            fi
+      
+            # Try a few common patterns; stop at the first that works.
+            if "$bin" --version >/dev/null 2>&1; then
+              "$bin" --version
+            elif "$bin" version >/dev/null 2>&1; then
+              "$bin" version
+            elif "$bin" -V >/dev/null 2>&1; then
+              "$bin" -V
+            elif "$bin" -v >/dev/null 2>&1; then
+              "$bin" -v
+            else
+              echo "version: (no supported version flag detected)"
+            fi
+            echo
+          }
+      
+          echo "=== Podman static binaries (/usr/local/bin) ==="
+          show_ver "podman (static)"       /usr/local/bin/podman
+          show_ver "crun (static)"         /usr/local/bin/crun
+          show_ver "runc (static)"         /usr/local/bin/runc
+          show_ver "fuse-overlayfs (static)" /usr/local/bin/fuse-overlayfs
+          show_ver "fusermount3 (static)"  /usr/local/bin/fusermount3
+          show_ver "pasta (static)"        /usr/local/bin/pasta
+          show_ver "pasta.avx2 (static)"   /usr/local/bin/pasta.avx2
+      
+          echo "=== System binaries (PATH) you care about ==="
+          show_ver "fuse-overlayfs (PATH)" fuse-overlayfs
+          show_ver "squashfuse (PATH)"     squashfuse
+          show_ver "fusermount3 (PATH)"    fusermount3
+          show_ver "crun (PATH)"           crun
+          show_ver "runc (PATH)"           runc
+          show_ver "podman (PATH)"         podman
+          show_ver "slirp4netns (PATH)"    slirp4netns
+          show_ver "netavark (PATH)"       netavark
+          show_ver "aardvark-dns (PATH)"   aardvark-dns
+      
+          echo "=== Podman view of runtime / helpers (podman info) ==="
+          # This shows which runtime, conmon, network helper, etc. podman actually picked.
+          /usr/local/bin/podman info --debug || true
+
+
+
       - name: Rootless Podman host prerequisites (uidmap + subuid/subgid + slirp4netns)
         run: |
           set -euxo pipefail
