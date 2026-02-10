@@ -388,25 +388,15 @@ jobs:
             inotify-tools \
             build-essential
 
-
-      - name: Install squashfuse 0.6.1 from release tarball
+      - name: Install squashfuse + squashfuse_ll into /usr/bin (from tarball)
         shell: bash
         run: |
           set -euxo pipefail
 
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            ca-certificates \
-            curl \
-            pkg-config \
-            libfuse3-dev \
-            zlib1g-dev \
-            liblzma-dev \
-            liblzo2-dev \
-            liblz4-dev \
-            libzstd-dev \
-            libattr1-dev \
+            build-essential ca-certificates curl pkg-config \
+            libfuse3-dev zlib1g-dev liblzma-dev liblzo2-dev liblz4-dev libzstd-dev libattr1-dev \
             tar
 
           work="$(mktemp -d)"
@@ -418,15 +408,37 @@ jobs:
           test -n "$srcdir"
 
           pushd "$srcdir"
-          ./configure --prefix=/usr/local
+
+          # Install into /usr so binaries go to /usr/bin
+          ./configure --prefix=/usr
+
+          # Build everything (including squashfuse_ll if supported)
           make -j"$(nproc)"
+
+          # Install into /usr/bin
           sudo make install
+
           popd
 
-          # Verify
-          /usr/local/bin/squashfuse --version || true
-          command -v squashfuse
-          squashfuse --version || true
+          echo "=== Installed paths ==="
+          ls -l /usr/bin/squashfuse || true
+          ls -l /usr/bin/squashfuse_ll || true
+
+          # Hard requirements
+          test -x /usr/bin/squashfuse
+
+          # If squashfuse_ll still isn't present, fail loudly with context
+          if [ ! -x /usr/bin/squashfuse_ll ]; then
+            echo "ERROR: /usr/bin/squashfuse_ll was not installed."
+            echo "Build outputs containing 'll' (if any):"
+            find "$srcdir" -maxdepth 2 -type f -name '*squashfuse*ll*' -o -name '*ll*.o' || true
+            echo "Maybe the build disabled LL binary on this platform/config."
+            exit 1
+          fi
+
+          echo "=== Versions ==="
+          /usr/bin/squashfuse --version || true
+          /usr/bin/squashfuse_ll --version || true
 
 
 
@@ -726,6 +738,7 @@ jobs:
 
           set +e
           # dev pts crash debug
+          #/usr/local/bin/podman --log-level=debug --module hpc \
           /usr/local/bin/podman --log-level=debug --module hpc \
             run --rm \
             --runtime-flag log=/tmp/crun.log \
@@ -734,6 +747,7 @@ jobs:
           echo "podman rc=${rc:-0}"
           #sudo sed -n '1,200p' /tmp/crun.log || true
 
+          #/usr/local/bin/podman --log-level=debug --module hpc \
           /usr/local/bin/podman --log-level=debug --module hpc \
             run --rm --pid=private\
             --runtime-flag log=/tmp/crun.log \
