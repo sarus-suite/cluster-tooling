@@ -752,7 +752,7 @@ jobs:
             busybox:latest echo "default ok" || rc=$?
 
           echo "podman rc=${rc:-0}"
-          sudo sed -n '1,200p' /tmp/crun.log || true
+          #sudo sed -n '1,200p' /tmp/crun.log || true
 
           /usr/local/bin/podman --log-level=debug --module hpc \
             run --rm --pid=private\
@@ -760,7 +760,7 @@ jobs:
             busybox:latest echo "private ok" || rc=$?
 
           echo "podman rc=${rc:-0}"
-          sudo sed -n '1,200p' /tmp/crun.log || true
+          #sudo sed -n '1,200p' /tmp/crun.log || true
 
 
           srun -p debug -A default -J srun-skybox -n 1 --edf=busybox echo 'ok :D'
