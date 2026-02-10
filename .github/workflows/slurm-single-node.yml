@@ -556,5 +556,5 @@ jobs:
               --runroot "$PODMAN_RUNROOT" \
               --storage-opt additionalimagestore="$RO_STORAGE" \
               --storage-opt mount_program="$MOUNT_PROGRAM_PATH" \
-              run --rm busybox:latest echo "ok (srun + parallax ro-store)"
+              run --rm busybox:latest echo "ok (from srun + parallax ro-store)"
           '
