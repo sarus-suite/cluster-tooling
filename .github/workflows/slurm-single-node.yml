@@ -527,7 +527,6 @@ jobs:
       
           echo "=== System binaries (PATH) you care about ==="
           show_ver "fuse-overlayfs (PATH)" fuse-overlayfs
-          show_ver "squashfuse (PATH)"     squashfuse
           show_ver "fusermount3 (PATH)"    fusermount3
           show_ver "crun (PATH)"           crun
           show_ver "runc (PATH)"           runc
@@ -536,14 +535,12 @@ jobs:
           show_ver "netavark (PATH)"       netavark
           show_ver "aardvark-dns (PATH)"   aardvark-dns
 
+          echo "=== output for squashfuse ==="
           squashfuse --version |& head -n 1
+          echo
 
           echo "=== Podman view of runtime / helpers (podman info) ==="
-          # This shows which runtime, conmon, network helper, etc. podman actually picked.
           /usr/local/bin/podman info --debug || true
-
-          false
-
 
 
       - name: Rootless Podman host prerequisites (uidmap + subuid/subgid + slirp4netns)
