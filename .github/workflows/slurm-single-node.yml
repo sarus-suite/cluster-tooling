@@ -58,9 +58,11 @@ jobs:
       - name: Build libskybox.so in devcontainer (fail early on build)
         uses: devcontainers/ci@v0.3
         with:
-          imageName: ghcr.io/${{ github.repository }}/skybox-devcontainer
-          push: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') }}
           configFile: .devcontainer/ubuntu/devcontainer.json
+          imageName: ghcr.io/${{ github.repository }}/skybox-devcontainer
+          cacheFrom: ghcr.io/${{ github.repository }}/skybox-devcontainer
+          push: filter
+          refFilterForPush: refs/heads/main
           runCmd: |
             set -euxo pipefail
       
