@@ -762,11 +762,11 @@ jobs:
 
 
           ## Test squashfuse parametrization permissions
-          cat > "$HOME/.edf/ubuntu.edf" <<'EOF'
-          image="library/ubuntu:22.04"
+          cat > "$HOME/.edf/ubuntu.toml" <<'EOF'
+          image = "library/ubuntu:22.04"
           EOF
-          echo "=== $HOME/.edf/ubuntu.edf ==="
-          cat "$HOME/.edf/ubuntu.edf"
+          echo "=== $HOME/.edf/ubuntu.toml ==="
+          cat "$HOME/.edf/ubuntu.toml"
 
           srun -p debug -t 3 -A default -J srun-skybox-2 -n 1 --edf=ubuntu \
             stat -c '%U %u %G %g' /
