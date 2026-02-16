@@ -643,7 +643,7 @@ jobs:
           # Run a tiny container rootless
           podman run --rm docker.io/library/alpine:3.20 echo "ok (rootless podman)"
 
-      - name: Install Parallax + mount program (v0.9.9 release binaries)
+      - name: Install Parallax + mount program (v0.9.10 release binaries)
         run: |
           set -euxo pipefail
 
@@ -652,13 +652,13 @@ jobs:
           # parallax binary
           sudo curl -fsSL \
             -o /usr/local/bin/parallax \
-            https://github.com/sarus-suite/parallax/releases/download/v0.9.9/parallax-v0.9.9-ubuntu-24.04-amd64
+            https://github.com/sarus-suite/parallax/releases/download/v0.9.10/parallax-v0.9.10-ubuntu-24.04-amd64
           sudo chmod 0755 /usr/local/bin/parallax
 
           # mount program (script)
           sudo curl -fsSL \
             -o /usr/local/bin/parallax-mount-program \
-            https://github.com/sarus-suite/parallax/releases/download/v0.9.9/parallax-mount-program-v0.9.9.sh
+            https://github.com/sarus-suite/parallax/releases/download/v0.9.10/parallax-mount-program-v0.9.10.sh
           sudo chmod 0755 /usr/local/bin/parallax-mount-program
 
           # sanity
