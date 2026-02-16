@@ -760,6 +760,18 @@ jobs:
 
           srun -p debug -t 3 -A default -J srun-skybox --chdir=/tmp -n 1 --edf=busybox echo 'ok :D'
 
+
+          ## Test squashfuse parametrization permissions
+          cat > "$HOME/.edf/ubuntu.edf" <<'EOF'
+          image="library/ubuntu:22.04"
+          EOF
+          echo "=== $HOME/.edf/ubuntu.edf ==="
+          cat "$HOME/.edf/ubuntu.edf"
+
+          srun -p debug -t 3 -A default -J srun-skybox-2 -n 1 --edf=ubuntu \
+            stat -c '%U %u %G %g' /
+
+          ## output all slurm related logs that are relevant to debug skybox
           echo "=== slurmd log tail ==="
           sudo tail -n 200 /var/log/slurm/slurmd.log || true
           
