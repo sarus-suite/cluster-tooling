@@ -28,17 +28,8 @@ pub struct RawEDF {
     devices: Option<Vec<String>>,
     entrypoint: Option<bool>,
     env: Option<HashMap<String, String>>,
-    engine: Option<String>,
     image: Option<String>,
     mounts: Option<Vec<String>>,
-    parallax_enable: Option<bool>,
-    parallax_imagestore: Option<String>,
-    parallax_path: Option<String>,
-    parallax_mount_program: Option<String>,
-    perfmon: Option<bool>,
-    podman_module: Option<String>,
-    podman_path: Option<String>,
-    podman_tmp_path: Option<String>,
     workdir: Option<String>,
     writable: Option<bool>,
 }
@@ -57,22 +48,6 @@ pub struct EDF {
     pub image: String,
     #[serde(default = "get_default_mounts")]
     pub mounts: SarusMounts,
-    #[serde(default = "get_default_parallax_enable")]
-    pub parallax_enable: bool,
-    #[serde(default = "get_default_parallax_imagestore")]
-    pub parallax_imagestore: String,
-    #[serde(default = "get_default_parallax_mount_program")]
-    pub parallax_mount_program: String,
-    #[serde(default = "get_default_parallax_path")]
-    pub parallax_path: String,
-    #[serde(default = "get_default_perfmon")]
-    pub perfmon: bool,
-    #[serde(default = "get_default_podman_module")]
-    pub podman_module: String,
-    #[serde(default = "get_default_podman_path")]
-    pub podman_path: String,
-    #[serde(default = "get_default_podman_tmp_path")]
-    pub podman_tmp_path: String,
     #[serde(default = "get_default_workdir")]
     pub workdir: String,
     #[serde(default = "get_default_writable")]
@@ -143,30 +118,6 @@ impl RawEDF {
         if i.image.is_some() {
             self.image = i.image;
         }
-        if i.parallax_enable.is_some() {
-            self.parallax_enable = i.parallax_enable;
-        }
-        if i.parallax_imagestore.is_some() {
-            self.parallax_imagestore = i.parallax_imagestore;
-        }
-        if i.parallax_mount_program.is_some() {
-            self.parallax_mount_program = i.parallax_mount_program;
-        }
-        if i.parallax_path.is_some() {
-            self.parallax_path = i.parallax_path;
-        }
-        if i.perfmon.is_some() {
-            self.perfmon = i.perfmon;
-        }
-        if i.podman_module.is_some() {
-            self.podman_module = i.podman_module;
-        }
-        if i.podman_path.is_some() {
-            self.podman_path = i.podman_path;
-        }
-        if i.podman_tmp_path.is_some() {
-            self.podman_tmp_path = i.podman_tmp_path;
-        }
         if i.workdir.is_some() {
             self.workdir = i.workdir;
         }
@@ -226,39 +177,6 @@ fn get_default_env() -> HashMap<String, String> {
 fn get_default_mounts() -> SarusMounts {
     return vec![];
 }
-
-fn get_default_parallax_enable() -> bool {
-    return true;
-}
-
-fn get_default_parallax_imagestore() -> String {
-    return String::from("");
-}
-
-fn get_default_parallax_mount_program() -> String {
-    return String::from("");
-}
-
-fn get_default_perfmon() -> bool {
-    return false;
-}
-
-fn get_default_podman_module() -> String {
-    return String::from("hpc");
-}
-
-fn get_default_podman_path() -> String {
-    return String::from("podman");
-}
-
-fn get_default_podman_tmp_path() -> String {
-    return String::from("/dev/shm");
-}
-
-fn get_default_parallax_path() -> String {
-    return String::from("parallax");
-}
-
 fn get_default_workdir() -> String {
     return String::from("");
 }
@@ -267,12 +185,6 @@ fn get_default_writable() -> bool {
     return true;
 }
 
-/*
-impl TryFrom<RawEDF, uenv: &Option<HashMap<String,String>>> for EDF {
-    type Error = SarusError;
-
-    fn try_from(r: RawEDF, uenv: &Option<HashMap<String,String>>) -> SarusResult<Self> {
-*/
 fn edf_from_raw(r: RawEDF, uenv: &Option<HashMap<String, String>>) -> SarusResult<EDF> {
     Ok(EDF {
         annotations: match r.annotations {
@@ -305,38 +217,6 @@ fn edf_from_raw(r: RawEDF, uenv: &Option<HashMap<String, String>>) -> SarusResul
             Some(s) => sarus_mounts_from_strings(s, uenv)?,
             None => get_default_mounts(),
         },
-        parallax_enable: match r.parallax_enable {
-            Some(s) => s,
-            None => get_default_parallax_enable(),
-        },
-        parallax_imagestore: match r.parallax_imagestore {
-            Some(s) => s,
-            None => get_default_parallax_imagestore(),
-        },
-        parallax_mount_program: match r.parallax_mount_program {
-            Some(s) => s,
-            None => get_default_parallax_mount_program(),
-        },
-        parallax_path: match r.parallax_path {
-            Some(s) => s,
-            None => get_default_parallax_path(),
-        },
-        perfmon: match r.perfmon {
-            Some(s) => s,
-            None => get_default_perfmon(),
-        },
-        podman_module: match r.podman_module {
-            Some(s) => s,
-            None => get_default_podman_module(),
-        },
-        podman_path: match r.podman_path {
-            Some(s) => s,
-            None => get_default_podman_path(),
-        },
-        podman_tmp_path: match r.podman_tmp_path {
-            Some(s) => s,
-            None => get_default_podman_tmp_path(),
-        },
         workdir: match r.workdir {
             Some(s) => s,
             None => get_default_workdir(),
@@ -346,7 +226,6 @@ fn edf_from_raw(r: RawEDF, uenv: &Option<HashMap<String, String>>) -> SarusResul
             None => get_default_writable(),
         },
     })
-    //    }
 }
 
 fn load(file_path: &str) -> Result<String, Box<dyn Error>> {
@@ -661,34 +540,6 @@ fn render_inner_loop(
         h = expand_vars_hashmap(h, env)?;
         cur_redf.annotations = Some(Annotations::TypeHashMap(h));
     }
-    if cur_redf.engine.is_some() {
-        cur_redf.engine = Some(expand_vars_string(cur_redf.engine.unwrap(), env)?);
-    }
-    if cur_redf.parallax_imagestore.is_some() {
-        cur_redf.parallax_imagestore = Some(expand_vars_string(
-            cur_redf.parallax_imagestore.unwrap(),
-            env,
-        )?);
-    }
-    if cur_redf.parallax_path.is_some() {
-        cur_redf.parallax_path = Some(expand_vars_string(cur_redf.parallax_path.unwrap(), env)?);
-    }
-    if cur_redf.parallax_mount_program.is_some() {
-        cur_redf.parallax_mount_program = Some(expand_vars_string(
-            cur_redf.parallax_mount_program.unwrap(),
-            env,
-        )?);
-    }
-    if cur_redf.podman_module.is_some() {
-        cur_redf.podman_module = Some(expand_vars_string(cur_redf.podman_module.unwrap(), env)?);
-    }
-    if cur_redf.podman_path.is_some() {
-        cur_redf.podman_path = Some(expand_vars_string(cur_redf.podman_path.unwrap(), env)?);
-    }
-    if cur_redf.podman_tmp_path.is_some() {
-        cur_redf.podman_tmp_path =
-            Some(expand_vars_string(cur_redf.podman_tmp_path.unwrap(), env)?);
-    }
     if cur_redf.workdir.is_some() {
         cur_redf.workdir = Some(expand_vars_string(cur_redf.workdir.unwrap(), env)?);
     }
@@ -705,7 +556,6 @@ pub fn render_from_search_paths(
     let max_levels = 10;
     let loop_count = 0;
     let raw = render_inner_loop(path, &sp, env, loop_count, max_levels)?;
-    //let e = EDF::try_from(raw, env)?;
     let e = edf_from_raw(raw, env)?;
     Ok(e)
 }
