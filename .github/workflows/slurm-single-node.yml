@@ -759,10 +759,10 @@ jobs:
 
 
           #/usr/local/bin/podman --log-level=debug --module hpc \
-          "$PODMAN_BINARY" --module hpc \
+          PARALLAX_MP_UID=$(id -u) PARALLAX_MP_GID=$(id -g) "$PODMAN_BINARY" --module hpc \
             run --rm --pid=private\
             --runtime-flag log=/tmp/crun.log \
-            busybox:latest stat -c '%U %u %G %g %n' /etc/os-release /bin/sh
+            busybox:latest stat -c '%U %u %G %g %n' /bin/sh
 
 
           srun -p debug -t 3 -A default -J srun-skybox --chdir=/tmp -n 1 --edf=busybox echo 'ok :D'
