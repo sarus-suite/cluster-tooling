@@ -607,7 +607,7 @@ jobs:
           netns = "host"
           pidns = "host"
           utsns = "host"
-          #userns = "keep-id"
+          userns = "keep-id"
           cgroupns = "host"
           cgroups = "no-conmon"
       
@@ -780,7 +780,7 @@ jobs:
           cat "$HOME/.edf/ubuntu.toml"
 
           srun -p debug -t 3 -A default -J srun-skybox-2 -n 1 --edf=ubuntu \
-            stat -c '%U %u %G %g' /
+            stat -c '%U %u %G %g %n' /etc/os-release /bin/sh
 
           ## output mount program logs
           echo "=== mount program log tail ==="
