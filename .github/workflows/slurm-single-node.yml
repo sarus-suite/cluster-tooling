@@ -758,14 +758,8 @@ jobs:
           #sudo sed -n '1,200p' /tmp/crun.log || true
 
 
-          #/usr/local/bin/podman --log-level=debug --module hpc \
-          PARALLAX_MP_UID=$(id -u) PARALLAX_MP_GID=$(id -g) "$PODMAN_BINARY" --module hpc \
-            run --rm --pid=private\
-            --runtime-flag log=/tmp/crun.log \
-            busybox:latest stat -c '%U %u %G %g %n' /bin/sh
 
 
-          srun -p debug -t 3 -A default -J srun-skybox --chdir=/tmp -n 1 --edf=busybox echo 'ok :D'
 
           # temp debug log to mp
           MOUNT_PROG="/usr/local/bin/parallax-mount-program"
@@ -777,6 +771,24 @@ jobs:
           sudo sed -i \
             's|output=$(\"\$SQUASHFUSE_CMD\" \"\$squash_file\" \"\$target_dir\" \"\${SQUASHFUSE_OPTS\[@\]}\" 2>&1)|output=$("\$SQUASHFUSE_CMD" "\${SQUASHFUSE_OPTS[@]}" "\$squash_file" "\$target_dir"  2>&1)|' \
             "$MOUNT_PROG"
+
+
+
+          #/usr/local/bin/podman --log-level=debug --module hpc \
+          export PARALLAX_MP_UID=$(id -u)
+          export PARALLAX_MP_GID=$(id -g)
+          "$PODMAN_BINARY" --module hpc \
+            run --rm \
+            --runtime-flag log=/tmp/crun.log \
+            busybox:latest stat -c '%U %u %G %g %n' /bin/sh
+
+          ## output mount program logs
+          echo "=== mount program log tail ==="
+          sudo tail -n 200 /tmp/parallax-*/mount_program.log || true
+
+
+          srun -p debug -t 3 -A default -J srun-skybox --chdir=/tmp -n 1 --edf=busybox echo 'ok :D'
+
 
 
           ## Test squashfuse parametrization permissions
