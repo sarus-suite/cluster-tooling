@@ -766,6 +766,10 @@ jobs:
             's|log "INFO" "Mounting squash file\."|log "INFO" "Running (Mounting squash file\.): $SQUASHFUSE_CMD $squash_file $target_dir ${SQUASHFUSE_OPTS[*]}"|' \
             "$MOUNT_PROG"
 
+          # reorder mp options
+          sudo sed -i \
+            's|output=$(\"\$SQUASHFUSE_CMD\" \"\$squash_file\" \"\$target_dir\" \"\${SQUASHFUSE_OPTS\[@\]}\" 2>&1)|output=$("\$SQUASHFUSE_CMD" "\${SQUASHFUSE_OPTS[@]}" "\$squash_file" "\$target_dir"  2>&1)|' \
+            "$MOUNT_PROG"
 
 
           ## Test squashfuse parametrization permissions
