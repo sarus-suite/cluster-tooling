@@ -607,7 +607,7 @@ jobs:
           netns = "host"
           pidns = "host"
           utsns = "host"
-          #userns = "keep-id"
+          userns = "keep-id"
           cgroupns = "host"
           cgroups = "no-conmon"
       
@@ -756,6 +756,13 @@ jobs:
 
           echo "podman rc=${rc:-0}"
           #sudo sed -n '1,200p' /tmp/crun.log || true
+
+
+          #/usr/local/bin/podman --log-level=debug --module hpc \
+          "$PODMAN_BINARY" --module hpc \
+            run --rm --pid=private\
+            --runtime-flag log=/tmp/crun.log \
+            busybox:latest stat -c '%U %u %G %g %n' /etc/os-release /bin/sh
 
 
           srun -p debug -t 3 -A default -J srun-skybox --chdir=/tmp -n 1 --edf=busybox echo 'ok :D'
