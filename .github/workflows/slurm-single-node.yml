@@ -783,6 +783,10 @@ jobs:
           rm /tmp/parallax-*/mount_program.log
 
           "$PODMAN_BINARY" --module hpc \
+            --root "$CLEAN_ROOT" \
+            --runroot "$PODMAN_RUNROOT" \
+            --storage-opt additionalimagestore="$RO_STORAGE" \
+            --storage-opt mount_program="$MOUNT_PROGRAM_PATH" \
             run --rm --userns=keep-id \
             --runtime-flag log=/tmp/crun.log \
             busybox:latest stat -c '%U %u %G %g %n' /bin/sh
