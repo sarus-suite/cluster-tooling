@@ -678,6 +678,25 @@ jobs:
         run: |
           set -euxo pipefail
 
+
+          # temp debug log to mp
+          MOUNT_PROG="/usr/local/bin/parallax-mount-program"
+          sudo sed -i \
+            's|log "INFO" "Mounting squash file\."|log "INFO" "Running (Mounting squash file\.): $SQUASHFUSE_CMD $squash_file $target_dir ${SQUASHFUSE_OPTS[*]}"|' \
+            "$MOUNT_PROG"
+
+          # reorder mp options
+          sudo sed -i \
+            's|output=$(\"\$SQUASHFUSE_CMD\" \"\$squash_file\" \"\$target_dir\" \"\${SQUASHFUSE_OPTS\[@\]}\" 2>&1)|output=$("\$SQUASHFUSE_CMD" "\${SQUASHFUSE_OPTS[@]}" "\$squash_file" "\$target_dir"  2>&1)|' \
+            "$MOUNT_PROG"
+
+          export PARALLAX_MP_UID=$(id -u)
+          export PARALLAX_MP_GID=$(id -g)
+
+
+
+
+
           export PODMAN_BINARY="$(command -v podman)"
           export PARALLAX_BINARY="$(command -v parallax)"
           export MOUNT_PROGRAM_PATH="$(command -v parallax-mount-program)"
@@ -740,43 +759,29 @@ jobs:
           set +e
           # dev pts crash debug
           #/usr/local/bin/podman --log-level=debug --module hpc \
-          "$PODMAN_BINARY" --module hpc \
-            run --rm \
-            --runtime-flag log=/tmp/crun.log \
-            busybox:latest echo "default ok" || rc=$?
+          #"$PODMAN_BINARY" --module hpc \
+          #  run --rm \
+          #  --runtime-flag log=/tmp/crun.log \
+          #  busybox:latest echo "default ok" || rc=$?
 
-          echo "podman rc=${rc:-0}"
+          #echo "podman rc=${rc:-0}"
           #sudo sed -n '1,200p' /tmp/crun.log || true
 
           #/usr/local/bin/podman --log-level=debug --module hpc \
-          "$PODMAN_BINARY" --module hpc \
-            run --rm --pid=private\
-            --runtime-flag log=/tmp/crun.log \
-            busybox:latest echo "private ok" || rc=$?
+          #          "$PODMAN_BINARY" --module hpc \
+          #            run --rm --pid=private\
+          #            --runtime-flag log=/tmp/crun.log \
+          #            busybox:latest echo "private ok" || rc=$?
 
-          echo "podman rc=${rc:-0}"
+          #echo "podman rc=${rc:-0}"
           #sudo sed -n '1,200p' /tmp/crun.log || true
 
 
 
 
 
-          # temp debug log to mp
-          MOUNT_PROG="/usr/local/bin/parallax-mount-program"
-          sudo sed -i \
-            's|log "INFO" "Mounting squash file\."|log "INFO" "Running (Mounting squash file\.): $SQUASHFUSE_CMD $squash_file $target_dir ${SQUASHFUSE_OPTS[*]}"|' \
-            "$MOUNT_PROG"
-
-          # reorder mp options
-          sudo sed -i \
-            's|output=$(\"\$SQUASHFUSE_CMD\" \"\$squash_file\" \"\$target_dir\" \"\${SQUASHFUSE_OPTS\[@\]}\" 2>&1)|output=$("\$SQUASHFUSE_CMD" "\${SQUASHFUSE_OPTS[@]}" "\$squash_file" "\$target_dir"  2>&1)|' \
-            "$MOUNT_PROG"
 
 
-
-          #/usr/local/bin/podman --log-level=debug --module hpc \
-          export PARALLAX_MP_UID=$(id -u)
-          export PARALLAX_MP_GID=$(id -g)
           "$PODMAN_BINARY" --module hpc \
             run --rm \
             --runtime-flag log=/tmp/crun.log \
@@ -786,6 +791,7 @@ jobs:
           echo "=== mount program log tail ==="
           sudo tail -n 200 /tmp/parallax-*/mount_program.log || true
 
+          sleep 2
 
           srun -p debug -t 3 -A default -J srun-skybox --chdir=/tmp -n 1 --edf=busybox echo 'ok :D'
 
