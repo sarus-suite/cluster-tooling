@@ -760,6 +760,13 @@ jobs:
 
           srun -p debug -t 3 -A default -J srun-skybox --chdir=/tmp -n 1 --edf=busybox echo 'ok :D'
 
+          # temp debug log to mp
+          MOUNT_PROG="/usr/local/bin/parallax-mount-program"
+          sudo sed -i \
+            's|log "INFO" "Mounting squash file\."|log "INFO" "Running (Mounting squash file\.): $SQUASHFUSE_CMD $squash_file $target_dir ${SQUASHFUSE_OPTS[*]}"|' \
+            "$MOUNT_PROG"
+
+
 
           ## Test squashfuse parametrization permissions
           cat > "$HOME/.edf/ubuntu.toml" <<'EOF'
