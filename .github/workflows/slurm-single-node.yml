@@ -652,13 +652,13 @@ jobs:
           # parallax binary
           sudo curl -fsSL \
             -o /usr/local/bin/parallax \
-            https://github.com/sarus-suite/parallax/releases/download/v0.9.10/parallax-v0.9.10-ubuntu-24.04-amd64
+            https://github.com/sarus-suite/parallax/releases/download/v0.9.12/parallax-v0.9.12-ubuntu-24.04-amd64
           sudo chmod 0755 /usr/local/bin/parallax
 
           # mount program (script)
           sudo curl -fsSL \
             -o /usr/local/bin/parallax-mount-program \
-            https://github.com/sarus-suite/parallax/releases/download/v0.9.10/parallax-mount-program-v0.9.10.sh
+            https://github.com/sarus-suite/parallax/releases/download/v0.9.12/parallax-mount-program-v0.9.12.sh
           sudo chmod 0755 /usr/local/bin/parallax-mount-program
 
           # sanity
@@ -679,16 +679,6 @@ jobs:
           set -euxo pipefail
 
 
-          # temp debug log to mp
-          MOUNT_PROG="/usr/local/bin/parallax-mount-program"
-          sudo sed -i \
-            's|log "INFO" "Mounting squash file\."|log "INFO" "Running (Mounting squash file\.): $SQUASHFUSE_CMD $squash_file $target_dir ${SQUASHFUSE_OPTS[*]}"|' \
-            "$MOUNT_PROG"
-
-          # reorder mp options
-          sudo sed -i \
-            's|output=$(\"\$SQUASHFUSE_CMD\" \"\$squash_file\" \"\$target_dir\" \"\${SQUASHFUSE_OPTS\[@\]}\" 2>&1)|output=$("\$SQUASHFUSE_CMD" "\${SQUASHFUSE_OPTS[@]}" "\$squash_file" "\$target_dir"  2>&1)|' \
-            "$MOUNT_PROG"
 
           export PARALLAX_MP_UID=$(id -u)
           export PARALLAX_MP_GID=$(id -g)
