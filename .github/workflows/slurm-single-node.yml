@@ -643,7 +643,7 @@ jobs:
           # Run a tiny container rootless
           podman run --rm docker.io/library/alpine:3.20 echo "ok (rootless podman)"
 
-      - name: Install Parallax + mount program (v0.9.9 release binaries)
+      - name: Install Parallax + mount program (v0.9.10 release binaries)
         run: |
           set -euxo pipefail
 
@@ -652,13 +652,13 @@ jobs:
           # parallax binary
           sudo curl -fsSL \
             -o /usr/local/bin/parallax \
-            https://github.com/sarus-suite/parallax/releases/download/v0.9.9/parallax-v0.9.9-ubuntu-24.04-amd64
+            https://github.com/sarus-suite/parallax/releases/download/v0.9.12/parallax-v0.9.12-ubuntu-24.04-amd64
           sudo chmod 0755 /usr/local/bin/parallax
 
           # mount program (script)
           sudo curl -fsSL \
             -o /usr/local/bin/parallax-mount-program \
-            https://github.com/sarus-suite/parallax/releases/download/v0.9.9/parallax-mount-program-v0.9.9.sh
+            https://github.com/sarus-suite/parallax/releases/download/v0.9.12/parallax-mount-program-v0.9.12.sh
           sudo chmod 0755 /usr/local/bin/parallax-mount-program
 
           # sanity
@@ -677,6 +677,15 @@ jobs:
       - name: Parallax basic smoke test (with rootless Podman)
         run: |
           set -euxo pipefail
+
+
+
+          export PARALLAX_MP_UID=$(id -u)
+          export PARALLAX_MP_GID=$(id -g)
+          export PARALLAX_MP_SQUASHFUSE_CMD=/usr/bin/squashfuse_ll
+
+
+
 
           export PODMAN_BINARY="$(command -v podman)"
           export PARALLAX_BINARY="$(command -v parallax)"
@@ -740,29 +749,66 @@ jobs:
           set +e
           # dev pts crash debug
           #/usr/local/bin/podman --log-level=debug --module hpc \
-          "$PODMAN_BINARY" --module hpc \
-            run --rm \
-            --runtime-flag log=/tmp/crun.log \
-            busybox:latest echo "default ok" || rc=$?
+          #"$PODMAN_BINARY" --module hpc \
+          #  run --rm \
+          #  --runtime-flag log=/tmp/crun.log \
+          #  busybox:latest echo "default ok" || rc=$?
 
-          echo "podman rc=${rc:-0}"
+          #echo "podman rc=${rc:-0}"
           #sudo sed -n '1,200p' /tmp/crun.log || true
 
           #/usr/local/bin/podman --log-level=debug --module hpc \
-          "$PODMAN_BINARY" --module hpc \
-            run --rm --pid=private\
-            --runtime-flag log=/tmp/crun.log \
-            busybox:latest echo "private ok" || rc=$?
+          #          "$PODMAN_BINARY" --module hpc \
+          #            run --rm --pid=private\
+          #            --runtime-flag log=/tmp/crun.log \
+          #            busybox:latest echo "private ok" || rc=$?
 
-          echo "podman rc=${rc:-0}"
+          #echo "podman rc=${rc:-0}"
           #sudo sed -n '1,200p' /tmp/crun.log || true
 
 
+
+
+
+          rm /tmp/parallax-*/mount_program.log
+
+          "$PODMAN_BINARY" --module hpc \
+            --root "$CLEAN_ROOT" \
+            --runroot "$PODMAN_RUNROOT" \
+            --storage-opt additionalimagestore="$RO_STORAGE" \
+            --storage-opt mount_program="$MOUNT_PROGRAM_PATH" \
+            run --rm --userns=keep-id \
+            --runtime-flag log=/tmp/crun.log \
+            busybox:latest stat -c '%U %u %G %g %n' /bin/sh
+
+          ## output mount program logs
+          echo "=== mount program log tail ==="
+          sudo tail -n 200 /tmp/parallax-*/mount_program.log || true
+
+          sleep 2
+
           srun -p debug -t 3 -A default -J srun-skybox --chdir=/tmp -n 1 --edf=busybox echo 'ok :D'
 
+
+
+          ## Test squashfuse parametrization permissions
+          cat > "$HOME/.edf/ubuntu.toml" <<'EOF'
+          image = "library/ubuntu:22.04"
+          EOF
+          echo "=== $HOME/.edf/ubuntu.toml ==="
+          cat "$HOME/.edf/ubuntu.toml"
+
+          srun -p debug -t 3 -A default -J srun-skybox-2 -n 1 --edf=ubuntu \
+            stat -c '%U %u %G %g %n' /etc/os-release /bin/sh
+
+          ## output mount program logs
+          echo "=== mount program log tail ==="
+          #          sudo tail -n 200 /tmp/parallax-*/mount_program.log || true
+
+          ## output all slurm related logs that are relevant to debug skybox
           echo "=== slurmd log tail ==="
-          sudo tail -n 200 /var/log/slurm/slurmd.log || true
+          #          sudo tail -n 200 /var/log/slurm/slurmd.log || true
           
           echo "=== slurmctld log tail ==="
-          sudo tail -n 200 /var/log/slurm/slurmctld.log || true
+          #          sudo tail -n 200 /var/log/slurm/slurmctld.log || true
 

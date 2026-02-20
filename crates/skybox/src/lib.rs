@@ -7,6 +7,7 @@ use std::os::unix::fs::{PermissionsExt, chown};
 //use std::os::raw::c_int;
 use std::path::Path;
 //use std::sync::{Arc, Mutex};
+use nix::unistd::{geteuid, getegid};
 
 use slurm_spank::{Plugin, SLURM_VERSION_NUMBER, SPANK_PLUGIN, SpankHandle};
 
@@ -72,6 +73,8 @@ struct Job {
     local_task_count: u32,
     total_task_count: u32,
     cwd: String,
+    euid: uid_t,
+    egid: gid_t,
 }
 
 #[derive(Clone, Serialize, Default)]
@@ -100,6 +103,13 @@ macro_rules! skybox_log_error {
 macro_rules! skybox_log_info {
     ($($arg:tt)*) => ({
         slurm_spank::spank_log(slurm_spank::LogLevel::Info, &format!("[{}] {}", $crate::get_plugin_name(), &format!($($arg)*)));
+    })
+}
+
+#[macro_export]
+macro_rules! skybox_log_user {
+    ($($arg:tt)*) => ({
+        slurm_spank::slurm_spank_log(&format!("[{}] {}", $crate::get_plugin_name(), &format!($($arg)*)));
     })
 }
 
@@ -169,7 +179,20 @@ pub(crate) fn job_get_info(
         local_task_count: spank.job_local_task_count()?,
         total_task_count: spank.job_total_task_count()?,
         cwd: cwd,
+        euid: geteuid().as_raw(),
+        egid: getegid().as_raw(),
     });
+
+    // grab euid to use by squashfuse downstream to mount program
+    if let Some(job) = ssb.job.as_ref() {
+        skybox_log_debug!(
+            "job uid/gid={}/{} euid/egid={}/{}",
+            job.uid,
+            job.gid,
+            job.euid,
+            job.egid
+        );
+    }
 
     Ok(())
 }
@@ -199,7 +222,7 @@ pub(crate) fn run_set_info(
 ) -> Result<(), Box<dyn Error>> {
     let config = ssb.config.clone();
     let job = ssb.job.clone().unwrap();
-    let edf = ssb.edf.clone().unwrap();
+    //let edf = ssb.edf.clone().unwrap();
 
     let mut step_name = format!("{}", job.stepid);
     if job.stepid == SLURM_BATCH_SCRIPT {
@@ -208,7 +231,7 @@ pub(crate) fn run_set_info(
 
     let name = format!("{}_{}.{}", get_plugin_name(), job.jobid, step_name);
     let podman_tmp_path = format!("{}/{}", config.podman_tmp_path, name);
-    let syncfile_path = format!("{}/.{}_import.done", edf.parallax_imagestore, name);
+    let syncfile_path = format!("{}/.{}_import.done", config.parallax_imagestore, name);
 
     let pid = match podman_get_pid_from_file(ssb) {
         Ok(s) => s,

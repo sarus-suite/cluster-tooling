@@ -437,6 +437,17 @@ pub fn update_config_by_user(config: &mut Config, edf: EDF) -> SarusResult<()> {
     Ok(())
 }
 
+pub fn remove_sarus_annotations(edf: &mut EDF) -> SarusResult<()> {
+    let loop_edf = edf.clone();
+
+    for key in loop_edf.annotations.keys() {
+        if key.starts_with("com.sarus.") {
+            edf.annotations.remove(key);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
