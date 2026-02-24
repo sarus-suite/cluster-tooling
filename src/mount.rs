@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use std::collections::{HashMap, HashSet};
 
 use crate::common::expand_vars_string;
@@ -6,18 +6,45 @@ use crate::error::{SarusError, SarusResult};
 
 pub type SarusMounts = Vec<SarusMount>;
 
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Deserialize, Clone, PartialEq)]
 pub struct SarusMount {
     source: String,
     target: String,
     flags: String,
 }
 
+impl Serialize for SarusMount {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_volume_string())
+    }
+}
+
 impl SarusMount {
+
+    pub fn to_volume_string(&self) -> String {
+        if self.flags.is_empty() {
+            format!("{}:{}", self.source, self.target)
+        } else {
+            format!("{}:{}:{}", self.source, self.target, self.flags)
+        }
+    }
+
     pub fn try_new(
         input: String,
         uenv: &Option<HashMap<String, String>>,
     ) -> SarusResult<SarusMount> {
+
+        let mut m = Self::from_string(input)?;
+        m.render(uenv)?;
+        m.validate()?;
+
+        Ok(m)
+    }
+
+    fn from_string(input: String) -> SarusResult<SarusMount> {
         let mut a = input.split(":");
         let asize = a.clone().count();
 
@@ -32,17 +59,51 @@ impl SarusMount {
             });
         };
 
-        let mut s = a.next().unwrap();
+        let s = a.next().unwrap();
         let t = a.next().unwrap();
         let mut f = "";
         if asize == 3 {
             f = a.next().unwrap();
         }
 
-        let mut ps: std::path::PathBuf = std::path::Path::new(s).into();
-        let pt: std::path::PathBuf = std::path::Path::new(t).into();
+        let m = SarusMount {
+            source: String::from(s),
+            target: String::from(t),
+            flags: String::from(f),
+        };
 
-        if f == "sqsh" {
+        Ok(m)
+    }
+
+    fn render(
+        &mut self,
+        uenv: &Option<HashMap<String, String>>,
+    ) -> SarusResult<()> {
+
+        let mut i = self.clone();
+        i.translate_to_absolute()?;
+
+        let mut s = escape_mount(i.source);
+        let mut t = escape_mount(i.target);
+        s = expand_vars_string(s, uenv)?;
+        t = expand_vars_string(t, uenv)?;
+
+        i.source = s;
+        i.target = t;
+        i.flags = expand_vars_string(i.flags, uenv)?;
+        i.render_flags()?;
+        *self = i;
+
+        Ok(())
+    }
+
+    fn translate_to_absolute(&mut self) -> SarusResult<()> {
+
+        let mut i = self.clone();
+
+        if i.flags == "sqsh" {
+            let mut ps: std::path::PathBuf = std::path::Path::new(&i.source).into();
+
             if ps.starts_with(".") {
                 ps = match std::path::absolute(&ps) {
                     Err(_) => {
@@ -54,20 +115,10 @@ impl SarusMount {
                     }
                     Ok(ok) => ok,
                 }
-            } else if ps.starts_with("/") {
-                ()
-            } else {
-                return Err(SarusError {
-                    code: 10,
-                    file_path: None,
-                    msg: format!(
-                        "source of squashfs mount {} must be a relative path or an absolute path starting with . or /",
-                        s
-                    ),
-                });
             }
-            s = match ps.as_os_str().to_str() {
-                Some(ok) => ok,
+
+            i.source = match ps.as_os_str().to_str() {
+                Some(ok) => ok.to_string(),
                 None => {
                     return Err(SarusError {
                         code: 11,
@@ -76,44 +127,26 @@ impl SarusMount {
                     });
                 }
             };
-        } else {
-            // TODO consider if we should just accept absolute paths
-            if ![".", "/"].iter().any(|s| ps.starts_with(*s)) {
-                return Err(SarusError {
-                    code: 12,
-                    file_path: None,
-                    msg: format!(
-                        "mount source {ps:#?} must be one among a relative path starting with . , an absolute path starting with / , \"tmpfs\" or \"umount\""
-                    ),
-                });
-            }
         }
+        *self = i;
 
-        if ![".", "/"].iter().any(|s| pt.starts_with(*s)) {
-            return Err(SarusError {
-                code: 13,
-                file_path: None,
-                msg: format!(
-                    "mount target {pt:#?} must be one among a relative path starting with . or an absolute path starting with /"
-                ),
-            });
-        }
+        return Ok(())
+    }
 
-        let mut es = escape_mount(String::from(s));
-        let mut et = escape_mount(String::from(t));
-        es = expand_vars_string(es, uenv)?;
-        et = expand_vars_string(et, uenv)?;
+    fn render_flags(
+        &mut self,
+    ) -> SarusResult<()> {
 
-        let em;
+        let mut i = self.clone();
 
-        if f == "sqsh" {
-            let metadata = match std::fs::metadata(s) {
+        if i.flags == "sqsh" {
+            let metadata = match std::fs::metadata(self.source.as_str()) {
                 Ok(m) => m,
                 Err(e) => {
                     return Err(SarusError {
                         code: 14,
                         file_path: None,
-                        msg: format!("could not stat source of squashfs mount ({s}): {e}"),
+                        msg: format!("could not stat source of squashfs mount ({}): {}", i.source, e),
                     });
                 }
             };
@@ -121,46 +154,49 @@ impl SarusMount {
                 return Err(SarusError {
                     code: 16,
                     file_path: None,
-                    msg: format!("source of squashfs mount ({s}) must be a regular file"),
+                    msg: format!("source of squashfs mount ({}) must be a regular file", i.source),
                 });
             }
 
-            em = SarusMount {
-                source: String::from(es),
-                target: String::from(et),
-                flags: String::from(""),
-            }
+            i.flags = String::from("");
+
         } else {
-            let flags: String;
-            if f != "" {
-                flags = String::from(f);
-            } else {
-                flags = String::new();
-            }
-            let flags = expand_vars_string(flags, uenv)?;
 
             // Remove duplicate flags
-            let parts: Vec<_> = flags.split(',').collect();
+            let parts: Vec<_> = i.flags.split(',').collect();
             let parts_set: HashSet<_> = parts.into_iter().collect();
             let parts_unique_vec: Vec<_> = parts_set.into_iter().collect();
-            let ef = parts_unique_vec.join(",");
-
-            em = SarusMount {
-                source: String::from(es),
-                target: String::from(et),
-                flags: String::from(ef),
-            }
+            let f = parts_unique_vec.join(",");
+            i.flags = String::from(f);
         }
+        *self = i;
 
-        return Ok(em);
+        Ok(())
     }
 
-    pub fn to_volume_string(&self) -> String {
-        if self.flags.is_empty() {
-            format!("{}:{}", self.source, self.target)
-        } else {
-            format!("{}:{}:{}", self.source, self.target, self.flags)
+    fn validate(&self) -> SarusResult<()> {
+
+        if ![".", "/"].iter().any(|s| self.source.starts_with(*s)) {
+            return Err(SarusError {
+                code: 12,
+                file_path: None,
+                msg: format!(
+                    "mount source {:#?} must be one among a relative path starting with . , an absolute path starting with / , \"tmpfs\" or \"umount\"", self.source
+                ),
+            });
         }
+
+        if ![".", "/"].iter().any(|s| self.target.starts_with(*s)) {
+            return Err(SarusError {
+                code: 13,
+                file_path: None,
+                msg: format!(
+                    "mount target {:#?} must be one among a relative path starting with . or an absolute path starting with /", self.target
+                ),
+            });
+        }
+
+        return Ok(());
     }
 }
 
