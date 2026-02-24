@@ -790,6 +790,7 @@ jobs:
           srun -p debug -t 3 -A default -J srun-skybox --chdir=/tmp -n 1 --edf=busybox echo 'ok :D'
 
 
+          rm /tmp/parallax-*/mount_program.log
 
           ## Test squashfuse parametrization permissions
           cat > "$HOME/.edf/ubuntu.toml" <<'EOF'
@@ -803,7 +804,7 @@ jobs:
 
           ## output mount program logs
           echo "=== mount program log tail ==="
-          #          sudo tail -n 200 /tmp/parallax-*/mount_program.log || true
+          sudo tail -n 200 /tmp/parallax-*/mount_program.log || true
 
           ## output all slurm related logs that are relevant to debug skybox
           echo "=== slurmd log tail ==="
