@@ -7,7 +7,9 @@ use std::os::unix::fs::{PermissionsExt, chown};
 //use std::os::raw::c_int;
 use std::path::Path;
 //use std::sync::{Arc, Mutex};
+use nix::unistd::{geteuid, getegid};
 
+use slurm_spank::Context;
 use slurm_spank::{Plugin, SLURM_VERSION_NUMBER, SPANK_PLUGIN, SpankHandle};
 
 //use raster::mount::SarusMounts;
@@ -72,6 +74,8 @@ struct Job {
     local_task_count: u32,
     total_task_count: u32,
     cwd: String,
+    euid: uid_t,
+    egid: gid_t,
 }
 
 #[derive(Clone, Serialize, Default)]
@@ -176,7 +180,20 @@ pub(crate) fn job_get_info(
         local_task_count: spank.job_local_task_count()?,
         total_task_count: spank.job_total_task_count()?,
         cwd: cwd,
+        euid: geteuid().as_raw(),
+        egid: getegid().as_raw(),
     });
+
+    // grab euid to use by squashfuse downstream to mount program
+    if let Some(job) = ssb.job.as_ref() {
+        skybox_log_debug!(
+            "job uid/gid={}/{} euid/egid={}/{}",
+            job.uid,
+            job.gid,
+            job.euid,
+            job.egid
+        );
+    }
 
     Ok(())
 }
@@ -387,10 +404,28 @@ pub(crate) fn remote_unset_env_vars(
 }
 
 #[allow(dead_code)]
-pub(crate) fn skybox_log_context(ssb: &SpankSkyBox) -> () {
-    skybox_log_verbose!("computed context:");
-    skybox_log_verbose!(
-        "{}",
-        serde_json::to_string_pretty(&ssb).unwrap_or(String::from("ERROR"))
-    );
+pub(crate) fn skybox_log_context(
+    ssb: &SpankSkyBox,
+    spank: &mut SpankHandle,
+) -> Result<(), Box<dyn Error>> {
+    let local = match spank.context()? {
+        Context::Local => true,
+        _ => false,
+    };
+
+    if local {
+        skybox_log_user!("computed context:");
+        skybox_log_user!(
+            "{}",
+            serde_json::to_string_pretty(&ssb).unwrap_or(String::from("ERROR"))
+        );
+    } else {
+        skybox_log_verbose!("computed context:");
+        skybox_log_verbose!(
+            "{}",
+            serde_json::to_string_pretty(&ssb).unwrap_or(String::from("ERROR"))
+        );
+    }
+
+    Ok(())
 }
