@@ -77,7 +77,7 @@ fn get_default_parallax_path() -> String {
 }
 
 fn get_default_parallax_mp_squashfuse_cmd() -> String {
-    return String::from("/usr/bin/squashfuse_ll");
+    return String::from("squashfuse_ll");
 }
 
 fn get_default_perfmon() -> bool {
