@@ -127,6 +127,24 @@ impl RawEDF {
     }
 }
 
+impl EDF {
+    pub fn to_toml_string(&self) -> SarusResult<String> {
+
+        let toml = match toml::to_string(&self) {
+            Ok(t) => t,
+            Err(e) => {
+                return Err(SarusError {
+                    code: 24,
+                    file_path: None,
+                    msg: String::from(format!("error serializing to toml - {}", e)),
+                });
+            }
+        };
+
+        Ok(toml)
+    }
+}
+
 fn annotations_as_hashmap(a: Annotations) -> HashMap<String, String> {
     let r = match a {
         Annotations::TypeHashMap(h) => h,
@@ -563,6 +581,25 @@ pub fn render_from_search_paths(
 pub fn render(path: String) -> SarusResult<EDF> {
     let sp = get_search_paths();
     render_from_search_paths(path, sp, &None)
+}
+
+pub fn get_edf_from_string(content: String) -> SarusResult<EDF> {
+
+    let toml_value = match toml::from_str(content.as_str()) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(SarusError {
+                code: 25,
+                file_path: None,
+                msg: String::from(format!("{}", e)),
+            });
+        }
+    };
+
+    let raw: RawEDF = toml_value;
+    let env = Some(HashMap::new());
+    let e = edf_from_raw(raw, &env)?;
+    Ok(e)
 }
 
 #[cfg(test)]
