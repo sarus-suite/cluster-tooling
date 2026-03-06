@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 ubuntu:24.04
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -22,26 +22,28 @@ RUN apt-get update && \
       hwloc libhwloc-dev \
       libnuma-dev \
       ca-certificates \
+      sudo \
+      rsync \
     && rm -rf /var/lib/apt/lists/*
 
-RUN set -eux; \
-    if ! id -u vscode >/dev/null 2>&1; then \
-      groupadd -r vscode; \
-      useradd -m -s /bin/bash -g vscode vscode; \
-    fi; \
-    apt-get update && apt-get install -y --no-install-recommends sudo && rm -rf /var/lib/apt/lists/*; \
-    echo "vscode ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/99-vscode; \
-    chmod 0440 /etc/sudoers.d/99-vscode
+# RUN set -eux; \
+#     if ! id -u vscode >/dev/null 2>&1; then \
+#       groupadd -r vscode; \
+#       useradd -m -s /bin/bash -g vscode vscode; \
+#     fi; \
+#     apt-get update && apt-get install -y --no-install-recommends sudo && rm -rf /var/lib/apt/lists/*; \
+#     echo "vscode ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/99-vscode; \
+#     chmod 0440 /etc/sudoers.d/99-vscode
 
-USER vscode
-ENV RUSTUP_HOME=/home/vscode/.rustup \
-    CARGO_HOME=/home/vscode/.cargo
-ENV PATH=/home/vscode/.cargo/bin:${PATH}
+# USER vscode
+ENV RUSTUP_HOME=/home/ubuntu/.rustup \
+    CARGO_HOME=/home/ubuntu/.cargo
+ENV PATH=/home/ubuntu/.cargo/bin:${PATH}
 
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable && \
     rustc -V && cargo -V
-USER root
 
+USER root
 WORKDIR /tmp
 
 # Slurm (either tarball if SLURM_VERSION is set or from apt if not)

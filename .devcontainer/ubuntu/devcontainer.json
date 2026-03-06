@@ -3,11 +3,8 @@
   "build": {
     "dockerfile": "Dockerfile"
   },
-  "remoteUser": "vscode",
+  "remoteUser": "ubuntu",
   "updateRemoteUserUID": true,
-
-  "platform": "linux/amd64",
-  "runArgs": ["--platform=linux/amd64"],
 
   "mounts": [
     "type=volume,source=skybox-target-ubuntu,target=/workspaces/target"
