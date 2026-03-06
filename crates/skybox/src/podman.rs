@@ -314,7 +314,7 @@ where
 {
     let prefix = "podman run";
 
-    let t0 = Instant::now();
+    let t0 = std::time::Instant::now();
     let ec = pmd::run_from_edf(edf, Some(&p_ctx), &c_ctx, cmd);
     let tend = t0.elapsed();
 

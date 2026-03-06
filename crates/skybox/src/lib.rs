@@ -10,7 +10,7 @@ use std::path::Path;
 use nix::unistd::{getegid, geteuid};
 
 use slurm_spank::Context;
-use slurm_spank::{Plugin, SLURM_VERSION_NUMBER, SPANK_PLUGIN, SpankHandle};
+use slurm_spank::{Plugin, SLURM_VERSION_NUMBER, SPANK_PLUGIN, SpankHandle, spank_log_user};
 
 //use raster::mount::SarusMounts;
 use crate::args::SkyBoxArgs;
@@ -429,4 +429,29 @@ pub(crate) fn skybox_log_context(
     }
 
     Ok(())
+}
+
+/// Times `f`, optionally logs, and returns `f`'s return value unchanged.
+///
+/// - `label`: descriptive string to be printed next to the timing
+/// - `perfmon`: whether to print/log
+/// - `f`: a closure that runs the code to measure
+pub fn time_result<T, E>(
+    f: impl FnOnce() -> Result<T, E>,
+    label: &str,
+    perfmon: bool,
+) -> Result<T, E> {
+    let t0 = std::time::Instant::now();
+    let out = f();
+    let dt = t0.elapsed();
+
+    if perfmon {
+        spank_log_user!(
+            "skybox-perf: {} elapsed time: {:.6} sec",
+            label,
+            dt.as_secs_f64()
+        );
+    }
+
+    out
 }

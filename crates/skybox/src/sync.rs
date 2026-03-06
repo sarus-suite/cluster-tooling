@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use sysinfo::{Pid, ProcessStatus, System};
 
-use slurm_spank::SpankHandle;
+use slurm_spank::{SpankHandle, spank_log_user};
 
 use crate::{
     SpankSkyBox, get_local_task_id, plugin_err, plugin_string, podman::podman_pull,
@@ -77,6 +77,7 @@ pub(crate) fn sync_podman_pull(
     ssb: &mut SpankSkyBox,
     spank: &mut SpankHandle,
 ) -> Result<(), Box<dyn Error>> {
+    let t0 = std::time::Instant::now();
     if is_global_task_0(ssb, spank) {
         match podman_pull(ssb, spank) {
             Ok(_) => {
@@ -89,6 +90,16 @@ pub(crate) fn sync_podman_pull(
         }
     } else {
         sync_podman_pull_wait(ssb, spank)?;
+    }
+
+    if is_local_task_0(ssb, spank) {
+        let tend = t0.elapsed();
+        if ssb.config.perfmon {
+            spank_log_user!(
+                "skybox-perf: Podman wait for image elapsed time: {:.6} sec",
+                tend.as_secs_f64()
+            );
+        }
     }
 
     Ok(())
@@ -169,10 +180,21 @@ pub(crate) fn sync_podman_start(
     ssb: &mut SpankSkyBox,
     spank: &mut SpankHandle,
 ) -> Result<(), Box<dyn Error>> {
+    let t0 = std::time::Instant::now();
     if is_local_task_0(ssb, spank) {
         podman_start(ssb, spank)?;
     }
     sync_podman_start_wait(ssb, spank)?;
+
+    if is_local_task_0(ssb, spank) {
+        let tend = t0.elapsed();
+        if ssb.config.perfmon {
+            spank_log_user!(
+                "skybox-perf: Podman container start elapsed time: {:.6} sec",
+                tend.as_secs_f64()
+            );
+        }
+    }
 
     Ok(())
 }

@@ -17,6 +17,7 @@ pub(crate) fn alloc_init(
     plugin: &mut SpankSkyBox,
     spank: &mut SpankHandle,
 ) -> Result<(), Box<dyn Error>> {
+    let t0 = std::time::Instant::now();
     match alloc_load_config(plugin, spank) {
         Ok(_) => (),
         Err(e) => {
@@ -26,6 +27,15 @@ pub(crate) fn alloc_init(
     }
 
     register_plugin_args(spank)?;
+
+    let dt = t0.elapsed();
+    if true {
+        spank_log_user!(
+            "skybox-perf: alloc_init elapsed time: {:.6} sec",
+            dt.as_secs_f64()
+        );
+    }
+
     Ok(())
 }
 
@@ -34,6 +44,7 @@ pub(crate) fn alloc_init_post_opt(
     plugin: &mut SpankSkyBox,
     spank: &mut SpankHandle,
 ) -> Result<(), Box<dyn Error>> {
+    let t0 = std::time::Instant::now();
     load_plugin_args(plugin, spank)?;
     if !plugin.config.skybox_enabled {
         return Ok(());
@@ -51,6 +62,15 @@ pub(crate) fn alloc_init_post_opt(
     set_remaining_default_args(plugin)?;
 
     sbatch_warn_msg(plugin, spank);
+
+    let dt = t0.elapsed();
+    if true {
+        spank_log_user!(
+            "skybox-perf: alloc_init_post_opt elapsed time: {:.6} sec",
+            dt.as_secs_f64()
+        );
+    }
+
     Ok(())
 }
 

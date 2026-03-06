@@ -13,7 +13,7 @@ use crate::sync::*;
 use crate::{
     SpankSkyBox, VERSION, cleanup_fs_local, is_skybox_enabled, job_get_info, plugin_err,
     remote_unset_env_vars, run_set_info, setup_folders, setup_privileged_folders, skybox_log_error,
-    skybox_log_info, task_set_info,
+    skybox_log_info, task_set_info, time_result, spank_log_user
 };
 
 #[allow(unused_variables)]
@@ -21,6 +21,7 @@ pub(crate) fn slurmstepd_init(
     plugin: &mut SpankSkyBox,
     spank: &mut SpankHandle,
 ) -> Result<(), Box<dyn Error>> {
+    let t0 = std::time::Instant::now();
     match slurmstepd_load_config(plugin, spank) {
         Ok(_) => (),
         Err(e) => {
@@ -31,6 +32,15 @@ pub(crate) fn slurmstepd_init(
 
     skybox_log_info!("version v{}", VERSION);
     let _ = register_plugin_args(spank)?;
+
+    let dt = t0.elapsed();
+    if true {
+        spank_log_user!(
+            "skybox-perf: slurmstepd_init elapsed time: {:.6} sec",
+            dt.as_secs_f64()
+        );
+    }
+
     Ok(())
 }
 
@@ -44,6 +54,7 @@ pub(crate) fn slurmstepd_init_post_opt(
     if !plugin.config.skybox_enabled {
         return Ok(());
     }
+    let t0 = std::time::Instant::now();
 
     let user_uid = spank.job_uid()?;
     let old_uid = setfsuid(Uid::from(user_uid));
@@ -61,6 +72,14 @@ pub(crate) fn slurmstepd_init_post_opt(
 
     //skybox_log_context(plugin);
 
+    let dt = t0.elapsed();
+    if true {
+        spank_log_user!(
+            "skybox-perf: slurmstepd_init_post_opt elapsed time: {:.6} sec",
+            dt.as_secs_f64()
+        );
+    }
+
     Ok(())
 }
 
@@ -72,6 +91,7 @@ pub(crate) fn slurmstepd_user_init(
     if !is_skybox_enabled(plugin, spank) {
         return Ok(());
     }
+    let t0 = std::time::Instant::now();
     //skybox_log_verbose!("USER_INIT");
 
     //skybox_log_context(plugin);
@@ -93,6 +113,14 @@ pub(crate) fn slurmstepd_user_init(
 
     //skybox_log_context(plugin);
 
+    let dt = t0.elapsed();
+    if plugin.config.perfmon {
+        spank_log_user!(
+            "skybox-perf: slurmstepd_user_init elapsed time: {:.6} sec",
+            dt.as_secs_f64()
+        );
+    }
+
     Ok(())
 }
 
@@ -104,8 +132,17 @@ pub(crate) fn slurmstepd_task_init_privileged(
     if !is_skybox_enabled(plugin, spank) {
         return Ok(());
     }
+    let t0 = std::time::Instant::now();
     //skybox_log_verbose!("TASK_INIT_PRIVILEGED");
     setup_privileged_folders(plugin, spank)?;
+
+    let dt = t0.elapsed();
+    if plugin.config.perfmon {
+        spank_log_user!(
+            "skybox-perf: slurmstepd_task_init_privileged elapsed time: {:.6} sec",
+            dt.as_secs_f64()
+        );
+    }
 
     Ok(())
 }
@@ -118,19 +155,45 @@ pub(crate) fn slurmstepd_task_init(
     if !is_skybox_enabled(plugin, spank) {
         return Ok(());
     }
+    let t0 = std::time::Instant::now();
     //skybox_log_verbose!("TASK_INIT");
     let _ = task_set_info(plugin, spank)?;
 
     sync_tracking(plugin, spank)?;
     sync_podman_pull(plugin, spank)?;
     sync_podman_start(plugin, spank)?;
-    container_join(plugin, spank)?;
-    container_wait_cwd(plugin, spank)?;
-    container_import_env(plugin, spank)?;
-    container_set_workdir(plugin, spank)?;
+
+    let perfmon = plugin.config.perfmon;
+    time_result(|| container_join(plugin, spank), "container_join", perfmon)?;
+    time_result(
+        || container_wait_cwd(plugin, spank),
+        "container_wait_cwd",
+        perfmon,
+    )?;
+    time_result(
+        || container_import_env(plugin, spank),
+        "container_import_env",
+        perfmon,
+    )?;
+    time_result(
+        || container_set_workdir(plugin, spank),
+        "container_set_workdir",
+        perfmon,
+    )?;
+    // container_wait_cwd(plugin, spank)?;
+    // container_import_env(plugin, spank)?;
+    // container_set_workdir(plugin, spank)?;
     //container_wait_entrypoint_handover(plugin, spank)?;
 
     //skybox_log_context(plugin);
+
+    let dt = t0.elapsed();
+    if perfmon {
+        spank_log_user!(
+            "skybox-perf: slurmstepd_task_init elapsed time: {:.6} sec",
+            dt.as_secs_f64()
+        );
+    }
 
     Ok(())
 }

@@ -5,7 +5,7 @@ use slurm_spank::SpankHandle;
 use crate::args::*;
 use crate::config::*;
 use crate::edf::*;
-use crate::{SpankSkyBox, plugin_err, skybox_log_error, skybox_log_user};
+use crate::{SpankSkyBox, plugin_err, skybox_log_error, skybox_log_user, spank_log_user};
 use raster::*;
 
 fn srun_load_config(
@@ -62,6 +62,7 @@ pub(crate) fn srun_init(
     plugin: &mut SpankSkyBox,
     spank: &mut SpankHandle,
 ) -> Result<(), Box<dyn Error>> {
+    let t0 = std::time::Instant::now();
     match srun_load_config(plugin, spank) {
         Ok(_) => (),
         Err(e) => {
@@ -71,6 +72,15 @@ pub(crate) fn srun_init(
     }
 
     let r = register_plugin_args(spank)?;
+
+    let dt = t0.elapsed();
+    if true {
+        spank_log_user!(
+            "skybox-perf: srun_init elapsed time: {:.6} sec",
+            dt.as_secs_f64()
+        );
+    }
+
     Ok(r)
 }
 
@@ -79,6 +89,7 @@ pub(crate) fn srun_init_post_opt(
     plugin: &mut SpankSkyBox,
     spank: &mut SpankHandle,
 ) -> Result<(), Box<dyn Error>> {
+    let t0 = std::time::Instant::now();
     let _ = load_plugin_args(plugin, spank)?;
     if !plugin.config.skybox_enabled {
         return Ok(());
@@ -94,6 +105,14 @@ pub(crate) fn srun_init_post_opt(
 
     update_config_by_user(&mut plugin.config, plugin.edf.clone().unwrap())?;
     let _ = set_remaining_default_args(plugin)?;
+
+    let dt = t0.elapsed();
+    if true {
+        spank_log_user!(
+            "skybox-perf: srun_init_post_opt elapsed time: {:.6} sec",
+            dt.as_secs_f64()
+        );
+    }
 
     Ok(())
 }
