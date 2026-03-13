@@ -392,8 +392,20 @@ pub(crate) fn sync_tracking(
     ssb: &mut SpankSkyBox,
     spank: &mut SpankHandle,
 ) -> Result<(), Box<dyn Error>> {
+    let t0 = std::time::Instant::now();
+
     if is_global_task_0(ssb, spank) {
         track_usage(ssb, spank)?;
+    }
+
+    if is_local_task_0(ssb, spank) {
+        let tend = t0.elapsed();
+        if ssb.config.perfmon {
+            spank_log_user!(
+                "skybox-perf: Skybox tracking elapsed time: {:.6} sec",
+                tend.as_secs_f64()
+            );
+        }
     }
     Ok(())
 }

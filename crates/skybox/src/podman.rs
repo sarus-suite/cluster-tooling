@@ -1,6 +1,5 @@
 use std::error::Error;
 use std::path::PathBuf;
-use std::time::Instant;
 use sysinfo::{Pid, System};
 
 use slurm_spank::{SpankHandle, spank_log_user};
