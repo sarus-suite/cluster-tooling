@@ -142,7 +142,7 @@ Running `cargo build` inside `crates/skybox` can bypass workspace configuration.
 
 ---
 
-## Typical Workflow
+## Typical Build Workflow
 
 1. Start devcontainer
 ```bash
@@ -166,6 +166,85 @@ cargo build -p skybox
 * `docker stop <container ID>`
 * `docker rm <container ID>`
 * Restart devcontainer as in 1
+
+## Development Workflows
+
+### Upstream remotes
+The best way to work with upstream repos is to set short remote names, for every crate do `crate-upstream`.
+Example:
+```
+git remote add skybox-upstream https://github.com/sarus-suite/skybox.git
+```
+
+### Keeping workspace and subtrees up to date (before dev work)
+```bash
+git switch main
+git pull --ff-only origin main
+# Update all remotes
+git fetch --all --prune
+
+# update each subtree into a squashed commit (this keep things simple)
+git subtree pull --prefix=crates/raster        raster-upstream        main --squash
+git subtree pull --prefix=crates/podman-driver podman-driver-upstream main --squash
+git subtree pull --prefix=crates/sarusctl      sarusctl-upstream      main --squash
+git subtree pull --prefix=crates/skybox        skybox-upstream        main --squash
+```
+
+
+### Work on a new feature
+Create new feature branch in workspace
+```bash
+git switch -c <feature branch name>
+```
+
+Do your work
+```bash
+# Do your code edit
+vi cargo/skybox/src/xyz
+
+# Build and test in dev container
+cargo build -p skybox
+cargo test
+```
+
+commit to workspace
+```bash
+git add ...
+git commit -m "feature work ..."
+```
+
+Export each modified subtree and push to upstream crate
+```bash
+git subtree split --prefix=crates/skybox -b skybox-export
+```
+This will add a history changes into a branch that only contains the changes related crates/skybox
+
+Then we push that to upstream as a new branch
+```bash
+git push skybox-upstream skybox-export:my-new-skybox-branch-for-mr
+```
+The same pattern can be repeated for all other crates.
+
+
+### Reset workspace
+```bash
+git switch main
+git pull --ff-only origin main
+# Update all remotes
+git fetch --all --prune
+
+# update each subtree into a squashed commit (this keep things simple)
+git subtree pull --prefix=crates/raster        raster-upstream        main --squash
+git subtree pull --prefix=crates/podman-driver podman-driver-upstream main --squash
+git subtree pull --prefix=crates/sarusctl      sarusctl-upstream      main --squash
+git subtree pull --prefix=crates/skybox        skybox-upstream        main --squash
+```
+If the subtree pull create new commits (because their main moved forward, you can push them
+```bash
+git push origin main
+```
+Then work on a new feature
+
 
 ---
 
