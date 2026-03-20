@@ -259,6 +259,32 @@ mod commands {
         cmd
     }
 
+    pub fn kube(podman_ctx: Option<&PodmanCtx>) -> Command {
+        let mut cmd = commands::base(podman_ctx);
+
+        if let Some(ctx) = podman_ctx {
+            cli_storage_opt(
+                &mut cmd,
+                "additionalimagestore",
+                ctx.ro_store.as_deref().map(Path::as_os_str),
+            );
+            cli_storage_opt(
+                &mut cmd,
+                "mount_program",
+                ctx.parallax_mount_program.as_deref().map(Path::as_os_str),
+            );
+        }
+
+        cmd.arg("kube");
+        cmd
+    }
+
+    pub fn kube_play(filepath: &str, podman_ctx: Option<&PodmanCtx>) -> Command {
+        let mut cmd = commands::kube(podman_ctx);
+        cmd.args(["play", filepath]);
+        cmd
+    }
+
     pub fn version(module: Option<&str>) -> Command {
         let mut cmd = commands::base(None);
         cli_opt(&mut cmd, "--module", module.map(OsStr::new));
@@ -381,7 +407,8 @@ pub fn image_exists(image: &str, podman_ctx: Option<&PodmanCtx>) -> bool {
     commands::image_exists(image, podman_ctx)
         .output()
         .expect("Failed to execute command")
-        .status.success()
+        .status
+        .success()
 }
 
 pub fn inspect(target: &str, format: Option<&str>, podman_ctx: Option<&PodmanCtx>) -> Output {
@@ -394,6 +421,12 @@ pub fn info(format: Option<&str>, podman_ctx: Option<&PodmanCtx>) -> Output {
     commands::info(format, podman_ctx)
         .output()
         .expect("Failed to execute command")
+}
+
+pub fn kube_play(filepath: &str, podman_ctx: Option<&PodmanCtx>) {
+    commands::kube_play(filepath, podman_ctx)
+        .status()
+        .expect("Failed to execute command");
 }
 
 pub fn version(module: Option<&str>) -> Output {
@@ -623,7 +656,6 @@ pub mod loggable {
                 .output()
                 .expect(&format!("Failed to `parallax {action}`")),
         }
-
     }
 
     pub fn parallax_migrate(
