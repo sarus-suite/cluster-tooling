@@ -702,6 +702,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "libyaml-rs"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e126dda6f34391ab7b444f9922055facc83c07a910da3eb16f1e4d9c45dc777"
+
+[[package]]
 name = "litemap"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -919,7 +925,7 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 [[package]]
 name = "raster"
 version = "0.1.0"
-source = "git+https://github.com/sarus-suite/raster#88dff0ea366bff727b76c12a4f5d5aa712e2024e"
+source = "git+https://github.com/sarus-suite/raster#6edd64a614a207fec3496cb8d2e3bf2938942460"
 dependencies = [
  "derivative",
  "jsonschema",
@@ -1062,8 +1068,8 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 
 [[package]]
 name = "sarus-suite-podman-driver"
-version = "0.1.0"
-source = "git+https://github.com/sarus-suite/podman-driver#b0886aa38d7f740cb0761fac50e3024a7eab2566"
+version = "0.2.0"
+source = "git+https://github.com/sarus-suite/podman-driver#30f286a85a1612bd3370473ced9c310e983c8805"
 dependencies = [
  "anyhow",
  "bstr",
@@ -1072,13 +1078,16 @@ dependencies = [
 
 [[package]]
 name = "sarusctl"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "raster",
  "sarus-suite-podman-driver",
  "serde",
  "serde_json",
+ "users",
+ "uuid",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -1447,6 +1456,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "users"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24cc0f6d6f267b73e5a2cadf007ba8f9bc39c6a6f9666f8cf25ea809a153b032"
+dependencies = [
+ "libc",
+ "log",
+]
+
+[[package]]
 name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1464,6 +1483,7 @@ version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2e054861b4bd027cd373e18e8d8d8e6548085000e41290d95ce0c373a654b4a"
 dependencies = [
+ "getrandom 0.3.4",
  "js-sys",
  "wasm-bindgen",
 ]
@@ -1689,6 +1709,19 @@ name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
+
+[[package]]
+name = "yaml_serde"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08c7c1b1a6a7c8a6b2741a6c21a4f8918e51899b111cfa08d1288202656e3975"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "libyaml-rs",
+ "ryu",
+ "serde",
+]
 
 [[package]]
 name = "yoke"
