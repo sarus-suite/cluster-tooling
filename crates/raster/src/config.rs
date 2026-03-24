@@ -12,6 +12,7 @@ pub struct RawConfig {
     parallax_imagestore: Option<String>,
     parallax_mount_program: Option<String>,
     parallax_path: Option<String>,
+    parallax_mp_squashfuse_cmd: Option<String>,
     perfmon: Option<bool>,
     podman_module: Option<String>,
     podman_path: Option<String>,
@@ -32,6 +33,8 @@ pub struct Config {
     pub parallax_mount_program: String,
     #[serde(default = "get_default_parallax_path")]
     pub parallax_path: String,
+    #[serde(default = "get_default_parallax_mp_squashfuse_cmd")]
+    pub parallax_mp_squashfuse_cmd: String,
     #[serde(default = "get_default_perfmon")]
     pub perfmon: bool,
     #[serde(default = "get_default_podman_module")]
@@ -71,6 +74,10 @@ fn get_default_parallax_mount_program() -> String {
 
 fn get_default_parallax_path() -> String {
     return String::from("parallax");
+}
+
+fn get_default_parallax_mp_squashfuse_cmd() -> String {
+    return String::from("/usr/bin/squashfuse_ll");
 }
 
 fn get_default_perfmon() -> bool {
@@ -124,6 +131,10 @@ impl From<RawConfig> for Config {
                 Some(s) => s,
                 None => get_default_parallax_path(),
             },
+            parallax_mp_squashfuse_cmd: match r.parallax_mp_squashfuse_cmd {
+                Some(s) => s,
+                None => get_default_parallax_mp_squashfuse_cmd(),
+            },
             perfmon: match r.perfmon {
                 Some(s) => s,
                 None => get_default_perfmon(),
@@ -174,6 +185,9 @@ impl RawConfig {
         }
         if i.parallax_path.is_some() {
             self.parallax_path = i.parallax_path;
+        }
+        if i.parallax_mp_squashfuse_cmd.is_some() {
+            self.parallax_mp_squashfuse_cmd = i.parallax_mp_squashfuse_cmd;
         }
         if i.perfmon.is_some() {
             self.perfmon = i.perfmon;
@@ -269,6 +283,7 @@ fn expand_raw_config_fields(
     expand_raw_option_string(&mut r.parallax_imagestore, force, e)?;
     expand_raw_option_string(&mut r.parallax_mount_program, force, e)?;
     expand_raw_option_string(&mut r.parallax_path, force, e)?;
+    expand_raw_option_string(&mut r.parallax_mp_squashfuse_cmd, force, e)?;
     expand_raw_option_string(&mut r.podman_module, force, e)?;
     expand_raw_option_string(&mut r.podman_path, force, e)?;
     expand_raw_option_string(&mut r.podman_tmp_path, force, e)?;
