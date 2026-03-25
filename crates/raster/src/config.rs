@@ -12,6 +12,7 @@ pub struct RawConfig {
     parallax_imagestore: Option<String>,
     parallax_mount_program: Option<String>,
     parallax_path: Option<String>,
+    parallax_mp_logfile: Option<String>,
     parallax_mp_squashfuse_cmd: Option<String>,
     perfmon: Option<bool>,
     podman_module: Option<String>,
@@ -33,6 +34,8 @@ pub struct Config {
     pub parallax_mount_program: String,
     #[serde(default = "get_default_parallax_path")]
     pub parallax_path: String,
+    #[serde(default = "get_default_parallax_mp_logfile")]
+    pub parallax_mp_logfile: String,
     #[serde(default = "get_default_parallax_mp_squashfuse_cmd")]
     pub parallax_mp_squashfuse_cmd: String,
     #[serde(default = "get_default_perfmon")]
@@ -74,6 +77,10 @@ fn get_default_parallax_mount_program() -> String {
 
 fn get_default_parallax_path() -> String {
     return String::from("parallax");
+}
+
+fn get_default_parallax_mp_logfile() -> String {
+    String::new()
 }
 
 fn get_default_parallax_mp_squashfuse_cmd() -> String {
@@ -391,6 +398,16 @@ pub fn update_config_by_user(config: &mut Config, edf: EDF) -> SarusResult<()> {
     let parallax_mount_program = edf.annotations.get("com.sarus.parallax_mount_program");
     if parallax_mount_program.is_some() {
         config.parallax_mount_program = parallax_mount_program.unwrap().to_string();
+    }
+
+    let parallax_mp_logfile = edf.annotations.get("com.sarus.parallax_mp_logfile");
+    if parallax_mp_logfile.is_some() {
+        config.parallax_mp_logfile = parallax_mp_logfile.unwrap().to_string();
+    }
+
+    let parallax_mp_squashfuse_cmd = edf.annotations.get("com.sarus.parallax_mp_squashfuse_cmd");
+    if parallax_mp_squashfuse_cmd.is_some() {
+        config.parallax_mp_squashfuse_cmd = parallax_mp_squashfuse_cmd.unwrap().to_string();
     }
 
     let parallax_path = edf.annotations.get("com.sarus.parallax_path");
