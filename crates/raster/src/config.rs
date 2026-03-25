@@ -80,7 +80,7 @@ fn get_default_parallax_path() -> String {
 }
 
 fn get_default_parallax_mp_logfile() -> String {
-    String::new()
+    return String::new();
 }
 
 fn get_default_parallax_mp_squashfuse_cmd() -> String {
@@ -138,6 +138,10 @@ impl From<RawConfig> for Config {
                 Some(s) => s,
                 None => get_default_parallax_path(),
             },
+            parallax_mp_logfile: match r.parallax_mp_logfile {
+                Some(s) => s,
+                None => get_default_parallax_mp_logfile(),
+            },
             parallax_mp_squashfuse_cmd: match r.parallax_mp_squashfuse_cmd {
                 Some(s) => s,
                 None => get_default_parallax_mp_squashfuse_cmd(),
@@ -192,6 +196,9 @@ impl RawConfig {
         }
         if i.parallax_path.is_some() {
             self.parallax_path = i.parallax_path;
+        }
+        if i.parallax_mp_logfile.is_some() {
+            self.parallax_mp_logfile = i.parallax_mp_logfile;
         }
         if i.parallax_mp_squashfuse_cmd.is_some() {
             self.parallax_mp_squashfuse_cmd = i.parallax_mp_squashfuse_cmd;
@@ -290,6 +297,7 @@ fn expand_raw_config_fields(
     expand_raw_option_string(&mut r.parallax_imagestore, force, e)?;
     expand_raw_option_string(&mut r.parallax_mount_program, force, e)?;
     expand_raw_option_string(&mut r.parallax_path, force, e)?;
+    expand_raw_option_string(&mut r.parallax_mp_logfile, force, e)?;
     expand_raw_option_string(&mut r.parallax_mp_squashfuse_cmd, force, e)?;
     expand_raw_option_string(&mut r.podman_module, force, e)?;
     expand_raw_option_string(&mut r.podman_path, force, e)?;
