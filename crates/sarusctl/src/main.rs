@@ -36,6 +36,8 @@ enum Command {
     },
     /// List images including Parallax storage
     Images {},
+    /// Pull image with Podman and migrate to Parallax storage
+    Pull { image: String },
     /// Migrate image to Parallax storage
     Migrate { image: String },
     /// Remove image from Parallax storage
@@ -54,31 +56,9 @@ fn get_podman_default_graphroot(p_ctx: &PodmanCtx) -> Result<PathBuf, Utf8Error>
     Ok(PathBuf::from(graphroot))
 }
 
-fn generate_podman_contexts(
+fn generate_run_contexts(
     config: &raster::config::Config,
-) -> Result<(PodmanCtx, PodmanCtx, PodmanCtx, PodmanCtx), Box<dyn std::error::Error>> {
-    let default_ctx = PodmanCtx {
-        podman_path: PathBuf::from(&config.podman_path),
-        module: None,
-        graphroot: None,
-        runroot: None,
-        parallax_mount_program: None,
-        ro_store: None,
-        podman_env: None,
-    };
-
-    let default_graphroot = get_podman_default_graphroot(&default_ctx)?;
-
-    let migrate_ctx = PodmanCtx {
-        podman_path: PathBuf::from(&config.podman_path),
-        module: None,
-        graphroot: Some(default_graphroot),
-        runroot: None,
-        parallax_mount_program: None,
-        ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
-        podman_env: None,
-    };
-
+) -> Result<(PodmanCtx, PodmanCtx), Box<dyn std::error::Error>> {
     let ro_ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
         module: None,
@@ -114,7 +94,7 @@ fn generate_podman_contexts(
         format!("/tmp/parallax-{}/mount_program.log", uid),
     );
 
-    Ok((default_ctx, migrate_ctx, ro_ctx, run_ctx))
+    Ok((ro_ctx, run_ctx))
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -222,7 +202,24 @@ fn images(config: &raster::config::Config) -> i32 {
     return 0;
 }
 
-fn migrate(image: String, config: &raster::config::Config) -> i32 {
+fn pull(image: &str, config: &raster::config::Config) -> i32 {
+    let ctx = PodmanCtx {
+        podman_path: PathBuf::from(&config.podman_path),
+        module: None,
+        graphroot: None,
+        runroot: None,
+        parallax_mount_program: None,
+        ro_store: None,
+        podman_env: None,
+    };
+
+    println!("Pulling {} with Podman", &image);
+    pmd::pull(&image, Some(&ctx));
+    assert!(pmd::image_exists(&image, Some(&ctx)));
+    return migrate(&image, config);
+}
+
+fn migrate(image: &str, config: &raster::config::Config) -> i32 {
     let mut ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
         module: None,
@@ -240,8 +237,17 @@ fn migrate(image: String, config: &raster::config::Config) -> i32 {
 
     let parallax_path = PathBuf::from(&config.parallax_path);
 
-    pmd::parallax_migrate(&parallax_path, &ctx, &image).unwrap();
-    return 0;
+    println!("Migrating {} with Parallax", &image);
+    return match pmd::parallax_migrate(&parallax_path, &ctx, &image) {
+        Ok(_) => {
+            assert!(pmd::image_exists(&image, Some(&ctx)));
+            0
+        }
+        Err(e) => {
+            eprintln!("Failed migrating parallax: {}", e);
+            1
+        }
+    };
 }
 
 fn rmi(image: String, config: &raster::config::Config) -> i32 {
@@ -267,7 +273,7 @@ fn rmi(image: String, config: &raster::config::Config) -> i32 {
 }
 
 fn run_edf(edf: EDF, container_cmd: &Vec<String>, config: &raster::config::Config) -> i32 {
-    let (default_ctx, migrate_ctx, ro_ctx, run_ctx) = match generate_podman_contexts(&config) {
+    let (ro_ctx, run_ctx) = match generate_run_contexts(&config) {
         Ok(o) => o,
         Err(e) => panic!("Failed to generate Podman contexts: {}", e),
     };
@@ -283,15 +289,9 @@ fn run_edf(edf: EDF, container_cmd: &Vec<String>, config: &raster::config::Confi
     };
 
     if !pmd::image_exists(&edf.image, Some(&ro_ctx)) {
-        println!("Pulling {} with Podman", &edf.image);
-        pmd::pull(&edf.image, Some(&default_ctx));
-        println!("Migrating {} with Parallax", &edf.image);
-        let parallax_path = PathBuf::from(&config.parallax_path);
-        match pmd::parallax_migrate(&parallax_path, &migrate_ctx, &edf.image) {
-            Ok(_) => (),
-            Err(e) => panic!("Failed migrating parallax: {}", e),
-        };
-        assert!(pmd::image_exists(&edf.image, Some(&run_ctx)));
+        if pull(&edf.image, &config) != 0 {
+            return 1;
+        }
     }
 
     pmd::run_from_edf(&edf, Some(&run_ctx), &c_ctx, container_cmd)
@@ -336,7 +336,7 @@ fn extract_images_from_yaml_manifest(
 }
 
 fn run_yaml(filepath: &str, config: &raster::config::Config) -> i32 {
-    let (default_ctx, migrate_ctx, ro_ctx, _run_ctx) = match generate_podman_contexts(&config) {
+    let (ro_ctx, _run_ctx) = match generate_run_contexts(&config) {
         Ok(o) => o,
         Err(e) => panic!("Failed to generate Podman contexts: {}", e),
     };
@@ -344,25 +344,24 @@ fn run_yaml(filepath: &str, config: &raster::config::Config) -> i32 {
         module: None,
         podman_env: None,
         .._run_ctx
-    };
+    }
+    .with_env(
+        "PARALLAX_MP_LOGFILE",
+        format!(
+            "/tmp/parallax-{}/mount_program.log",
+            users::get_current_uid()
+        ),
+    );
 
     let images = extract_images_from_yaml_manifest(filepath)
         .unwrap_or_else(|e| panic!("failed to extract container images from {}: {e}", filepath));
-    let parallax_path = PathBuf::from(&config.parallax_path);
 
     for image in images {
-        if pmd::image_exists(&image, Some(&ro_ctx)) {
-            continue;
+        if !pmd::image_exists(&image, Some(&ro_ctx)) {
+            if pull(&image, &config) != 0 {
+                return 1;
+            }
         }
-
-        println!("Pulling {} with Podman", &image);
-        pmd::pull(&image, Some(&default_ctx));
-        println!("Migrating {} with Parallax", &image);
-        match pmd::parallax_migrate(&parallax_path, &migrate_ctx, &image) {
-            Ok(_) => (),
-            Err(e) => panic!("Failed migrating parallax: {}", e),
-        };
-        assert!(pmd::image_exists(&image, Some(&run_ctx)));
     }
 
     pmd::kube_play(filepath, Some(&run_ctx));
@@ -397,7 +396,8 @@ fn main() {
         Command::Validate { filepath, output } => validate(filepath, output),
         Command::Render { filepath, output } => render(filepath, output),
         Command::Images {} => images(&config),
-        Command::Migrate { image } => migrate(image, &config),
+        Command::Pull { image } => pull(&image, &config),
+        Command::Migrate { image } => migrate(&image, &config),
         Command::Rmi { image } => rmi(image, &config),
         Command::Run {
             filepath,
