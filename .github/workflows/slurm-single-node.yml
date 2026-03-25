@@ -812,3 +812,22 @@ jobs:
           echo "=== slurmctld log tail ==="
           #          sudo tail -n 200 /var/log/slurm/slurmctld.log || true
 
+
+          # test annotation of mount program
+          rm $HOME/.edf/busybox.toml
+
+          cat > "$HOME/.edf/busybox.toml" <<'EOF'
+          image = "docker://busybox:latest"
+
+          [annotations]
+          com.sarus.parallax_mount_program.logfile = "/tmp/test_logfile"
+          EOF
+
+          echo "=== $HOME/.edf/busybox.toml ==="
+          cat "$HOME/.edf/busybox.toml"
+ 
+          srun -p debug -t 3 -A default -J srun-skybox -n 1 --edf=busybox true
+
+          test -s /tmp/test_logfile
+
+          tail -n 200 /tmp/test_logfile || true
