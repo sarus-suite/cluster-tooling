@@ -817,7 +817,7 @@ jobs:
           rm $HOME/.edf/busybox.toml
 
           cat > "$HOME/.edf/busybox.toml" <<'EOF'
-          image = "docker://busybox:latest"
+          image = "busybox:latest"
 
           [annotations]
           com.sarus.parallax_mount_program.logfile = "/tmp/test_logfile"
@@ -826,7 +826,7 @@ jobs:
           echo "=== $HOME/.edf/busybox.toml ==="
           cat "$HOME/.edf/busybox.toml"
  
-          srun -p debug -t 3 -A default -J srun-skybox -n 1 --edf=busybox true
+          srun -p debug -t 3 -A default -J logfile-test -n 1 --edf=busybox true
 
           test -s /tmp/test_logfile
 
