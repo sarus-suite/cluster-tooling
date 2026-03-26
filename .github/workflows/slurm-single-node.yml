@@ -821,7 +821,7 @@ jobs:
 
           [annotations]
           com.sarus.parallax_mp_logfile = "/tmp/test_logfile"
-          com.sarus.parallax_mp_squashfuse_cmd = "squashfuse_ll"
+          com.sarus.parallax_mp_squashfuse_path = "squashfuse_ll"
           EOF
 
           echo "=== $HOME/.edf/busybox.toml ==="
