@@ -812,3 +812,25 @@ jobs:
           echo "=== slurmctld log tail ==="
           #          sudo tail -n 200 /var/log/slurm/slurmctld.log || true
 
+
+          # test annotation of mount program
+          rm $HOME/.edf/busybox.toml
+
+          cat > "$HOME/.edf/busybox.toml" <<'EOF'
+          image = "busybox:latest"
+
+          [annotations]
+          com.sarus.parallax_mp_logfile = "/tmp/test_logfile"
+          com.sarus.parallax_mp_squashfuse_path = "squashfuse_ll"
+          EOF
+
+          echo "=== $HOME/.edf/busybox.toml ==="
+          cat "$HOME/.edf/busybox.toml"
+ 
+          srun -p debug -t 3 -A default -J logfile-test -n 1 --edf=busybox true
+
+          test -s /tmp/test_logfile
+
+          tail -n 200 /tmp/test_logfile || true
+          sudo tail -n 200 /var/log/slurm/slurmd.log || true
+
