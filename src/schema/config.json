@@ -22,6 +22,24 @@
       "description": "filesystem path to parallax tool",
       "type": "string"
     },
+    "parallax_mp_uid": {
+      "description": "user id passed to the parallax mount program",
+      "type": "integer",
+      "minimum": 0
+    },
+    "parallax_mp_gid": {
+      "description": "group id passed to the parallax mount program",
+      "type": "integer",
+      "minimum": 0
+    },
+    "parallax_mp_logfile": {
+      "description": "filesystem path to the parallax mount program logfile",
+      "type": "string"
+    },
+    "parallax_mp_squashfuse_path": {
+      "description": "filesystem path to the squashfuse_ll executable used by the parallax mount program",
+      "type": "string"
+    },
     "podman_module": {
       "description": "podman module name to be used for running containers",
       "type": "string"
