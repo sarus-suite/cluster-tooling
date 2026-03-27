@@ -12,6 +12,10 @@ pub struct RawConfig {
     parallax_imagestore: Option<String>,
     parallax_mount_program: Option<String>,
     parallax_path: Option<String>,
+    parallax_mp_uid: Option<u32>,
+    parallax_mp_gid: Option<u32>,
+    parallax_mp_logfile: Option<String>,
+    parallax_mp_squashfuse_path: Option<String>,
     perfmon: Option<bool>,
     podman_module: Option<String>,
     podman_path: Option<String>,
@@ -32,6 +36,14 @@ pub struct Config {
     pub parallax_mount_program: String,
     #[serde(default = "get_default_parallax_path")]
     pub parallax_path: String,
+    #[serde(default = "get_default_parallax_mp_uid")]
+    pub parallax_mp_uid: u32,
+    #[serde(default = "get_default_parallax_mp_gid")]
+    pub parallax_mp_gid: u32,
+    #[serde(default = "get_default_parallax_mp_logfile")]
+    pub parallax_mp_logfile: String,
+    #[serde(default = "get_default_parallax_mp_squashfuse_path")]
+    pub parallax_mp_squashfuse_path: String,
     #[serde(default = "get_default_perfmon")]
     pub perfmon: bool,
     #[serde(default = "get_default_podman_module")]
@@ -71,6 +83,23 @@ fn get_default_parallax_mount_program() -> String {
 
 fn get_default_parallax_path() -> String {
     return String::from("parallax");
+}
+
+fn get_default_parallax_mp_uid() -> u32 {
+    return nix::unistd::geteuid().as_raw();
+}
+
+fn get_default_parallax_mp_gid() -> u32 {
+    return nix::unistd::getegid().as_raw();
+}
+
+fn get_default_parallax_mp_logfile() -> String {
+    let uid = nix::unistd::geteuid().as_raw();
+    return format!("/tmp/parallax-{}/mount_program.log", uid);
+}
+
+fn get_default_parallax_mp_squashfuse_path() -> String {
+    return String::from("/usr/bin/squashfuse_ll");
 }
 
 fn get_default_perfmon() -> bool {
@@ -124,6 +153,22 @@ impl From<RawConfig> for Config {
                 Some(s) => s,
                 None => get_default_parallax_path(),
             },
+            parallax_mp_uid: match r.parallax_mp_uid {
+                Some(v) => v,
+                None => get_default_parallax_mp_uid(),
+            },
+            parallax_mp_gid: match r.parallax_mp_gid {
+                Some(v) => v,
+                None => get_default_parallax_mp_gid(),
+            },
+            parallax_mp_logfile: match r.parallax_mp_logfile {
+                Some(s) => s,
+                None => get_default_parallax_mp_logfile(),
+            },
+            parallax_mp_squashfuse_path: match r.parallax_mp_squashfuse_path {
+                Some(s) => s,
+                None => get_default_parallax_mp_squashfuse_path(),
+            },
             perfmon: match r.perfmon {
                 Some(s) => s,
                 None => get_default_perfmon(),
@@ -174,6 +219,18 @@ impl RawConfig {
         }
         if i.parallax_path.is_some() {
             self.parallax_path = i.parallax_path;
+        }
+        if i.parallax_mp_uid.is_some() {
+            self.parallax_mp_uid = i.parallax_mp_uid;
+        }
+        if i.parallax_mp_gid.is_some() {
+            self.parallax_mp_gid = i.parallax_mp_gid;
+        }
+        if i.parallax_mp_logfile.is_some() {
+            self.parallax_mp_logfile = i.parallax_mp_logfile;
+        }
+        if i.parallax_mp_squashfuse_path.is_some() {
+            self.parallax_mp_squashfuse_path = i.parallax_mp_squashfuse_path;
         }
         if i.perfmon.is_some() {
             self.perfmon = i.perfmon;
@@ -269,6 +326,8 @@ fn expand_raw_config_fields(
     expand_raw_option_string(&mut r.parallax_imagestore, force, e)?;
     expand_raw_option_string(&mut r.parallax_mount_program, force, e)?;
     expand_raw_option_string(&mut r.parallax_path, force, e)?;
+    expand_raw_option_string(&mut r.parallax_mp_logfile, force, e)?;
+    expand_raw_option_string(&mut r.parallax_mp_squashfuse_path, force, e)?;
     expand_raw_option_string(&mut r.podman_module, force, e)?;
     expand_raw_option_string(&mut r.podman_path, force, e)?;
     expand_raw_option_string(&mut r.podman_tmp_path, force, e)?;
@@ -376,6 +435,16 @@ pub fn update_config_by_user(config: &mut Config, edf: EDF) -> SarusResult<()> {
     let parallax_mount_program = edf.annotations.get("com.sarus.parallax_mount_program");
     if parallax_mount_program.is_some() {
         config.parallax_mount_program = parallax_mount_program.unwrap().to_string();
+    }
+
+    let parallax_mp_logfile = edf.annotations.get("com.sarus.parallax_mp_logfile");
+    if parallax_mp_logfile.is_some() {
+        config.parallax_mp_logfile = parallax_mp_logfile.unwrap().to_string();
+    }
+
+    let parallax_mp_squashfuse_path = edf.annotations.get("com.sarus.parallax_mp_squashfuse_path");
+    if parallax_mp_squashfuse_path.is_some() {
+        config.parallax_mp_squashfuse_path = parallax_mp_squashfuse_path.unwrap().to_string();
     }
 
     let parallax_path = edf.annotations.get("com.sarus.parallax_path");
