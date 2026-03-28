@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+spec:
+  initContainers:
+    - name: init
+      image: busybox:1.36
+  containers:
+    - name: app
+      image: alpine:3.22
+    - name: sidecar
+      image: alpine:3.22
+  template:
+    spec:
+      containers:
+        - name: nested
+          image: ubuntu:24.04
