@@ -9,7 +9,6 @@
   "platform": "linux/amd64",
   "runArgs": ["--platform=linux/amd64"],
 
-  // Use named volumes as caches
   "mounts": [
     "type=volume,source=skybox-target-ubuntu,target=/workspaces/target"
   ],
