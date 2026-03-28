@@ -11,9 +11,6 @@
 
   // Use named volumes as caches
   "mounts": [
-    "type=volume,src=${localWorkspaceFolderBasename}-rustup,dst=/home/vscode/.rustup",
-    "type=volume,src=${localWorkspaceFolderBasename}-cargo-registry,dst=/home/vscode/.cargo/registry",
-    "type=volume,src=${localWorkspaceFolderBasename}-cargo-git,dst=/home/vscode/.cargo/git",
     "type=volume,source=skybox-target-ubuntu,target=/workspaces/target"
   ],
 
