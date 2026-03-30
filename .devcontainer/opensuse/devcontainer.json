@@ -8,14 +8,29 @@
 
   "platform": "linux/amd64",
 
-  "runArgs": [
-    "--platform=linux/amd64"
-  ],
+  "runArgs": ["--platform=linux/amd64"],
 
   "mounts": [
     "type=volume,source=skybox-target,target=/workspaces/target"
   ],
 
-  "postCreateCommand": "rustup component add rustfmt clippy || true"
+  "postCreateCommand": "rustup component add rustfmt clippy rust-analyzer || true",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "fill-labs.dependi",
+        "vadimcn.vscode-lldb",
+        "openai.chatgpt",
+        "anthropic.claude-code"
+      ],
+      "settings": {
+        "rust-analyzer.check.command": "clippy",
+        "editor.formatOnSave": true
+      }
+    }
+  }
 }
 

@@ -38,6 +38,7 @@ ENV RUSTUP_HOME=/home/vscode/.rustup \
     CARGO_HOME=/home/vscode/.cargo
 ENV PATH=/home/vscode/.cargo/bin:${PATH}
 
+# We should probably pin the rust version
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable && \
     rustc -V && cargo -V
 USER root

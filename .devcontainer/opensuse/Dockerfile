@@ -25,6 +25,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo
 ENV PATH=${CARGO_HOME}/bin:${PATH}
 
+# We should probably pin the rust version
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable && \
     rustc -V && cargo -V
 
