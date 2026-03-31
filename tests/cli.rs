@@ -11,6 +11,7 @@ fn help_lists_subcommands() {
     cmd.arg("--help")
         .assert()
         .success()
+        .stdout(predicate::str::contains("--verbose"))
         .stdout(predicate::str::contains("validate"))
         .stdout(predicate::str::contains("render"))
         .stdout(predicate::str::contains("run"));
@@ -24,6 +25,24 @@ fn version_prints_package_version() {
         .assert()
         .success()
         .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn help_accepts_top_level_verbose_flag() {
+    let mut cmd = Command::cargo_bin("sarusctl").unwrap();
+    cmd.args(["--verbose", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--verbose"));
+}
+
+#[test]
+fn validate_accepts_top_level_verbose_flag() {
+    let mut cmd = Command::cargo_bin("sarusctl").unwrap();
+    cmd.args(["--verbose", "validate", &fixture("valid.toml")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("is a valid EDF file"));
 }
 
 #[test]

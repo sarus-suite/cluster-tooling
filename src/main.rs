@@ -1,13 +1,16 @@
 use clap::{Parser, Subcommand};
 use sarusctl::{
-    AppDeps, CommandSpec, FormatOutput, RealContainerRuntime, RealRasterOps, RealUserContext,
-    execute_command, format_output,
+    AppDeps, CommandSpec, ExecOptions, FormatOutput, RealContainerRuntime, RealRasterOps,
+    RealUserContext, execute_command_with_options, format_output,
 };
 
 /// CLI tool for sarus-suite
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
+    #[arg(long, short)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -73,8 +76,11 @@ fn main() {
         runtime: &runtime,
         user: &user,
     };
+    let options = ExecOptions {
+        verbose: args.verbose,
+    };
 
-    match execute_command(command.clone(), &deps) {
+    match execute_command_with_options(command.clone(), &deps, options) {
         Ok(output) => {
             let formatted = format_output(command.output_format(), &output);
             if !formatted.stdout.is_empty() {
