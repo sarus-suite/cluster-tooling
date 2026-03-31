@@ -18,7 +18,7 @@ pub struct PodmanCtx {
     pub podman_env: Option<HashMap<OsString, OsString>>,
 }
 
-//// tiny helper to simplify set podman execution env as:
+// tiny helper to simplify set podman execution env as:
 // let p_ctx = PodmanCtx {
 //    // ...normal fields...
 //    podman_env: None,
@@ -310,7 +310,7 @@ mod commands {
             )
             .arg("--roStoragePath")
             .arg(
-                &podman_ctx
+                podman_ctx
                     .ro_store
                     .as_ref()
                     .expect("Missing read-only store path in parallax_migrate()"),
@@ -377,6 +377,12 @@ pub fn pull(image: &str, podman_ctx: Option<&PodmanCtx>) {
     commands::pull(image, podman_ctx)
         .output()
         .expect("Failed to execute command");
+}
+
+pub fn pull_streaming(image: &str, podman_ctx: Option<&PodmanCtx>) -> ExitStatus {
+    commands::pull(image, podman_ctx)
+        .status()
+        .expect("Failed to execute command")
 }
 
 pub fn rmi(image: &str, podman_ctx: Option<&PodmanCtx>) {
@@ -508,6 +514,22 @@ fn parallax_execute_command(
     Ok(())
 }
 
+fn parallax_execute_command_streaming(
+    parallax_path: &PathBuf,
+    podman_ctx: &PodmanCtx,
+    image: &str,
+    action: &str,
+) -> anyhow::Result<()> {
+    let status = commands::parallax(parallax_path, podman_ctx, image, action)
+        .status()
+        .expect(&format!("Failed to execute `parallax {action}`"));
+
+    if !status.success() {
+        anyhow::bail!("parallax {action} failed");
+    }
+    Ok(())
+}
+
 pub fn parallax_migrate(
     parallax_path: &PathBuf,
     podman_ctx: &PodmanCtx,
@@ -522,6 +544,22 @@ pub fn parallax_rmi(
     image: &str,
 ) -> anyhow::Result<()> {
     parallax_execute_command(parallax_path, podman_ctx, image, "rmi")
+}
+
+pub fn parallax_migrate_streaming(
+    parallax_path: &PathBuf,
+    podman_ctx: &PodmanCtx,
+    image: &str,
+) -> anyhow::Result<()> {
+    parallax_execute_command_streaming(parallax_path, podman_ctx, image, "migrate")
+}
+
+pub fn parallax_rmi_streaming(
+    parallax_path: &PathBuf,
+    podman_ctx: &PodmanCtx,
+    image: &str,
+) -> anyhow::Result<()> {
+    parallax_execute_command_streaming(parallax_path, podman_ctx, image, "rmi")
 }
 
 fn cli_flag(cmd: &mut Command, on: bool, name: &str) {
