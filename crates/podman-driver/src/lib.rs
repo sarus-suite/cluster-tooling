@@ -146,6 +146,26 @@ mod commands {
         cmd
     }
 
+    pub fn exec<I, S>(
+        container: &str,
+        podman_ctx: Option<&PodmanCtx>,
+        interactive: bool,
+        container_cmd: I,
+    ) -> Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut cmd = base(podman_ctx);
+        cmd.arg("exec");
+        if interactive {
+            cmd.arg("-it");
+        }
+        cmd.arg(container);
+        cmd.args(container_cmd);
+        cmd
+    }
+
     pub fn pull(image: &str, podman_ctx: Option<&PodmanCtx>) -> Command {
         let mut cmd = base(podman_ctx);
         cmd.args(["pull", image]);
@@ -285,6 +305,16 @@ mod commands {
         cmd
     }
 
+    pub fn kube_down(filepath: &str, force: bool, podman_ctx: Option<&PodmanCtx>) -> Command {
+        let mut cmd = commands::kube(podman_ctx);
+        cmd.arg("down");
+        if force {
+            cmd.arg("--force");
+        }
+        cmd.arg(filepath);
+        cmd
+    }
+
     pub fn version(module: Option<&str>) -> Command {
         let mut cmd = commands::base(None);
         cli_opt(&mut cmd, "--module", module.map(OsStr::new));
@@ -373,6 +403,30 @@ where
         .expect("Failed to execute command")
 }
 
+pub fn exec<I, S>(container: &str, podman_ctx: Option<&PodmanCtx>, container_cmd: I) -> Output
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    commands::exec(container, podman_ctx, false, container_cmd)
+        .output()
+        .expect("Failed to execute command")
+}
+
+pub fn exec_interactive<I, S>(
+    container: &str,
+    podman_ctx: Option<&PodmanCtx>,
+    container_cmd: I,
+) -> ExitStatus
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    commands::exec(container, podman_ctx, true, container_cmd)
+        .status()
+        .expect("Failed to execute command")
+}
+
 pub fn pull(image: &str, podman_ctx: Option<&PodmanCtx>) {
     commands::pull(image, podman_ctx)
         .output()
@@ -431,6 +485,12 @@ pub fn info(format: Option<&str>, podman_ctx: Option<&PodmanCtx>) -> Output {
 
 pub fn kube_play(filepath: &str, podman_ctx: Option<&PodmanCtx>) {
     commands::kube_play(filepath, podman_ctx)
+        .status()
+        .expect("Failed to execute command");
+}
+
+pub fn kube_down(filepath: &str, force: bool, podman_ctx: Option<&PodmanCtx>) {
+    commands::kube_down(filepath, force, podman_ctx)
         .status()
         .expect("Failed to execute command");
 }
