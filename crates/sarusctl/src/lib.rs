@@ -171,7 +171,7 @@ pub trait ContainerRuntime {
         container_cmd: &[String],
     ) -> Result<i32, AppError>;
     fn kube_play(&self, filepath: &str, run_ctx: &PodmanCtx) -> Result<(), AppError>;
-    // TODO add kube_down for pod teardown
+    fn kube_down(&self, filepath: &str, force: bool, run_ctx: &PodmanCtx) -> Result<(), AppError>;
 }
 
 pub struct AppDeps<'a> {
@@ -296,6 +296,11 @@ impl ContainerRuntime for RealContainerRuntime {
 
     fn kube_play(&self, filepath: &str, run_ctx: &PodmanCtx) -> Result<(), AppError> {
         pmd::kube_play(filepath, Some(run_ctx));
+        Ok(())
+    }
+
+    fn kube_down(&self, filepath: &str, force: bool, run_ctx: &PodmanCtx) -> Result<(), AppError> {
+        pmd::kube_down(filepath, force, Some(run_ctx));
         Ok(())
     }
 }
@@ -736,12 +741,18 @@ fn run_yaml_command(
     }
 
     let play_result = deps.runtime.kube_play(filepath, &run_ctx);
-    // TODO podman exec user command into container marked with specific extension
-    // TODO tear down pod with kube_down after user command completes, and report any errors from that as well
+    let down_result = deps.runtime.kube_down(filepath, true, &run_ctx);
+    // TODO check if we need to do anything else to report errors from kube_down as well
     let cleanup_warning = cleanup_podman_rootdirs(&run_ctx);
 
     // Append warning to error in case of run failure
     if let Err(err) = play_result {
+        return Err(match cleanup_warning {
+            Some(warning) => combine_error_with_warning(err, warning),
+            None => err,
+        });
+    }
+    if let Err(err) = down_result {
         return Err(match cleanup_warning {
             Some(warning) => combine_error_with_warning(err, warning),
             None => err,
@@ -878,6 +889,7 @@ mod tests {
         rmi_results: RefCell<HashMap<String, Result<(), AppError>>>,
         run_result: Result<i32, AppError>,
         kube_play_result: Result<(), AppError>,
+        kube_down_result: Result<(), AppError>,
     }
 
     impl FakeContainerRuntime {
@@ -894,6 +906,7 @@ mod tests {
                 rmi_results: RefCell::new(HashMap::new()),
                 run_result: Ok(0),
                 kube_play_result: Ok(()),
+                kube_down_result: Ok(()),
             }
         }
 
@@ -997,6 +1010,18 @@ mod tests {
                 .borrow_mut()
                 .push(format!("kube_play:{filepath}"));
             self.kube_play_result.clone()
+        }
+
+        fn kube_down(
+            &self,
+            filepath: &str,
+            force: bool,
+            _run_ctx: &PodmanCtx,
+        ) -> Result<(), AppError> {
+            self.calls
+                .borrow_mut()
+                .push(format!("kube_down:{filepath}?force={force}"));
+            self.kube_down_result.clone()
         }
     }
 
@@ -1585,7 +1610,8 @@ spec:
                 String::from("migrate:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
                 String::from("image_exists:ubuntu:24.04"),
-                format!("kube_play:{}", manifest.to_string_lossy())
+                format!("kube_play:{}", manifest.to_string_lossy()),
+                format!("kube_down:{}?force=true", manifest.to_string_lossy()),
             ]
         );
     }
