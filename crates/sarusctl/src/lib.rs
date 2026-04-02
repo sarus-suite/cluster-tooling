@@ -373,7 +373,7 @@ pub fn build_run_ctx(config: &Config, user: &CurrentUser) -> PodmanCtx {
     .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
     .with_env("PARALLAX_MP_GID", config.parallax_mp_gid.to_string())
     .with_env("PARALLAX_MP_SQUASHFUSE_CMD", config.parallax_mp_squashfuse_path.clone())
-    .with_env("PARALLAX_MP_LOGFILE", config.parallax_mp_logfile.clone());
+    .with_env("PARALLAX_MP_LOGFILE", config.parallax_mp_logfile.clone())
 }
 
 fn cleanup_podman_rootdirs(run_ctx: &PodmanCtx) -> Option<String> {
