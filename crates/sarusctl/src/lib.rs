@@ -11,6 +11,8 @@ use std::str;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+// TODO review pub status in this file, restrict pub only to entities needed in main.rs and tests
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ExecOptions {
     pub verbose: bool,
@@ -170,6 +172,12 @@ pub trait ContainerRuntime {
         container_ctx: &ContainerCtx,
         container_cmd: &[String],
     ) -> Result<i32, AppError>;
+    fn exec_interactive(
+        &self,
+        container_name: &str,
+        podman_ctx: &PodmanCtx,
+        container_cmd: &[String],
+    ) -> Result<i32, AppError>;
     fn kube_play(&self, filepath: &str, run_ctx: &PodmanCtx) -> Result<(), AppError>;
     fn kube_down(&self, filepath: &str, force: bool, run_ctx: &PodmanCtx) -> Result<(), AppError>;
 }
@@ -288,6 +296,19 @@ impl ContainerRuntime for RealContainerRuntime {
         container_cmd: &[String],
     ) -> Result<i32, AppError> {
         pmd::run_from_edf(edf, Some(run_ctx), container_ctx, container_cmd)
+            .code()
+            .ok_or_else(|| {
+                AppError::Runtime(String::from("Container process terminated by signal"))
+            })
+    }
+
+    fn exec_interactive(
+        &self,
+        container_name: &str,
+        podman_ctx: &PodmanCtx,
+        container_cmd: &[String],
+    ) -> Result<i32, AppError> {
+        pmd::exec_interactive(container_name, Some(podman_ctx), container_cmd)
             .code()
             .ok_or_else(|| {
                 AppError::Runtime(String::from("Container process terminated by signal"))
@@ -459,18 +480,97 @@ fn describe_dir_entries(path: &Path) -> String {
     }
 }
 
-pub fn extract_images_from_yaml_str(contents: &str) -> Result<Vec<String>, AppError> {
-    let manifest = yaml_serde::from_str::<yaml_serde::Value>(contents)
-        .map_err(|e| AppError::Yaml(e.to_string()))?;
+pub fn extract_images_from_yaml_value(
+    manifest: &yaml_serde::Value,
+) -> Result<Vec<String>, AppError> {
     let mut images = BTreeSet::new();
-    collect_yaml_images(&manifest, &mut images);
+    collect_yaml_images(manifest, &mut images);
     Ok(images.into_iter().collect())
 }
 
-pub fn extract_images_from_yaml_manifest(filepath: &Path) -> Result<Vec<String>, AppError> {
+pub fn extract_join_container_from_yaml_value(
+    manifest: &yaml_serde::Value,
+) -> Result<String, AppError> {
+    let containers = yaml_mapping_get(manifest, "spec")
+        .and_then(|spec| yaml_mapping_get(spec, "containers"))
+        .and_then(yaml_serde::Value::as_sequence)
+        .ok_or_else(|| AppError::Yaml(String::from("YAML manifest must define spec.containers")))?;
+
+    let mut all_names = Vec::new();
+    let mut join_names = Vec::new();
+
+    for container in containers {
+        let name = yaml_mapping_get(container, "name")
+            .and_then(yaml_serde::Value::as_str)
+            .ok_or_else(|| {
+                AppError::Yaml(String::from(
+                    "Each container in spec.containers must define a string name",
+                ))
+            })?
+            .to_string();
+
+        let join_label = yaml_mapping_get(container, "labels")
+            .and_then(|labels| yaml_mapping_get(labels, "run.sarus.join"))
+            .and_then(yaml_serde::Value::as_str);
+
+        if join_label == Some("true") {
+            join_names.push(name.clone());
+        }
+
+        all_names.push(name);
+    }
+
+    match join_names.as_slice() {
+        [name] => Ok(name.clone()),
+        [] => match all_names.as_slice() {
+            [name] => Ok(name.clone()),
+            [] => Err(AppError::Yaml(String::from(
+                "YAML manifest must define at least one container in spec.containers",
+            ))),
+            _ => Err(AppError::Yaml(String::from(
+                "YAML manifest must label exactly one container with run.sarus.join=\"true\" when spec.containers has multiple containers",
+            ))),
+        },
+        _ => Err(AppError::Yaml(String::from(
+            "YAML manifest must not label more than one container with run.sarus.join=\"true\"",
+        ))),
+    }
+}
+
+pub fn extract_pod_name_from_yaml_value(manifest: &yaml_serde::Value) -> Result<String, AppError> {
+    yaml_mapping_get(manifest, "metadata")
+        .and_then(|metadata| yaml_mapping_get(metadata, "name"))
+        .and_then(yaml_serde::Value::as_str)
+        .map(String::from)
+        .ok_or_else(|| {
+            AppError::Yaml(String::from(
+                "YAML manifest must define metadata.name as a string",
+            ))
+        })
+}
+
+pub fn get_join_container_from_yaml_manifest(
+    manifest: &yaml_serde::Value,
+) -> Result<String, AppError> {
+    let container_name = extract_join_container_from_yaml_value(manifest)?;
+    let pod_name = extract_pod_name_from_yaml_value(manifest)?;
+    Ok(format!("{pod_name}-{container_name}"))
+}
+
+fn parse_yaml_value_from_file(filepath: &Path) -> Result<yaml_serde::Value, AppError> {
     let contents = fs::read_to_string(filepath)
         .map_err(|e| AppError::Io(format!("failed to read {}: {e}", filepath.display())))?;
-    extract_images_from_yaml_str(&contents)
+    parse_yaml_value_from_str(&contents)
+}
+
+fn parse_yaml_value_from_str(contents: &str) -> Result<yaml_serde::Value, AppError> {
+    yaml_serde::from_str::<yaml_serde::Value>(contents).map_err(|e| AppError::Yaml(e.to_string()))
+}
+
+fn yaml_mapping_get<'a>(value: &'a yaml_serde::Value, key: &str) -> Option<&'a yaml_serde::Value> {
+    value
+        .as_mapping()?
+        .get(yaml_serde::Value::String(String::from(key)))
 }
 
 /// Recursively traverse the YAML structure to find all values of "image" keys that are strings, and collect them into the provided set.
@@ -665,7 +765,7 @@ fn run_command(
             })?;
 
             let config = deps.raster.load_config()?;
-            run_yaml_command(filepath, &config, deps, options)
+            run_yaml_command(filepath, container_cmd, &config, deps, options)
         }
     }
 }
@@ -722,6 +822,7 @@ fn run_edf_command(
 
 fn run_yaml_command(
     filepath: &str,
+    container_cmd: &[String],
     config: &Config,
     deps: &AppDeps<'_>,
     options: ExecOptions,
@@ -729,9 +830,14 @@ fn run_yaml_command(
     let user = deps.user.current_user()?;
     let ro_ctx = build_readonly_ctx(config);
     let mut run_ctx = build_run_ctx(config, &user);
+    // Podman kube play doesn't seem to honor all settings from a module
+    // so to avoid confusion we disable the module for the time being.
+    // The settings from the module have to be specified in the k8s yaml, if desired
     run_ctx.module = None;
 
-    let images = extract_images_from_yaml_manifest(Path::new(filepath))?;
+    let manifest = parse_yaml_value_from_file(Path::new(filepath))?;
+
+    let images = extract_images_from_yaml_value(&manifest)?;
     let mut output = AppOutput::success("");
 
     for image in images {
@@ -740,7 +846,12 @@ fn run_yaml_command(
         }
     }
 
+    let join_container = get_join_container_from_yaml_manifest(&manifest)?;
+
     let play_result = deps.runtime.kube_play(filepath, &run_ctx);
+    let exec_result = deps
+        .runtime
+        .exec_interactive(&join_container, &run_ctx, container_cmd);
     let down_result = deps.runtime.kube_down(filepath, true, &run_ctx);
     // TODO check if we need to do anything else to report errors from kube_down as well
     let cleanup_warning = cleanup_podman_rootdirs(&run_ctx);
@@ -752,6 +863,15 @@ fn run_yaml_command(
             None => err,
         });
     }
+    output.return_code = match exec_result {
+        Ok(return_code) => return_code,
+        Err(err) => {
+            return Err(match cleanup_warning {
+                Some(warning) => combine_error_with_warning(err, warning),
+                None => err,
+            });
+        }
+    };
     if let Err(err) = down_result {
         return Err(match cleanup_warning {
             Some(warning) => combine_error_with_warning(err, warning),
@@ -999,9 +1119,23 @@ mod tests {
             edf: &EDF,
             _run_ctx: &PodmanCtx,
             _container_ctx: &ContainerCtx,
-            _container_cmd: &[String],
+            container_cmd: &[String],
         ) -> Result<i32, AppError> {
-            self.calls.borrow_mut().push(format!("run:{}", edf.image));
+            self.calls
+                .borrow_mut()
+                .push(format!("run:{}:{container_cmd:?}", edf.image));
+            self.run_result.clone()
+        }
+
+        fn exec_interactive(
+            &self,
+            container_name: &str,
+            _podman_ctx: &PodmanCtx,
+            container_cmd: &[String],
+        ) -> Result<i32, AppError> {
+            self.calls.borrow_mut().push(format!(
+                "exec_interactive:{container_name}:{container_cmd:?}"
+            ));
             self.run_result.clone()
         }
 
@@ -1057,6 +1191,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_yaml_value_from_str_rejects_invalid_yaml() {
+        let err = parse_yaml_value_from_str("apiVersion: [").unwrap_err();
+        assert!(matches!(err, AppError::Yaml(_)));
+    }
+
+    #[test]
     fn extract_images_from_yaml_str_deduplicates_nested_images() {
         let yaml = r#"
 apiVersion: v1
@@ -1071,7 +1211,8 @@ spec:
     image: busybox:1.36
 "#;
 
-        let images = extract_images_from_yaml_str(yaml).unwrap();
+        let manifest = parse_yaml_value_from_str(yaml).unwrap();
+        let images = extract_images_from_yaml_value(&manifest).unwrap();
         assert_eq!(
             images,
             vec![
@@ -1094,14 +1235,172 @@ spec:
     - should-not-count
 "#;
 
-        let images = extract_images_from_yaml_str(yaml).unwrap();
+        let manifest = parse_yaml_value_from_str(yaml).unwrap();
+        let images = extract_images_from_yaml_value(&manifest).unwrap();
         assert_eq!(images, vec![String::from("alpine:3.22")]);
     }
 
     #[test]
-    fn extract_images_from_yaml_str_rejects_invalid_yaml() {
-        let err = extract_images_from_yaml_str("apiVersion: [").unwrap_err();
-        assert!(matches!(err, AppError::Yaml(_)));
+    fn extract_join_container_from_yaml_str_returns_single_unlabeled_container() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: training-pod
+spec:
+  containers:
+    - name: app
+      image: alpine:3.22
+"#;
+
+        let manifest = parse_yaml_value_from_str(yaml).unwrap();
+        let join_container = extract_join_container_from_yaml_value(&manifest).unwrap();
+        assert_eq!(join_container, String::from("app"));
+    }
+
+    #[test]
+    fn extract_join_container_from_yaml_str_returns_labeled_container() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: training-pod
+spec:
+  containers:
+    - name: app
+      image: alpine:3.22
+    - name: sidecar
+      image: ubuntu:24.04
+      labels:
+        run.sarus.join: "true"
+"#;
+
+        let manifest = parse_yaml_value_from_str(yaml).unwrap();
+        let join_container = extract_join_container_from_yaml_value(&manifest).unwrap();
+        assert_eq!(join_container, String::from("sidecar"));
+    }
+
+    #[test]
+    fn extract_join_container_from_yaml_str_rejects_multiple_labeled_containers() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: training-pod
+spec:
+  containers:
+    - name: app
+      image: alpine:3.22
+      labels:
+        run.sarus.join: "true"
+    - name: sidecar
+      image: ubuntu:24.04
+      labels:
+        run.sarus.join: "true"
+"#;
+
+        let manifest = parse_yaml_value_from_str(yaml).unwrap();
+        let err = extract_join_container_from_yaml_value(&manifest).unwrap_err();
+        assert_eq!(
+            err,
+            AppError::Yaml(String::from(
+                "YAML manifest must not label more than one container with run.sarus.join=\"true\"",
+            ))
+        );
+    }
+
+    #[test]
+    fn extract_join_container_from_yaml_str_rejects_unlabeled_multi_container_pod() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: app
+      image: alpine:3.22
+    - name: sidecar
+      image: ubuntu:24.04
+"#;
+
+        let manifest = parse_yaml_value_from_str(yaml).unwrap();
+        let err = extract_join_container_from_yaml_value(&manifest).unwrap_err();
+        assert_eq!(
+            err,
+            AppError::Yaml(String::from(
+                "YAML manifest must label exactly one container with run.sarus.join=\"true\" when spec.containers has multiple containers",
+            ))
+        );
+    }
+
+    #[test]
+    fn extract_join_container_from_yaml_str_ignores_init_containers_and_nested_templates() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+spec:
+  initContainers:
+    - name: init
+      image: busybox:1.36
+      labels:
+        run.sarus.join: "true"
+  containers:
+    - name: app
+      image: alpine:3.22
+      labels:
+        run.sarus.join: "true"
+    - name: sidecar
+      image: ubuntu:24.04
+  template:
+    spec:
+      containers:
+        - name: nested
+          image: debian:bookworm
+          labels:
+            run.sarus.join: "true"
+"#;
+
+        let manifest = parse_yaml_value_from_str(yaml).unwrap();
+        let join_container = extract_join_container_from_yaml_value(&manifest).unwrap();
+        assert_eq!(join_container, String::from("app"));
+    }
+
+    #[test]
+    fn extract_pod_name_from_yaml_str_returns_metadata_name() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: training-pod
+spec:
+  containers:
+    - name: app
+      image: alpine:3.22
+"#;
+
+        let manifest = parse_yaml_value_from_str(yaml).unwrap();
+        let pod_name = extract_pod_name_from_yaml_value(&manifest).unwrap();
+        assert_eq!(pod_name, String::from("training-pod"));
+    }
+
+    #[test]
+    fn extract_pod_name_from_yaml_str_requires_metadata_name() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: app
+      image: alpine:3.22
+"#;
+
+        let manifest = parse_yaml_value_from_str(yaml).unwrap();
+        let err = extract_pod_name_from_yaml_value(&manifest).unwrap_err();
+        assert_eq!(
+            err,
+            AppError::Yaml(String::from(
+                "YAML manifest must define metadata.name as a string",
+            ))
+        );
     }
 
     #[test]
@@ -1446,7 +1745,7 @@ spec:
             runtime.calls(),
             vec![
                 String::from("image_exists:alpine:3.22"),
-                String::from("run:alpine:3.22")
+                String::from("run:alpine:3.22:[\"sh\"]")
             ]
         );
     }
@@ -1484,7 +1783,7 @@ spec:
                 String::from("default_graphroot"),
                 String::from("migrate:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
-                String::from("run:alpine:3.22")
+                String::from("run:alpine:3.22:[\"sh\"]")
             ]
         );
     }
@@ -1568,10 +1867,16 @@ spec:
             r#"
 apiVersion: v1
 kind: Pod
+metadata:
+  name: training-pod
 spec:
   containers:
-    - image: alpine:3.22
-    - image: ubuntu:24.04
+    - name: app
+      image: alpine:3.22
+    - name: sidecar
+      image: ubuntu:24.04
+      labels:
+        run.sarus.join: "true"
 "#,
         )
         .unwrap();
@@ -1611,6 +1916,7 @@ spec:
                 String::from("image_exists:alpine:3.22"),
                 String::from("image_exists:ubuntu:24.04"),
                 format!("kube_play:{}", manifest.to_string_lossy()),
+                String::from("exec_interactive:training-pod-sidecar:[]"),
                 format!("kube_down:{}?force=true", manifest.to_string_lossy()),
             ]
         );
@@ -1625,9 +1931,12 @@ spec:
             r#"
 apiVersion: v1
 kind: Pod
+metadata:
+  name: training-pod
 spec:
   containers:
-    - image: alpine:3.22
+    - name: app
+      image: alpine:3.22
 "#,
         )
         .unwrap();
@@ -1678,9 +1987,12 @@ spec:
             r#"
 apiVersion: v1
 kind: Pod
+metadata:
+  name: training-pod
 spec:
   containers:
-    - image: alpine:3.22
+    - name: app
+      image: alpine:3.22
 "#,
         )
         .unwrap();
@@ -1718,6 +2030,63 @@ spec:
                 roots_base.display()
             );
         }
+    }
+
+    #[test]
+    fn run_yaml_fails_before_kube_play_when_join_container_selection_is_ambiguous() {
+        let temp = tempdir().unwrap();
+        let manifest = temp.path().join("pod.yaml");
+        fs::write(
+            &manifest,
+            r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: training-pod
+spec:
+  containers:
+    - name: app
+      image: alpine:3.22
+    - name: sidecar
+      image: ubuntu:24.04
+"#,
+        )
+        .unwrap();
+
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster.render_results.insert(
+            manifest.to_string_lossy().into_owned(),
+            Err(String::from("not an edf")),
+        );
+        let runtime = FakeContainerRuntime::new();
+        runtime.push_image_exists("alpine:3.22", vec![true]);
+        runtime.push_image_exists("ubuntu:24.04", vec![true]);
+        let user = FakeUserContext {
+            user: CurrentUser { uid: 1, gid: 1 },
+        };
+
+        let err = execute_command(
+            CommandSpec::Run {
+                filepath: manifest.to_string_lossy().into_owned(),
+                container_cmd: vec![],
+            },
+            &mock_deps(&raster, &runtime, &user),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            AppError::Yaml(String::from(
+                "YAML manifest must label exactly one container with run.sarus.join=\"true\" when spec.containers has multiple containers",
+            ))
+        );
+        assert_eq!(
+            runtime.calls(),
+            vec![
+                String::from("image_exists:alpine:3.22"),
+                String::from("image_exists:ubuntu:24.04"),
+            ]
+        );
     }
 
     #[test]
