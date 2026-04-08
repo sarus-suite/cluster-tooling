@@ -1,0 +1,155 @@
+name: host-tools
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: Uploaded artifact name for the packed host tools bundle
+        required: false
+        type: string
+        default: host-tools-linux-amd64
+      squashfuse-version:
+        description: squashfuse version to build
+        required: false
+        type: string
+        default: "0.6.1"
+      parallax-version:
+        description: parallax release version to fetch
+        required: false
+        type: string
+        default: "0.10.0"
+      podman-static-url:
+        description: URL of the podman static tarball to fetch
+        required: false
+        type: string
+        default: https://github.com/mgoltzsche/podman-static/releases/latest/download/podman-linux-amd64.tar.gz
+      bats-ref:
+        description: Git ref to fetch for bats-core
+        required: false
+        type: string
+        default: v1.11.1
+    outputs:
+      artifact-name:
+        description: Uploaded artifact name for the bundle
+        value: ${{ jobs.build-host-tools.outputs.artifact-name }}
+      cache-key:
+        description: Cache key used for the reusable host tools workspace
+        value: ${{ jobs.build-host-tools.outputs.cache-key }}
+  workflow_dispatch:
+    inputs:
+      artifact-name:
+        description: Uploaded artifact name for the packed host tools bundle
+        required: false
+        type: string
+        default: host-tools-linux-amd64
+      squashfuse-version:
+        description: squashfuse version to build
+        required: false
+        type: string
+        default: "0.6.1"
+      parallax-version:
+        description: parallax release version to fetch
+        required: false
+        type: string
+        default: "0.9.12"
+      podman-static-url:
+        description: URL of the podman static tarball to fetch
+        required: false
+        type: string
+        default: https://github.com/mgoltzsche/podman-static/releases/latest/download/podman-linux-amd64.tar.gz
+      bats-ref:
+        description: Git ref to fetch for bats-core
+        required: false
+        type: string
+        default: v1.11.1
+
+permissions:
+  contents: read
+
+jobs:
+  build-host-tools:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    outputs:
+      artifact-name: ${{ steps.meta.outputs.artifact-name }}
+      cache-key: ${{ steps.meta.outputs.cache-key }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute cache metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          artifact_name="${{ inputs.artifact-name || github.event.inputs.artifact-name || 'host-tools-linux-amd64' }}"
+          squashfuse_version="${{ inputs.squashfuse-version || github.event.inputs.squashfuse-version || '0.6.1' }}"
+          parallax_version="${{ inputs.parallax-version || github.event.inputs.parallax-version || '0.9.12' }}"
+          podman_static_url="${{ inputs.podman-static-url || github.event.inputs.podman-static-url || 'https://github.com/mgoltzsche/podman-static/releases/latest/download/podman-linux-amd64.tar.gz' }}"
+          bats_ref="${{ inputs.bats-ref || github.event.inputs.bats-ref || 'v1.11.1' }}"
+          podman_static_url_hash="$(printf '%s' "${podman_static_url}" | sha256sum | cut -d' ' -f1)"
+
+          echo "artifact-name=${artifact_name}" >> "$GITHUB_OUTPUT"
+          echo "cache-key=${{ runner.os }}-${{ runner.arch }}-host-tools-${squashfuse_version}-${parallax_version}-${bats_ref}-${podman_static_url_hash}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore host tools cache
+        id: restore-host-tools
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .ci-cache/host-tools
+            .ci-out/host-tools
+          key: ${{ steps.meta.outputs.cache-key }}-${{ hashFiles('scripts/ci/static/build-host-tools-bundle.sh', '.github/workflows/host-tools.yml') }}
+
+      - name: Install build dependencies for host tools
+        if: steps.restore-host-tools.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            curl \
+            git \
+            libattr1-dev \
+            libfuse3-dev \
+            liblz4-dev \
+            liblzma-dev \
+            liblzo2-dev \
+            libzstd-dev \
+            pkg-config \
+            tar \
+            zlib1g-dev
+
+      - name: Build reusable host tools bundle
+        env:
+          SQUASHFUSE_VERSION: ${{ inputs.squashfuse-version }}
+          PARALLAX_VERSION: ${{ inputs.parallax-version }}
+          PODMAN_STATIC_URL: ${{ inputs.podman-static-url }}
+          BATS_REF: ${{ inputs.bats-ref }}
+        run: scripts/ci/static/build-host-tools-bundle.sh
+
+      - name: Save host tools cache
+        if: steps.restore-host-tools.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .ci-cache/host-tools
+            .ci-out/host-tools
+          key: ${{ steps.restore-host-tools.outputs.cache-primary-key }}
+
+      - name: Pack host tools artifact
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p .ci-artifacts
+          tar -C .ci-out -czf ".ci-artifacts/${{ steps.meta.outputs.artifact-name }}.tar.gz" host-tools
+
+      - name: Upload host tools artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact-name }}
+          path: .ci-artifacts/${{ steps.meta.outputs.artifact-name }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
