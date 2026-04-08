@@ -9,12 +9,47 @@ permissions:
   packages: write
 
 jobs:
+  host-tools:
+    uses: ./.github/workflows/host-tools.yml
+
   slurm:
+    needs: host-tools
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download reusable host tools bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.host-tools.outputs.artifact-name }}
+          path: .ci-artifacts
+
+      - name: Install reusable host tools bundle
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          tar -C /tmp -xzf ".ci-artifacts/${{ needs.host-tools.outputs.artifact-name }}.tar.gz"
+
+          sudo install -d /usr/local/bin /usr/local/libexec /usr/local/share
+          sudo cp -R /tmp/host-tools/podman-static/. /usr/local/
+          sudo cp -R /tmp/host-tools/bats/. /usr/local/
+          sudo install -m 0755 /tmp/host-tools/bin/* /usr/local/bin/
+
+          # Keep legacy paths stable for the existing workflow.
+          if [ -x /usr/local/libexec/podman/conmon ]; then
+            sudo ln -sf /usr/local/libexec/podman/conmon /usr/local/bin/conmon
+          fi
+          sudo ln -sf /usr/local/bin/squashfuse /usr/bin/squashfuse
+          sudo ln -sf /usr/local/bin/squashfuse_ll /usr/bin/squashfuse_ll
+
+          command -v podman
+          command -v conmon
+          command -v squashfuse_ll
+          command -v parallax
+          command -v bats
 
       - name: Allow unprivileged user namespaces (work around Ubuntu 24.04 AppArmor restriction)
         run: |
@@ -384,93 +419,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             lsb-release \
-            wget \
-            tar \
-            gzip \
-            git \
             btrfs-progs \
             libbtrfs-dev \
             lvm2 \
             libdevmapper-dev \
             squashfs-tools \
             fuse-overlayfs \
-            inotify-tools \
-            build-essential
-
-      - name: Install squashfuse + squashfuse_ll into /usr/bin (from tarball)
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential ca-certificates curl pkg-config \
-            libfuse3-dev zlib1g-dev liblzma-dev liblzo2-dev liblz4-dev libzstd-dev libattr1-dev \
-            tar
-
-          work="$(mktemp -d)"
-          curl -fsSL -o "$work/squashfuse.tar.gz" \
-            https://github.com/vasi/squashfuse/releases/download/0.6.1/squashfuse-0.6.1.tar.gz
-
-          tar -xzf "$work/squashfuse.tar.gz" -C "$work"
-          srcdir="$(find "$work" -maxdepth 1 -type d -name 'squashfuse-*' | head -n 1)"
-          test -n "$srcdir"
-
-          pushd "$srcdir"
-
-          # Install into /usr so binaries go to /usr/bin
-          ./configure --prefix=/usr
-
-          # Build everything (including squashfuse_ll if supported)
-          make -j"$(nproc)"
-
-          # Install into /usr/bin
-          sudo make install
-
-          popd
-
-          echo "=== Installed paths ==="
-          ls -l /usr/bin/squashfuse || true
-          ls -l /usr/bin/squashfuse_ll || true
-
-          # Hard requirements
-          test -x /usr/bin/squashfuse
-
-          # If squashfuse_ll still isn't present, fail loudly with context
-          if [ ! -x /usr/bin/squashfuse_ll ]; then
-            echo "ERROR: /usr/bin/squashfuse_ll was not installed."
-            echo "Build outputs containing 'll' (if any):"
-            find "$srcdir" -maxdepth 2 -type f -name '*squashfuse*ll*' -o -name '*ll*.o' || true
-            echo "Maybe the build disabled LL binary on this platform/config."
-            exit 1
-          fi
-
-          echo "=== Versions ==="
-          /usr/bin/squashfuse --version || true
-          /usr/bin/squashfuse_ll --version || true
-
-
-
-      - name: Install Podman (static binary from mgoltzsche/podman-static)
-        run: |
-          set -euxo pipefail
-
-          # Ensure we have curl + tar
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends curl ca-certificates tar gzip
-
-          # Ubuntu runners are amd64
-          curl -fsSL -o /tmp/podman-linux-amd64.tar.gz \
-            https://github.com/mgoltzsche/podman-static/releases/latest/download/podman-linux-amd64.tar.gz
-
-          mkdir -p /tmp/podman-static
-          tar -xzf /tmp/podman-linux-amd64.tar.gz -C /tmp/podman-static
-
-          sudo cp -r /tmp/podman-static/podman-linux-amd64/usr /tmp/podman-static/podman-linux-amd64/etc /
-
-          # Sanity check
-          podman --version
-          podman info || true
+            inotify-tools
 
 
       - name: Tool versions (podman + fuse/squash tools)
@@ -651,37 +606,6 @@ jobs:
           # Run a tiny container rootless
           podman run --rm docker.io/library/alpine:3.20 echo "ok (rootless podman)"
 
-      - name: Install Parallax + mount program (v0.9.10 release binaries)
-        run: |
-          set -euxo pipefail
-
-          sudo install -d /usr/local/bin
-
-          # parallax binary
-          sudo curl -fsSL \
-            -o /usr/local/bin/parallax \
-            https://github.com/sarus-suite/parallax/releases/download/v0.9.12/parallax-v0.9.12-ubuntu-24.04-amd64
-          sudo chmod 0755 /usr/local/bin/parallax
-
-          # mount program (script)
-          sudo curl -fsSL \
-            -o /usr/local/bin/parallax-mount-program \
-            https://github.com/sarus-suite/parallax/releases/download/v0.9.12/parallax-mount-program-v0.9.12.sh
-          sudo chmod 0755 /usr/local/bin/parallax-mount-program
-
-          # sanity
-          parallax --version || true
-          /usr/local/bin/parallax-mount-program --help >/dev/null 2>&1 || true
-
-      - name: Install Bats locally
-        run: |
-          set -euxo pipefail
-          TMP_DIR="$(mktemp -d)"
-          echo "TMP_DIR=$TMP_DIR" >> "$GITHUB_ENV"
-
-          git clone --depth 1 https://github.com/bats-core/bats-core.git "$TMP_DIR/bats-core"
-          "$TMP_DIR/bats-core/install.sh" "$TMP_DIR/bats"
-
       - name: Parallax basic smoke test (with rootless Podman)
         run: |
           set -euxo pipefail
@@ -845,4 +769,3 @@ jobs:
           rm /tmp/test_logfile
           ./dist/sarusctl --verbose run busybox true
           tail -n 200 /tmp/test_logfile || true
-
