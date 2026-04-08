@@ -65,8 +65,9 @@ install_podman_static() {
   local prefix="${CACHE_DIR}/prefix/podman-static"
   local tarball="${CACHE_DIR}/downloads/podman-static.tar.gz"
   local unpack_dir="${CACHE_DIR}/build/podman-static"
+  local bundle_root="${unpack_dir}/podman-linux-amd64"
 
-  if [ -x "${prefix}/bin/podman" ]; then
+  if [ -x "${prefix}/usr/local/bin/podman" ]; then
     log "reusing cached podman static bundle"
     return
   fi
@@ -78,11 +79,11 @@ install_podman_static() {
   mkdir -p "${unpack_dir}" "${prefix}"
   tar -xzf "${tarball}" -C "${unpack_dir}"
 
-  local usr_dir
-  usr_dir="$(find "${unpack_dir}" -type d -path '*/usr' | head -n 1)"
-  test -n "${usr_dir}"
+  mkdir -p "${prefix}/usr" "${prefix}/etc"
+  cp -R "${bundle_root}/usr/." "${prefix}/usr/"
+  cp -R "${bundle_root}/etc/." "${prefix}/etc/"
 
-  cp -R "${usr_dir}/." "${prefix}/"
+  test -x "${prefix}/usr/local/bin/podman"
 }
 
 install_parallax() {
@@ -120,6 +121,8 @@ install_bats() {
 }
 
 publish_bundle() {
+  local podman_bin_dir="${OUT_DIR}/podman-static/usr/local/bin"
+
   rm -rf "${OUT_DIR}"
   mkdir -p "${BIN_DIR}" "${MANIFEST_DIR}" "${OUT_DIR}/podman-static" "${OUT_DIR}/bats"
 
@@ -127,13 +130,13 @@ publish_bundle() {
   cp "${CACHE_DIR}/prefix/squashfuse-${SQUASHFUSE_VERSION}/bin/squashfuse_ll" "${BIN_DIR}/"
 
   cp -R "${CACHE_DIR}/prefix/podman-static/." "${OUT_DIR}/podman-static/"
-  cp "${OUT_DIR}/podman-static/bin/podman" "${BIN_DIR}/"
-  cp "${OUT_DIR}/podman-static/bin/crun" "${BIN_DIR}/" || true
-  cp "${OUT_DIR}/podman-static/bin/runc" "${BIN_DIR}/" || true
-  cp "${OUT_DIR}/podman-static/bin/fuse-overlayfs" "${BIN_DIR}/" || true
-  cp "${OUT_DIR}/podman-static/bin/fusermount3" "${BIN_DIR}/" || true
-  cp "${OUT_DIR}/podman-static/bin/pasta" "${BIN_DIR}/" || true
-  cp "${OUT_DIR}/podman-static/bin/pasta.avx2" "${BIN_DIR}/" || true
+  cp "${podman_bin_dir}/podman" "${BIN_DIR}/"
+  cp "${podman_bin_dir}/crun" "${BIN_DIR}/" || true
+  cp "${podman_bin_dir}/runc" "${BIN_DIR}/" || true
+  cp "${podman_bin_dir}/fuse-overlayfs" "${BIN_DIR}/" || true
+  cp "${podman_bin_dir}/fusermount3" "${BIN_DIR}/" || true
+  cp "${podman_bin_dir}/pasta" "${BIN_DIR}/" || true
+  cp "${podman_bin_dir}/pasta.avx2" "${BIN_DIR}/" || true
 
   cp "${CACHE_DIR}/prefix/parallax-${PARALLAX_VERSION}/bin/parallax" "${BIN_DIR}/"
   cp "${CACHE_DIR}/prefix/parallax-${PARALLAX_VERSION}/bin/parallax-mount-program" "${BIN_DIR}/"
