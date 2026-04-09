@@ -20,6 +20,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Restore apt package archive cache
+        id: restore-apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-${{ runner.arch }}-apt-archives-slurm-${{ hashFiles('.github/workflows/slurm-single-node.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-apt-archives-slurm-
+
       - name: Download reusable host tools bundle
         uses: actions/download-artifact@v4
         with:
@@ -546,6 +555,13 @@ jobs:
           command -v newuidmap
           command -v newgidmap
           podman info
+
+      - name: Save apt package archive cache
+        if: steps.restore-apt-archives.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ steps.restore-apt-archives.outputs.cache-primary-key }}
 
       - name: Fix AppArmor profile for /usr/local/bin/podman
         run: |
