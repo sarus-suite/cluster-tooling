@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 ubuntu:24.04
+FROM --platform=linux/amd64 ubuntu:24.04 AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -38,10 +38,14 @@ ENV RUSTUP_HOME=/home/vscode/.rustup \
     CARGO_HOME=/home/vscode/.cargo
 ENV PATH=/home/vscode/.cargo/bin:${PATH}
 
-# We should probably pin the rust version
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable && \
-    rustc -V && cargo -V
+    cargo install cargo-chef --locked && \
+    rustc -V && cargo -V && cargo chef --version
+
 USER root
+RUN mkdir -p /opt/cargo-target && chown -R vscode:vscode /opt/cargo-target
+RUN mkdir -p /home/vscode/.cargo/git && chown -R vscode:vscode /home/vscode/.cargo
+ENV CARGO_TARGET_DIR=/opt/cargo-target
 
 WORKDIR /tmp
 
@@ -66,7 +70,6 @@ RUN set -eux; \
         libslurm-dev \
       ; \
       rm -rf /var/lib/apt/lists/*; \
-      # Some Ubuntu builds place headers under /usr/include/slurm; ensure it's present (helpful for tools expecting it)
       if [ -d /usr/include/slurm ]; then \
         mkdir -p /usr/local/include; \
         ln -sfn /usr/include/slurm /usr/local/include/slurm; \
@@ -74,7 +77,39 @@ RUN set -eux; \
     fi; \
     rm -rf /tmp/*
 
-
-# Match your include path behavior
 ENV CPATH=/usr/local/include:/usr/local/include/slurm:/usr/include
 
+FROM base AS chef-planner
+
+RUN mkdir -p /workspaces/cluster-tooling && chown -R vscode:vscode /workspaces/cluster-tooling
+WORKDIR /workspaces/cluster-tooling
+COPY --chown=vscode:vscode Cargo.toml Cargo.lock ./
+COPY --chown=vscode:vscode crates/skybox/Cargo.toml crates/skybox/Cargo.toml
+COPY --chown=vscode:vscode crates/sarusctl/Cargo.toml crates/sarusctl/Cargo.toml
+COPY --chown=vscode:vscode crates/podman-driver/Cargo.toml crates/podman-driver/Cargo.toml
+COPY --chown=vscode:vscode crates/raster/Cargo.toml crates/raster/Cargo.toml
+RUN mkdir -p crates/skybox/src crates/sarusctl/src crates/podman-driver/src crates/raster/src && \
+    printf 'pub fn placeholder() {}\n' > crates/skybox/src/lib.rs && \
+    printf 'pub fn placeholder() {}\n' > crates/sarusctl/src/lib.rs && \
+    printf 'fn main() {}\n' > crates/sarusctl/src/main.rs && \
+    printf 'pub fn placeholder() {}\n' > crates/podman-driver/src/lib.rs && \
+    printf 'pub fn placeholder() {}\n' > crates/raster/src/lib.rs
+
+USER vscode
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM base AS chef-builder
+
+RUN mkdir -p /workspaces/cluster-tooling && chown -R vscode:vscode /workspaces/cluster-tooling
+WORKDIR /workspaces/cluster-tooling
+COPY --from=chef-planner --chown=vscode:vscode /workspaces/cluster-tooling/recipe.json ./recipe.json
+
+USER vscode
+RUN cargo chef cook --recipe-path recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+
+FROM base
+
+COPY --from=chef-builder --chown=vscode:vscode /home/vscode/.cargo/registry /home/vscode/.cargo/registry
+COPY --from=chef-builder --chown=vscode:vscode /home/vscode/.cargo/git /home/vscode/.cargo/git
+COPY --from=chef-builder --chown=vscode:vscode /opt/cargo-target /opt/cargo-target
