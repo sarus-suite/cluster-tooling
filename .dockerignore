@@ -1,0 +1,7 @@
+.git
+.ci-artifacts
+.ci-cache
+.ci-out
+dist
+target
+**/target

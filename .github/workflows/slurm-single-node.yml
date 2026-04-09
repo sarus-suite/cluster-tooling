@@ -102,16 +102,13 @@ jobs:
           refFilterForPush: refs/heads/main
           runCmd: |
             set -euxo pipefail
-      
-            cargo clean
-            cargo update
 
             # Building skybox
-            cargo build -p skybox --release
+            cargo build --locked -p skybox --release
 
             # Build and test sarusctl
-            cargo build -p sarusctl --release
-            cargo test -p sarusctl --test cli
+            cargo build --locked -p sarusctl --release
+            cargo test --locked -p sarusctl --test cli
 
             # Copy artifact into the workspace
             mkdir -p dist

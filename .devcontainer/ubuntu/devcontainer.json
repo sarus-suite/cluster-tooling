@@ -1,8 +1,10 @@
 {
   "name": "skybox-dev (ubuntu 24.04 + rust + slurm-dev)",
   "build": {
-    "dockerfile": "Dockerfile"
+    "dockerfile": "Dockerfile",
+    "context": "../.."
   },
+  "workspaceFolder": "/workspaces/cluster-tooling",
   "remoteUser": "vscode",
   "updateRemoteUserUID": true,
 
@@ -10,7 +12,7 @@
   "runArgs": ["--platform=linux/amd64"],
 
   "mounts": [
-    "type=volume,source=skybox-target-ubuntu,target=/workspaces/target"
+    "type=volume,source=skybox-target-ubuntu,target=/opt/cargo-target"
   ],
 
   "postCreateCommand": "rustup component add rustfmt clippy rust-analyzer || true",
