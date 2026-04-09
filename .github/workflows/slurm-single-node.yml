@@ -112,8 +112,8 @@ jobs:
 
             # Copy artifact into the workspace
             mkdir -p dist
-            cp -f target/release/libskybox.so dist/libskybox.so
-            cp -f target/release/sarusctl dist/sarusctl
+            cp -f "${CARGO_TARGET_DIR}/release/libskybox.so" dist/libskybox.so
+            cp -f "${CARGO_TARGET_DIR}/release/sarusctl" dist/sarusctl
             ls -l dist/libskybox.so
             ls -l dist/sarusctl
       
