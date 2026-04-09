@@ -98,8 +98,18 @@ USER vscode
 RUN cargo chef cook --recipe-path recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
+FROM chef-builder AS workspace-warmer
+
+WORKDIR /workspaces/cluster-tooling
+COPY --chown=vscode:vscode . .
+
+USER vscode
+RUN cargo build --locked -p skybox --release
+RUN cargo build --locked -p sarusctl --release
+RUN cargo test --locked -p sarusctl --test cli --no-run
+
 FROM base
 
-COPY --from=chef-builder --chown=vscode:vscode /home/vscode/.cargo/registry /home/vscode/.cargo/registry
-COPY --from=chef-builder --chown=vscode:vscode /home/vscode/.cargo/git /home/vscode/.cargo/git
-COPY --from=chef-builder --chown=vscode:vscode /opt/cargo-target /opt/cargo-target
+COPY --from=workspace-warmer --chown=vscode:vscode /home/vscode/.cargo/registry /home/vscode/.cargo/registry
+COPY --from=workspace-warmer --chown=vscode:vscode /home/vscode/.cargo/git /home/vscode/.cargo/git
+COPY --from=workspace-warmer --chown=vscode:vscode /opt/cargo-target /opt/cargo-target
