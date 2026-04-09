@@ -93,13 +93,38 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build libskybox.so in devcontainer (fail early on build)
+        if: github.event_name != 'pull_request'
         uses: devcontainers/ci@v0.3
         with:
           configFile: .devcontainer/ubuntu/devcontainer.json
-          imageName: ghcr.io/${{ github.repository }}/skybox-devcontainer
-          cacheFrom: ghcr.io/${{ github.repository }}/skybox-devcontainer
-          push: filter
-          refFilterForPush: refs/heads/main
+          imageName: ${{ github.ref_name == 'main' && format('ghcr.io/{0}/skybox-devcontainer:main', github.repository) || format('ghcr.io/{0}/skybox-devcontainer:branch-{1}', github.repository, github.ref_name) }}
+          cacheFrom: ${{ github.ref_name == 'main' && format('ghcr.io/{0}/skybox-devcontainer:main', github.repository) || format('{0}\n{1}', format('ghcr.io/{0}/skybox-devcontainer:branch-{1}', github.repository, github.ref_name), format('ghcr.io/{0}/skybox-devcontainer:main', github.repository)) }}
+          push: always
+          runCmd: |
+            set -euxo pipefail
+
+            # Building skybox
+            cargo build --locked -p skybox --release
+
+            # Build and test sarusctl
+            cargo build --locked -p sarusctl --release
+            cargo test --locked -p sarusctl --test cli
+
+            # Copy artifact into the workspace
+            mkdir -p dist
+            cp -f "${CARGO_TARGET_DIR}/release/libskybox.so" dist/libskybox.so
+            cp -f "${CARGO_TARGET_DIR}/release/sarusctl" dist/sarusctl
+            ls -l dist/libskybox.so
+            ls -l dist/sarusctl
+
+      - name: Build libskybox.so in devcontainer (pull request)
+        if: github.event_name == 'pull_request'
+        uses: devcontainers/ci@v0.3
+        with:
+          configFile: .devcontainer/ubuntu/devcontainer.json
+          imageName: ${{ format('ghcr.io/{0}/skybox-devcontainer:pr', github.repository) }}
+          cacheFrom: ${{ format('ghcr.io/{0}/skybox-devcontainer:main', github.repository) }}
+          push: never
           runCmd: |
             set -euxo pipefail
 
