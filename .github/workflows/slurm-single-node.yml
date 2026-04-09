@@ -807,4 +807,4 @@ jobs:
 
           rm /tmp/test_logfile
           ./dist/sarusctl --verbose run busybox true
-          tail -n 200 /tmp/test_logfile || true
+          tail -n 202 /tmp/test_logfile || true
