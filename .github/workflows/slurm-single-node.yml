@@ -97,8 +97,8 @@ jobs:
         uses: devcontainers/ci@v0.3
         with:
           configFile: .devcontainer/ubuntu/devcontainer.json
-          imageName: ${{ format('ghcr.io/{0}/skybox-devcontainer:cache', github.repository) }}
-          cacheFrom: ${{ format('ghcr.io/{0}/skybox-devcontainer:cache', github.repository) }}
+          imageName: ${{ format('ghcr.io/{0}/skybox-devcontainer-cache', github.repository) }}
+          cacheFrom: ${{ format('ghcr.io/{0}/skybox-devcontainer-cache:latest', github.repository) }}
           push: always
           runCmd: |
             set -euxo pipefail
@@ -122,8 +122,8 @@ jobs:
         uses: devcontainers/ci@v0.3
         with:
           configFile: .devcontainer/ubuntu/devcontainer.json
-          imageName: ${{ format('ghcr.io/{0}/skybox-devcontainer:cache', github.repository) }}
-          cacheFrom: ${{ format('ghcr.io/{0}/skybox-devcontainer:cache', github.repository) }}
+          imageName: ${{ format('ghcr.io/{0}/skybox-devcontainer-cache', github.repository) }}
+          cacheFrom: ${{ format('ghcr.io/{0}/skybox-devcontainer-cache:latest', github.repository) }}
           push: never
           runCmd: |
             set -euxo pipefail
