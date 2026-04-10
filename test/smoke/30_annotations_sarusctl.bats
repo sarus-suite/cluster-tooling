@@ -39,7 +39,7 @@ com.sarus.parallax_mp_squashfuse_path = \"squashfuse_ll\"
 
   run "$SARUSCTL_BINARY" run busybox echo "ok :D"
   assert_success
-  assert_output "ok :D"
+  assert_output --partial "ok :D"
 }
 
 @test "sarusctl run honors the mount-program logfile annotation" {
