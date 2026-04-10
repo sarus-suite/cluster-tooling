@@ -24,7 +24,7 @@ jobs:
         id: restore-apt-archives
         uses: actions/cache/restore@v4
         with:
-          path: /var/cache/apt/archives
+          path: /var/cache/apt/archives/*.deb
           key: ${{ runner.os }}-${{ runner.arch }}-apt-archives-slurm-${{ hashFiles('.github/workflows/slurm-single-node.yml') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-apt-archives-slurm-
@@ -560,7 +560,7 @@ jobs:
         if: steps.restore-apt-archives.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: /var/cache/apt/archives
+          path: /var/cache/apt/archives/*.deb
           key: ${{ steps.restore-apt-archives.outputs.cache-primary-key }}
 
       - name: Fix AppArmor profile for /usr/local/bin/podman
