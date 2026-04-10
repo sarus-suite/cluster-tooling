@@ -24,7 +24,7 @@ jobs:
         id: restore-apt-archives
         uses: actions/cache/restore@v4
         with:
-          path: /var/cache/apt/archives
+          path: /var/cache/apt/archives/*.deb
           key: ${{ runner.os }}-${{ runner.arch }}-apt-archives-slurm-${{ hashFiles('.github/workflows/slurm-single-node.yml') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-apt-archives-slurm-
@@ -560,7 +560,7 @@ jobs:
         if: steps.restore-apt-archives.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: /var/cache/apt/archives
+          path: /var/cache/apt/archives/*.deb
           key: ${{ steps.restore-apt-archives.outputs.cache-primary-key }}
 
       - name: Fix AppArmor profile for /usr/local/bin/podman
@@ -632,179 +632,8 @@ jobs:
 
 
 
-      - name: Rootless Podman smoke test
+      - name: Run organized Bats smoke tests
+        shell: bash
         run: |
           set -euxo pipefail
-
-          podman --version
-          podman info
-
-          # Rootless sanity checks
-          podman system migrate || true
-
-          # Run a tiny container rootless
-          podman run --rm docker.io/library/alpine:3.20 echo "ok (rootless podman)"
-
-      - name: Parallax basic smoke test (with rootless Podman)
-        run: |
-          set -euxo pipefail
-
-
-
-          export PARALLAX_MP_UID=$(id -u)
-          export PARALLAX_MP_GID=$(id -g)
-          export PARALLAX_MP_SQUASHFUSE_CMD=/usr/bin/squashfuse_ll
-
-
-
-
-          export PODMAN_BINARY="$(command -v podman)"
-          export PARALLAX_BINARY="$(command -v parallax)"
-          export MOUNT_PROGRAM_PATH="$(command -v parallax-mount-program)"
-          export MKSQUASHFS_PATH="$(command -v mksquashfs)"
-
-          export PODMAN_ROOT="$(mktemp -d)"
-          export PODMAN_RUNROOT="$(mktemp -d)"
-          export RO_STORAGE="$(mktemp -d)"
-          export CLEAN_ROOT="$(mktemp -d)"
-
-          "$PODMAN_BINARY" --root "$PODMAN_ROOT" --runroot "$PODMAN_RUNROOT" pull busybox:latest
-
-          "$PARALLAX_BINARY" \
-            --podmanRoot "$PODMAN_ROOT" \
-            --roStoragePath "$RO_STORAGE" \
-            --mksquashfsPath "$MKSQUASHFS_PATH" \
-            --log-level info \
-            --migrate \
-            --image busybox:latest
-
-          "$PODMAN_BINARY" \
-            --root "$CLEAN_ROOT" \
-            --runroot "$PODMAN_RUNROOT" \
-            --storage-opt additionalimagestore="$RO_STORAGE" \
-            --storage-opt mount_program="$MOUNT_PROGRAM_PATH" \
-            images
-
-          "$PODMAN_BINARY" \
-            --root "$CLEAN_ROOT" \
-            --runroot "$PODMAN_RUNROOT" \
-            --storage-opt additionalimagestore="$RO_STORAGE" \
-            --storage-opt mount_program="$MOUNT_PROGRAM_PATH" \
-            run --rm busybox:latest echo "ok (parallax ro-store)"
-
-          # Cleanup (best-effort)
-          "$PODMAN_BINARY" \
-            --root "$PODMAN_ROOT" \
-            --runroot "$PODMAN_RUNROOT" \
-            --storage-opt mount_program="$MOUNT_PROGRAM_PATH" \
-            rmi --all || true
-
-          # Try the container exec under Slurm
-          srun -p debug -A default -J srun-podman-rostore -n 1 bash -lc '
-            "$PODMAN_BINARY" \
-              --root "$CLEAN_ROOT" \
-              --runroot "$PODMAN_RUNROOT" \
-              --storage-opt additionalimagestore="$RO_STORAGE" \
-              --storage-opt mount_program="$MOUNT_PROGRAM_PATH" \
-              run --rm busybox:latest echo "ok (from srun + parallax ro-store)"
-          '
-
-          # EDF
-          mkdir -p "$HOME/.edf"
-          cat > "$HOME/.edf/busybox.toml" <<'EOF'
-          image = "busybox:latest"
-          EOF
-          echo "=== $HOME/.edf/busybox.toml ==="
-          cat "$HOME/.edf/busybox.toml"
-
-          set +e
-          # dev pts crash debug
-          #/usr/local/bin/podman --log-level=debug --module hpc \
-          #"$PODMAN_BINARY" --module hpc \
-          #  run --rm \
-          #  --runtime-flag log=/tmp/crun.log \
-          #  busybox:latest echo "default ok" || rc=$?
-
-          #echo "podman rc=${rc:-0}"
-          #sudo sed -n '1,200p' /tmp/crun.log || true
-
-          #/usr/local/bin/podman --log-level=debug --module hpc \
-          #          "$PODMAN_BINARY" --module hpc \
-          #            run --rm --pid=private\
-          #            --runtime-flag log=/tmp/crun.log \
-          #            busybox:latest echo "private ok" || rc=$?
-
-          #echo "podman rc=${rc:-0}"
-          #sudo sed -n '1,200p' /tmp/crun.log || true
-
-
-
-
-
-          rm /tmp/parallax-*/mount_program.log
-
-          "$PODMAN_BINARY" --module hpc \
-            --root "$CLEAN_ROOT" \
-            --runroot "$PODMAN_RUNROOT" \
-            --storage-opt additionalimagestore="$RO_STORAGE" \
-            --storage-opt mount_program="$MOUNT_PROGRAM_PATH" \
-            run --rm --userns=keep-id \
-            --runtime-flag log=/tmp/crun.log \
-            busybox:latest stat -c '%U %u %G %g %n' /bin/sh
-
-          ## output mount program logs
-          echo "=== mount program log tail ==="
-          sudo tail -n 200 /tmp/parallax-*/mount_program.log || true
-
-          sleep 2
-
-          srun -p debug -t 3 -A default -J srun-skybox --chdir=/tmp -n 1 --edf=busybox echo 'ok :D'
-
-
-
-          ## Test squashfuse parametrization permissions
-          cat > "$HOME/.edf/ubuntu.toml" <<'EOF'
-          image = "library/ubuntu:22.04"
-          EOF
-          echo "=== $HOME/.edf/ubuntu.toml ==="
-          cat "$HOME/.edf/ubuntu.toml"
-
-          srun -p debug -t 3 -A default -J srun-skybox-2 -n 1 --edf=ubuntu \
-            stat -c '%U %u %G %g %n' /etc/os-release /bin/sh
-
-          ## output mount program logs
-          echo "=== mount program log tail ==="
-          #          sudo tail -n 200 /tmp/parallax-*/mount_program.log || true
-
-          ## output all slurm related logs that are relevant to debug skybox
-          echo "=== slurmd log tail ==="
-          #          sudo tail -n 200 /var/log/slurm/slurmd.log || true
-          
-          echo "=== slurmctld log tail ==="
-          #          sudo tail -n 200 /var/log/slurm/slurmctld.log || true
-
-
-          # test annotation of mount program
-          rm $HOME/.edf/busybox.toml
-
-          cat > "$HOME/.edf/busybox.toml" <<'EOF'
-          image = "busybox:latest"
-
-          [annotations]
-          com.sarus.parallax_mp_logfile = "/tmp/test_logfile"
-          com.sarus.parallax_mp_squashfuse_path = "squashfuse_ll"
-          EOF
-
-          echo "=== $HOME/.edf/busybox.toml ==="
-          cat "$HOME/.edf/busybox.toml"
- 
-          srun -p debug -t 3 -A default -J logfile-test -n 1 --edf=busybox true
-
-          test -s /tmp/test_logfile
-
-          tail -n 200 /tmp/test_logfile || true
-          sudo tail -n 200 /var/log/slurm/slurmd.log || true
-
-          rm /tmp/test_logfile
-          ./dist/sarusctl --verbose run busybox true
-          tail -n 202 /tmp/test_logfile || true
+          bats --print-output-on-failure test/smoke

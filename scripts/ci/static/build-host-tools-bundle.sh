@@ -11,6 +11,8 @@ SQUASHFUSE_VERSION="${SQUASHFUSE_VERSION:-0.6.1}"
 PARALLAX_VERSION="${PARALLAX_VERSION:-0.10.0}"
 PODMAN_STATIC_URL="${PODMAN_STATIC_URL:-https://github.com/mgoltzsche/podman-static/releases/latest/download/podman-linux-amd64.tar.gz}"
 BATS_REF="${BATS_REF:-v1.11.1}"
+BATS_SUPPORT_REF="${BATS_SUPPORT_REF:-v0.3.0}"
+BATS_ASSERT_REF="${BATS_ASSERT_REF:-v2.1.0}"
 
 log() {
   printf '[host-tools] %s\n' "$*"
@@ -120,11 +122,29 @@ install_bats() {
   "${clone_dir}/install.sh" "${prefix}"
 }
 
+install_bats_library() {
+  local repo="$1"
+  local ref="$2"
+  local prefix_name="$3"
+  local clone_dir="${CACHE_DIR}/src/${prefix_name}-${ref}"
+  local prefix="${CACHE_DIR}/prefix/${prefix_name}-${ref}"
+
+  if [ -f "${prefix}/load.bash" ]; then
+    log "reusing cached ${prefix_name} ${ref}"
+    return
+  fi
+
+  rm -rf "${clone_dir}" "${prefix}"
+  git clone --depth 1 --branch "${ref}" "https://github.com/bats-core/${repo}.git" "${clone_dir}"
+  mkdir -p "${prefix}"
+  cp -R "${clone_dir}/." "${prefix}/"
+}
+
 publish_bundle() {
   local podman_bin_dir="${OUT_DIR}/podman-static/usr/local/bin"
 
   rm -rf "${OUT_DIR}"
-  mkdir -p "${BIN_DIR}" "${MANIFEST_DIR}" "${OUT_DIR}/podman-static" "${OUT_DIR}/bats"
+  mkdir -p "${BIN_DIR}" "${MANIFEST_DIR}" "${OUT_DIR}/podman-static" "${OUT_DIR}/bats" "${OUT_DIR}/bats/lib"
 
   cp "${CACHE_DIR}/prefix/squashfuse-${SQUASHFUSE_VERSION}/bin/squashfuse" "${BIN_DIR}/"
   cp "${CACHE_DIR}/prefix/squashfuse-${SQUASHFUSE_VERSION}/bin/squashfuse_ll" "${BIN_DIR}/"
@@ -143,12 +163,16 @@ publish_bundle() {
 
   cp "${CACHE_DIR}/prefix/bats-${BATS_REF}/bin/bats" "${BIN_DIR}/"
   cp -R "${CACHE_DIR}/prefix/bats-${BATS_REF}/." "${OUT_DIR}/bats/"
+  cp -R "${CACHE_DIR}/prefix/bats-support-${BATS_SUPPORT_REF}" "${OUT_DIR}/bats/lib/bats-support"
+  cp -R "${CACHE_DIR}/prefix/bats-assert-${BATS_ASSERT_REF}" "${OUT_DIR}/bats/lib/bats-assert"
 
   cat > "${MANIFEST_DIR}/manifest.txt" <<EOF
 squashfuse_version=${SQUASHFUSE_VERSION}
 parallax_version=${PARALLAX_VERSION}
 podman_static_url=${PODMAN_STATIC_URL}
 bats_ref=${BATS_REF}
+bats_support_ref=${BATS_SUPPORT_REF}
+bats_assert_ref=${BATS_ASSERT_REF}
 EOF
 }
 
@@ -164,6 +188,8 @@ main() {
   install_podman_static
   install_parallax "${PARALLAX_VERSION}"
   install_bats "${BATS_REF}"
+  install_bats_library bats-support "${BATS_SUPPORT_REF}" "bats-support"
+  install_bats_library bats-assert "${BATS_ASSERT_REF}" "bats-assert"
   publish_bundle
 
   log "host tools bundle ready under ${OUT_DIR}"
