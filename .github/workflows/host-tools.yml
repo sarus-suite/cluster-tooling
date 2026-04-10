@@ -28,6 +28,16 @@ on:
         required: false
         type: string
         default: v1.11.1
+      bats-support-ref:
+        description: Git ref to fetch for bats-support
+        required: false
+        type: string
+        default: v0.3.0
+      bats-assert-ref:
+        description: Git ref to fetch for bats-assert
+        required: false
+        type: string
+        default: v2.1.0
     outputs:
       artifact-name:
         description: Uploaded artifact name for the bundle
@@ -62,6 +72,16 @@ on:
         required: false
         type: string
         default: v1.11.1
+      bats-support-ref:
+        description: Git ref to fetch for bats-support
+        required: false
+        type: string
+        default: v0.3.0
+      bats-assert-ref:
+        description: Git ref to fetch for bats-assert
+        required: false
+        type: string
+        default: v2.1.0
 
 permissions:
   contents: read
@@ -88,10 +108,12 @@ jobs:
           parallax_version="${{ inputs.parallax-version || github.event.inputs.parallax-version || '0.9.12' }}"
           podman_static_url="${{ inputs.podman-static-url || github.event.inputs.podman-static-url || 'https://github.com/mgoltzsche/podman-static/releases/latest/download/podman-linux-amd64.tar.gz' }}"
           bats_ref="${{ inputs.bats-ref || github.event.inputs.bats-ref || 'v1.11.1' }}"
+          bats_support_ref="${{ inputs.bats-support-ref || github.event.inputs.bats-support-ref || 'v0.3.0' }}"
+          bats_assert_ref="${{ inputs.bats-assert-ref || github.event.inputs.bats-assert-ref || 'v2.1.0' }}"
           podman_static_url_hash="$(printf '%s' "${podman_static_url}" | sha256sum | cut -d' ' -f1)"
 
           echo "artifact-name=${artifact_name}" >> "$GITHUB_OUTPUT"
-          echo "cache-key=${{ runner.os }}-${{ runner.arch }}-host-tools-${squashfuse_version}-${parallax_version}-${bats_ref}-${podman_static_url_hash}" >> "$GITHUB_OUTPUT"
+          echo "cache-key=${{ runner.os }}-${{ runner.arch }}-host-tools-${squashfuse_version}-${parallax_version}-${bats_ref}-${bats_support_ref}-${bats_assert_ref}-${podman_static_url_hash}" >> "$GITHUB_OUTPUT"
 
       - name: Restore host tools cache
         id: restore-host-tools
@@ -128,6 +150,8 @@ jobs:
           PARALLAX_VERSION: ${{ inputs.parallax-version }}
           PODMAN_STATIC_URL: ${{ inputs.podman-static-url }}
           BATS_REF: ${{ inputs.bats-ref }}
+          BATS_SUPPORT_REF: ${{ inputs.bats-support-ref }}
+          BATS_ASSERT_REF: ${{ inputs.bats-assert-ref }}
         run: scripts/ci/static/build-host-tools-bundle.sh
 
       - name: Save host tools cache
