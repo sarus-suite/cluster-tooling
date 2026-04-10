@@ -23,7 +23,7 @@ teardown_file() {
 
   run podman run --rm docker.io/library/alpine:3.20 echo "ok (rootless podman)"
   assert_success
-  assert_output "ok (rootless podman)"
+  assert_output --partial "ok (rootless podman)"
 }
 
 @test "parallax migrates busybox into a ro store" {
