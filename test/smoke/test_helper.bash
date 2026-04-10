@@ -40,12 +40,13 @@ smoke_cleanup_file_env() {
     sleep 5
 
     chmod -R u+rwX "${SMOKE_TMPDIR}" 2>/dev/null || true
-
-    if command -v "${PODMAN_BINARY:-podman}" >/dev/null 2>&1; then
-      "${PODMAN_BINARY:-podman}" unshare chmod -R u+rwX "${SMOKE_TMPDIR}" 2>/dev/null || true
-    fi
+    "${PODMAN_BINARY:-podman}" unshare chmod -R u+rwX "${SMOKE_TMPDIR}" 2>/dev/null || true
 
     rm -rf "${SMOKE_TMPDIR}" 2>/dev/null || true
+
+    if [ -e "${SMOKE_TMPDIR}" ]; then
+      printf 'smoke cleanup incomplete: %s still exists\n' "${SMOKE_TMPDIR}" >&3
+    fi
   fi
 }
 
