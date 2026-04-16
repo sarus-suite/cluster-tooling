@@ -39,6 +39,7 @@ ENV RUSTUP_HOME=/home/vscode/.rustup \
 ENV PATH=/home/vscode/.cargo/bin:${PATH}
 
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable && \
+    rustup component add rustfmt clippy rust-analyzer && \
     cargo install cargo-chef --locked && \
     rustc -V && cargo -V && cargo chef --version
 
