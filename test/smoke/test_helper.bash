@@ -38,9 +38,6 @@ smoke_init_file_env() {
 smoke_cleanup_file_env() {
   if [ -n "${SMOKE_TMPDIR:-}" ] && [ -d "${SMOKE_TMPDIR}" ]; then
 
-#    chmod -R u+rwX "${SMOKE_TMPDIR}" 2>/dev/null || true
-#    "${PODMAN_BINARY:-podman}" unshare chmod -R u+rwX "${SMOKE_TMPDIR}" 2>/dev/null || true
-
     rm -rf "${SMOKE_TMPDIR}" 2>/dev/null || true
 
     if [ -e "${SMOKE_TMPDIR}" ]; then
