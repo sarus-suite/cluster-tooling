@@ -88,6 +88,23 @@ smoke_prepare_busybox_ro_store() {
   touch "${RO_STORAGE}/.busybox-ready"
 }
 
+
+smoke_cleanup_busybox_ro_store() {
+  run "$PARALLAX_BINARY" \
+    --podmanRoot "$PODMAN_ROOT" \
+    --roStoragePath "$RO_STORAGE" \
+    --log-level info \
+    --rmi \
+    --image busybox:latest
+  assert_success
+
+  run "$PODMAN_BINARY" --root "$PODMAN_ROOT" --runroot "$PODMAN_RUNROOT" rmi busybox:latest
+  assert_success
+
+  rm "${RO_STORAGE}/.busybox-ready"
+}
+
+
 smoke_write_edf() {
   local name="$1"
   local image="$2"

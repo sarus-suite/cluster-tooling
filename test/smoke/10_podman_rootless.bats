@@ -24,6 +24,9 @@ teardown_file() {
   run podman run --rm docker.io/library/alpine:3.20 echo "ok (rootless podman)"
   assert_success
   assert_output --partial "ok (rootless podman)"
+
+  run podman rmi docker.io/library/alpine:3.20
+  assert_success
 }
 
 @test "parallax migrates busybox into a ro store" {
@@ -79,4 +82,20 @@ teardown_file() {
     busybox:latest stat -c '%u %g %n' /bin/sh
   assert_success
   assert_output --regexp '^[0-9]+ [0-9]+ /bin/sh$'
+}
+
+
+@test "podman remove busybox from the parallax ro store" {
+  run "$PARALLAX_BINARY" \
+    --podmanRoot "$PODMAN_ROOT" \
+    --roStoragePath "$RO_STORAGE" \
+    --log-level info \
+    --rmi \
+    --image busybox:latest
+  assert_success
+
+  run "$PODMAN_BINARY" --root "$PODMAN_ROOT" --runroot "$PODMAN_RUNROOT" rmi busybox:latest
+  assert_success
+
+  rm "${RO_STORAGE}/.busybox-ready"
 }
