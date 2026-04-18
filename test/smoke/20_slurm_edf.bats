@@ -37,9 +37,9 @@ teardown_file() {
 @test "srun with a busybox edf succeeds" {
   smoke_write_edf "busybox" "busybox:latest"
 
-  run srun -p debug -t 3 -A default -J srun-skybox --chdir=/tmp -n 1 --edf=busybox echo "ok :D"
+  run srun -p debug -t 3 -A default -J srun-skybox --chdir=/tmp -n 1 --edf=busybox echo "ok"
   assert_success
-  assert_output "ok :D"
+  assert_output "ok"
 }
 
 @test "srun with an ubuntu edf can stat expected files" {
