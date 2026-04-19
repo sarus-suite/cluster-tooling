@@ -11,8 +11,6 @@
   "platform": "linux/amd64",
   "runArgs": ["--platform=linux/amd64"],
 
-  "postCreateCommand": "rustup component add rustfmt clippy rust-analyzer || true",
-
   "customizations": {
     "vscode": {
       "extensions": [

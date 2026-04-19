@@ -17,7 +17,7 @@ on:
         description: parallax release version to fetch
         required: false
         type: string
-        default: "0.10.0"
+        default: "0.10.1"
       podman-static-url:
         description: URL of the podman static tarball to fetch
         required: false

@@ -37,9 +37,9 @@ teardown_file() {
 @test "srun with a busybox edf succeeds" {
   smoke_write_edf "busybox" "busybox:latest"
 
-  run srun -p debug -t 3 -A default -J srun-skybox --chdir=/tmp -n 1 --edf=busybox echo "ok :D"
+  run srun -p debug -t 3 -A default -J srun-skybox --chdir=/tmp -n 1 --edf=busybox echo "ok"
   assert_success
-  assert_output "ok :D"
+  assert_output "ok"
 }
 
 @test "srun with an ubuntu edf can stat expected files" {
@@ -50,4 +50,29 @@ teardown_file() {
   assert_success
   assert_output --partial "/etc/os-release"
   assert_output --partial "/bin/sh"
+}
+
+@test "podman remove busybox from the parallax ro store" {
+  run "$PARALLAX_BINARY" \
+    --podmanRoot "$PODMAN_ROOT" \
+    --roStoragePath "$RO_STORAGE" \
+    --log-level info \
+    --rmi \
+    --image busybox:latest
+  assert_success
+
+  run "$PODMAN_BINARY" --root "$PODMAN_ROOT" --runroot "$PODMAN_RUNROOT" rmi busybox:latest
+  assert_success
+
+  rm "${RO_STORAGE}/.busybox-ready"
+}
+
+@test "podman remove ubuntu from the parallax ro store" {
+  run "$PARALLAX_BINARY" \
+    --podmanRoot "$PODMAN_ROOT" \
+    --roStoragePath "$RO_STORAGE" \
+    --log-level info \
+    --rmi \
+    --image library/ubuntu:22.04
+  assert_success
 }
