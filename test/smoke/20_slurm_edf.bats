@@ -51,3 +51,32 @@ teardown_file() {
   assert_output --partial "/etc/os-release"
   assert_output --partial "/bin/sh"
 }
+
+@test "podman remove busybox from the parallax ro store" {
+  run "$PARALLAX_BINARY" \
+    --podmanRoot "$PODMAN_ROOT" \
+    --roStoragePath "$RO_STORAGE" \
+    --log-level info \
+    --rmi \
+    --image busybox:latest
+  assert_success
+
+  run "$PODMAN_BINARY" --root "$PODMAN_ROOT" --runroot "$PODMAN_RUNROOT" rmi busybox:latest
+  assert_success
+
+  rm "${RO_STORAGE}/.busybox-ready"
+}
+
+@test "podman remove ubuntu from the parallax ro store" {
+  run "$PARALLAX_BINARY" \
+    --podmanRoot "$PODMAN_ROOT" \
+    --roStoragePath "$RO_STORAGE" \
+    --log-level info \
+    --rmi \
+    --image library/ubuntu:22.04
+  assert_success
+
+  run "$PODMAN_BINARY" --root "$PODMAN_ROOT" --runroot "$PODMAN_RUNROOT" rmi library/ubuntu:22.04
+  assert_success
+}
+
