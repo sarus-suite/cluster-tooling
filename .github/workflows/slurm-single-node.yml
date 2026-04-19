@@ -24,7 +24,7 @@ jobs:
         id: restore-apt-archives
         uses: actions/cache/restore@v4
         with:
-          path: /var/cache/apt/archives/*.deb
+          path: .ci-cache/apt-archives/*.deb
           key: ${{ runner.os }}-${{ runner.arch }}-apt-archives-slurm-${{ hashFiles('.github/workflows/slurm-single-node.yml') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-apt-archives-slurm-
@@ -164,9 +164,12 @@ jobs:
       - name: Install Slurm + Munge (+ SlurmDBD + MariaDB)
         run: |
           set -euxo pipefail
+          APT_ARCHIVE_CACHE_DIR="${GITHUB_WORKSPACE}/.ci-cache/apt-archives"
+
+          mkdir -p "${APT_ARCHIVE_CACHE_DIR}"
 
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o Dir::Cache::archives="${APT_ARCHIVE_CACHE_DIR}" install -y --no-install-recommends \
             munge \
             slurmctld slurmd slurm-client slurmdbd \
             mariadb-server
@@ -557,10 +560,10 @@ jobs:
           podman info
 
       - name: Save apt package archive cache
-        if: steps.restore-apt-archives.outputs.cache-hit != 'true'
+        if: steps.restore-apt-archives.outputs.cache-hit != 'true' && github.event_name == 'push'
         uses: actions/cache/save@v4
         with:
-          path: /var/cache/apt/archives/*.deb
+          path: .ci-cache/apt-archives/*.deb
           key: ${{ steps.restore-apt-archives.outputs.cache-primary-key }}
 
       - name: Fix AppArmor profile for /usr/local/bin/podman
