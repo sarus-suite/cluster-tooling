@@ -73,10 +73,6 @@ teardown_file() {
     --roStoragePath "$RO_STORAGE" \
     --log-level info \
     --rmi \
-    --image ubuntu:22.04
-  assert_success
-
-  run "$PODMAN_BINARY" --root "$PODMAN_ROOT" --runroot "$PODMAN_RUNROOT" rmi ubuntu:22.04
+    --image library/ubuntu:22.04
   assert_success
 }
-
