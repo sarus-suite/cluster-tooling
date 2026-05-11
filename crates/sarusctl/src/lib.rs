@@ -1,5 +1,5 @@
 use clap::ValueEnum;
-use raster::{self, EDF, config::Config};
+use raster::{self, EDF, config::Config, hook_run, ExecutedCommand};
 use sarus_suite_podman_driver::{self as pmd, ContainerCtx, PodmanCtx};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -611,10 +611,12 @@ pub fn execute_command_with_options(
             // pull_command() and migrate_command() are also called internally by other functions,
             // so they receive the config from the outside to avoid loading it multiple times.
             let config = deps.raster.load_config()?;
+            setup_imagestore(&config)?;
             pull_command(&image, &config, deps, options)
         }
         CommandSpec::Migrate { image } => {
             let config = deps.raster.load_config()?;
+            setup_imagestore(&config)?;
             migrate_command(&image, &config, deps, options)
         }
         CommandSpec::Rmi { image } => rmi_command(&image, deps, options),
@@ -653,19 +655,7 @@ fn images_command(deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
         ..seed_ctx
     };
 
-    if let Some(ro_store) = ctx.ro_store.as_deref()
-        && !fs::exists(ro_store).map_err(|e| {
-            AppError::Io(format!(
-                "Failed to check for existence of Parallax imagestore directory: {e}"
-            ))
-        })?
-    {
-        fs::create_dir_all(ro_store).map_err(|e| {
-            AppError::Io(format!(
-                "Failed to create Parallax imagestore directory: {e}"
-            ))
-        })?;
-    }
+    setup_imagestore(&config)?;
 
     deps.runtime.images(&ctx)?;
     Ok(AppOutput::success(""))
@@ -736,6 +726,7 @@ fn rmi_command(
         ..seed_ctx
     };
     let parallax_path = PathBuf::from(&config.parallax_path);
+    setup_imagestore(&config)?;
 
     deps.runtime
         .parallax_rmi(&parallax_path, &ctx, image, options.verbose)?;
@@ -753,6 +744,7 @@ fn run_command(
             // Loading config in each branch is a small duplication,
             // but allows to integration test invalid EDF cases without needing a valid config present
             let config = deps.raster.load_config()?;
+            setup_imagestore(&config)?;
             run_edf_command(&edf, container_cmd, &config, deps, options)
         }
         Err(_) => {
@@ -763,6 +755,7 @@ fn run_command(
             })?;
 
             let config = deps.raster.load_config()?;
+            setup_imagestore(&config)?;
             run_yaml_command(filepath, container_cmd, &config, deps, options)
         }
     }
@@ -916,6 +909,89 @@ fn append_warning(output: &mut AppOutput, warning: String) {
 
 fn combine_error_with_warning(err: AppError, warning: String) -> AppError {
     AppError::Runtime(format!("{err}\n{warning}"))
+}
+
+fn setup_imagestore(config: &Config) -> Result<(), AppError> {
+    let imagestore = &config.parallax_imagestore;
+    let imagestore_pb = PathBuf::from(&imagestore);
+
+    let opt_ec = hook_run(config, "parallax_imagestore_create", vec![&imagestore]).map_err(|e| {
+        AppError::Io(format!(
+            "Failed to run parallax_imagestore_create hook: {e}"
+        ))
+    })?;
+
+    match opt_ec {
+        Some(ec) => log_hook_ec(ec, "parallax_imagestore_create hook")?,
+        None => {},
+    }
+
+    if !fs::exists(&imagestore_pb).map_err(|e| {
+            AppError::Io(format!(
+                "Failed to check for existence of Parallax imagestore directory: {e}"
+            ))
+        })?
+    {
+        fs::create_dir_all(&imagestore_pb).map_err(|e| {
+            AppError::Io(format!(
+                "Failed to create Parallax imagestore directory: {e}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn log_hook_ec(ec: ExecutedCommand, prefix: &str) -> Result<(), AppError> {
+
+    let rc = match ec.output.status.code() {
+        Some(ok) => format!("{ok}"),
+        None => {
+            String::from("UNKNOWN")
+        }
+    };
+
+    let mut stdout = match String::from_utf8(ec.output.stdout) {
+        Ok(ok) => ok,
+        Err(_) => String::from(""),
+    };
+    if stdout.ends_with("\n") {
+        stdout.pop();
+    };
+
+    let mut stderr = match String::from_utf8(ec.output.stderr) {
+        Ok(ok) => ok,
+        Err(_) => String::from(""),
+    };
+    if stderr.ends_with("\n") {
+        stderr.pop();
+    };
+
+    if stdout != "" {
+        let lines = stdout.split("\n");
+        for line in lines {
+            println!("{}", line);
+        }
+    }
+
+    if stderr != "" {
+        let lines = stderr.split("\n");
+        for line in lines {
+            eprintln!("{}", line);
+        }
+    }
+
+    if rc != "0" {
+        if rc == "UNKNOWN" {
+            return Err(AppError::Io(format!(
+                "{prefix} exited by signal"
+            )));
+        } else {
+            return Err(AppError::Io(format!(
+                "{prefix} exit code: {rc}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

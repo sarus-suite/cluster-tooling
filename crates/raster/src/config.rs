@@ -9,6 +9,7 @@ const CONFIG_PATH: &str = "/etc/sarus-suite";
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct RawConfig {
     edf_system_search_path: Option<String>,
+    hooks: Option<RawConfigHooks>,
     parallax_imagestore: Option<String>,
     parallax_mount_program: Option<String>,
     parallax_path: Option<String>,
@@ -27,9 +28,16 @@ pub struct RawConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
+pub struct RawConfigHooks {
+    parallax_imagestore_create: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Config {
     #[serde(default = "get_default_edf_system_search_path")]
     pub edf_system_search_path: String,
+    #[serde(default = "get_default_hooks")]
+    pub hooks: ConfigHooks,
     #[serde(default = "get_default_parallax_imagestore")]
     pub parallax_imagestore: String,
     #[serde(default = "get_default_parallax_mount_program")]
@@ -60,6 +68,12 @@ pub struct Config {
     pub tracking_enabled: bool,
     #[serde(default = "get_default_tracking_tool")]
     pub tracking_tool: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct ConfigHooks {
+    #[serde(default = "get_default_hook_parallax_imagestore_create")]
+    pub parallax_imagestore_create: String,
 }
 
 #[derive(Clone, Copy)]
@@ -134,12 +148,26 @@ fn get_default_tracking_tool() -> String {
     return String::from("");
 }
 
+fn get_default_hook_parallax_imagestore_create() -> String {
+    return String::from("");
+}
+
+fn get_default_hooks() -> ConfigHooks {
+    return ConfigHooks {
+        parallax_imagestore_create: get_default_hook_parallax_imagestore_create(),
+    }
+}
+
 impl From<RawConfig> for Config {
     fn from(r: RawConfig) -> Self {
         Config {
             edf_system_search_path: match r.edf_system_search_path {
                 Some(s) => s,
                 None => get_default_edf_system_search_path(),
+            },
+            hooks: match r.hooks {
+                Some(s) => ConfigHooks::from(s),
+                None => get_default_hooks(),
             },
             parallax_imagestore: match r.parallax_imagestore {
                 Some(s) => s,
@@ -211,6 +239,9 @@ impl RawConfig {
         if i.edf_system_search_path.is_some() {
             self.edf_system_search_path = i.edf_system_search_path;
         }
+        if i.hooks.is_some() {
+            self.hooks = i.hooks;
+        }
         if i.parallax_imagestore.is_some() {
             self.parallax_imagestore = i.parallax_imagestore;
         }
@@ -259,6 +290,17 @@ impl RawConfig {
     }
 }
 
+impl From<RawConfigHooks> for ConfigHooks {
+    fn from(r: RawConfigHooks) -> Self {
+        ConfigHooks {
+            parallax_imagestore_create: match r.parallax_imagestore_create {
+                Some(s) => s,
+                None => get_default_hook_parallax_imagestore_create(),
+            },
+        }
+    }
+}
+
 fn validate_configfile(path: String) -> SarusResult<()> {
     // Embedding schema file
     let schema_content = include_str!("schema/config.json");
@@ -303,6 +345,7 @@ fn load_raw_config_from_file(
     };
 
     let mut r: RawConfig = toml_value;
+
     //let mut r: RawConfig = toml_read(path_str)?;
 
     // Expand variables in the fields
@@ -427,6 +470,14 @@ fn load_raw_config_from_dir(
 }
 
 pub fn update_config_by_user(config: &mut Config, edf: EDF) -> SarusResult<()> {
+    let parallax_imagestore_create = edf.annotations.get("com.sarus.hooks.parallax_imagestore_create");
+    if parallax_imagestore_create.is_some() {
+        match parallax_imagestore_create.unwrap().as_str() {
+            "false" => { config.hooks.parallax_imagestore_create = String::from("") },
+            _ => {},
+        }
+    }
+
     let parallax_imagestore = edf.annotations.get("com.sarus.parallax_imagestore");
     if parallax_imagestore.is_some() {
         config.parallax_imagestore = parallax_imagestore.unwrap().to_string();
