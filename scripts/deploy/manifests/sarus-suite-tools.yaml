@@ -1,0 +1,9 @@
+sources:
+  parallax_version: 0.10.2
+
+profiles:
+  runtime:
+    enabled: true
+    tools:
+      - parallax
+      - parallax-mount-program

@@ -1,0 +1,23 @@
+sources:
+  podman_static_version: v5.8.2
+  squashfuse_version: 0.6.1
+  squashfs_tools_version: 4.6.1
+
+profiles:
+  runtime:
+    enabled: true
+    tools:
+      - podman
+      - conmon
+      - crun
+      - fuse-overlayfs
+      - fusermount3
+      - pasta
+      - squashfuse
+      - squashfuse_ll
+
+  image_build:
+    enabled: true
+    tools:
+      - mksquashfs
+      - unsquashfs
