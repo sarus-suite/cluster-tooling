@@ -966,15 +966,15 @@ fn log_hook_ec(ec: ExecutedCommand, prefix: &str) -> Result<(), AppError> {
         stderr.pop();
     };
 
-    if stdout != "" {
-        let lines = stdout.split("\n");
-        for line in lines {
-            println!("{}", line);
-        }
-    }
-
     if stderr != "" {
         let lines = stderr.split("\n");
+        for line in lines {
+            eprintln!("{}", line);
+        }
+    }
+    
+    if stdout != "" {
+        let lines = stdout.split("\n");
         for line in lines {
             eprintln!("{}", line);
         }
