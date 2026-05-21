@@ -10,6 +10,17 @@
       "description": "filesystem path where to load EDF files from",
       "type": "string"
     },
+    "hooks": {
+      "description": "Sarus Suite hooks table",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "parallax_imagestore_create": {
+          "description": "hook for parallax imagestore creation",
+          "type": "string"
+        }
+      }
+    },
     "parallax_imagestore": {
       "description": "shared filesystem path where to store/load images",
       "type": "string"
