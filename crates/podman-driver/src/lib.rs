@@ -133,8 +133,10 @@ mod commands {
         for dev in &edf.devices {
             cli_opt(&mut cmd, "--device", Some(OsStr::new(dev)));
         }
-        for (key, val) in &edf.env {
-            cli_kv(&mut cmd, "--env", OsStr::new(key), OsStr::new(val));
+        if c_ctx.set_env {
+            for (key, val) in &edf.env {
+                cli_kv(&mut cmd, "--env", OsStr::new(key), OsStr::new(val));
+            }
         }
         for (key, val) in &edf.annotations {
             cli_kv(&mut cmd, "--annotation", OsStr::new(key), OsStr::new(val));
