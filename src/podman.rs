@@ -143,12 +143,13 @@ pub(crate) fn podman_start(
     let pidfile = format!("{}/pidfile", run.podman_tmp_path);
     //let command = vec!["sleep", "infinity"];
     let command = vec!["sh", "-c", "kill -STOP $$ ; exit 0"];
+    //let command = vec!["sh", "-l", "-c", "exec sh -c 'kill -STOP $$ ; exit 0'"];
 
     let c_ctx = ContainerCtx {
         name: run.name.clone(),
         interactive: false,
         detach: true,
-        set_env: true,
+        set_env: false,
         pidfile: Some(PathBuf::from(pidfile.clone())),
     };
 
