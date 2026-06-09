@@ -141,7 +141,7 @@ pub trait UserContext {
 }
 
 pub trait RasterOps {
-    fn load_config(&self) -> Result<Config, AppError>;
+    fn load_config_path(&self, path: &Path) -> Result<Config, AppError>;
     fn validate(&self, path: &str) -> Result<(), String>;
     fn render(&self, path: &str) -> Result<EDF, String>;
 }
@@ -191,8 +191,9 @@ pub struct AppDeps<'a> {
 pub struct RealRasterOps;
 
 impl RasterOps for RealRasterOps {
-    fn load_config(&self) -> Result<Config, AppError> {
-        raster::load_config().map_err(|e| AppError::ConfigLoad(e.to_string()))
+    fn load_config_path(&self, path: &Path) -> Result<Config, AppError> {
+        raster::load_config_path(Some(path.to_path_buf()), raster::config::VarExpand::Must, &None)
+            .map_err(|e| AppError::ConfigLoad(e.to_string()))
     }
 
     fn validate(&self, path: &str) -> Result<(), String> {
@@ -205,6 +206,54 @@ impl RasterOps for RealRasterOps {
 }
 
 pub struct RealContainerRuntime;
+
+const SYSTEM_CONFIG_DIR: &str = "/etc/sarus-suite";
+const USER_CONFIG_DIR_NAME: &str = "sarus-suite";
+
+fn load_config_with_fallback(raster: &dyn RasterOps) -> Result<Config, AppError> {
+    let mut candidates = vec![PathBuf::from(SYSTEM_CONFIG_DIR)];
+    if let Some(user_dir) = user_config_dir() {
+        candidates.push(user_dir);
+    }
+
+    load_config_from_candidates(raster, &candidates)
+}
+
+fn load_config_from_candidates(
+    raster: &dyn RasterOps,
+    candidates: &[PathBuf],
+) -> Result<Config, AppError> {
+    let mut searched = Vec::with_capacity(candidates.len());
+
+    for path in candidates {
+        searched.push(path.display().to_string());
+        if config_dir_exists(path)? {
+            return raster.load_config_path(path);
+        }
+    }
+
+    Err(AppError::ConfigLoad(format!(
+        "Cannot find config files in {}",
+        searched.join(" or ")
+    )))
+}
+
+fn config_dir_exists(path: &Path) -> Result<bool, AppError> {
+    match fs::metadata(path) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(AppError::ConfigLoad(format!(
+            "Failed to access configuration directory {}: {err}",
+            path.display()
+        ))),
+    }
+}
+
+fn user_config_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|path| path.join(".config").join(USER_CONFIG_DIR_NAME))
+}
 
 impl ContainerRuntime for RealContainerRuntime {
     fn default_graphroot(&self, ctx: &PodmanCtx) -> Result<PathBuf, AppError> {
@@ -610,12 +659,12 @@ pub fn execute_command_with_options(
         CommandSpec::Pull { image } => {
             // pull_command() and migrate_command() are also called internally by other functions,
             // so they receive the config from the outside to avoid loading it multiple times.
-            let config = deps.raster.load_config()?;
+            let config = load_config_with_fallback(deps.raster)?;
             setup_imagestore(&config)?;
             pull_command(&image, &config, deps, options)
         }
         CommandSpec::Migrate { image } => {
-            let config = deps.raster.load_config()?;
+            let config = load_config_with_fallback(deps.raster)?;
             setup_imagestore(&config)?;
             migrate_command(&image, &config, deps, options)
         }
@@ -644,7 +693,7 @@ fn render_command(filepath: &str, deps: &AppDeps<'_>) -> Result<AppOutput, AppEr
 }
 
 fn images_command(deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
-    let config = deps.raster.load_config()?;
+    let config = load_config_with_fallback(deps.raster)?;
     let seed_ctx = build_parallax_seed_ctx(&config);
 
     // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
@@ -715,7 +764,7 @@ fn rmi_command(
     deps: &AppDeps<'_>,
     options: ExecOptions,
 ) -> Result<AppOutput, AppError> {
-    let config = deps.raster.load_config()?;
+    let config = load_config_with_fallback(deps.raster)?;
     let seed_ctx = build_parallax_seed_ctx(&config);
 
     // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
@@ -743,7 +792,7 @@ fn run_command(
         Ok(edf) => {
             // Loading config in each branch is a small duplication,
             // but allows to integration test invalid EDF cases without needing a valid config present
-            let config = deps.raster.load_config()?;
+            let config = load_config_with_fallback(deps.raster)?;
             setup_imagestore(&config)?;
             run_edf_command(&edf, container_cmd, &config, deps, options)
         }
@@ -754,7 +803,7 @@ fn run_command(
                 AppError::UnsupportedInput(format!("{filepath} is not valid EDF nor YAML"))
             })?;
 
-            let config = deps.raster.load_config()?;
+            let config = load_config_with_fallback(deps.raster)?;
             setup_imagestore(&config)?;
             run_yaml_command(filepath, container_cmd, &config, deps, options)
         }
@@ -1006,8 +1055,11 @@ mod tests {
 
     fn sample_config() -> Config {
         Config {
-            parallax_imagestore: String::from("/scratch/user/parallax/store"),
+            parallax_imagestore: String::from("/tmp/sarusctl-tests/parallax/store"),
             parallax_mount_program: String::from("/usr/local/bin/parallax_mount_program"),
+            parallax_mp_uid: 1234,
+            parallax_mp_gid: 4321,
+            parallax_mp_logfile: String::from("/tmp/parallax-1234/mount_program.log"),
             parallax_path: String::from("/usr/local/bin/parallax"),
             podman_module: String::from("hpc"),
             podman_path: String::from("/usr/bin/podman"),
@@ -1030,22 +1082,36 @@ mod tests {
 
     struct FakeRasterOps {
         config: Result<Config, AppError>,
+        config_paths: RefCell<Vec<PathBuf>>,
         validate_results: HashMap<String, Result<(), String>>,
         render_results: HashMap<String, Result<EDF, String>>,
     }
 
     impl FakeRasterOps {
         fn new(config: Config) -> Self {
+            ensure_default_user_config_dir();
             Self {
                 config: Ok(config),
+                config_paths: RefCell::new(Vec::new()),
                 validate_results: HashMap::new(),
                 render_results: HashMap::new(),
             }
         }
+
+        fn config_paths(&self) -> Vec<PathBuf> {
+            self.config_paths.borrow().clone()
+        }
+    }
+
+    fn ensure_default_user_config_dir() {
+        if let Some(path) = user_config_dir() {
+            fs::create_dir_all(path).unwrap();
+        }
     }
 
     impl RasterOps for FakeRasterOps {
-        fn load_config(&self) -> Result<Config, AppError> {
+        fn load_config_path(&self, path: &Path) -> Result<Config, AppError> {
+            self.config_paths.borrow_mut().push(path.to_path_buf());
             self.config.clone()
         }
 
@@ -1243,6 +1309,79 @@ mod tests {
             runtime,
             user,
         }
+    }
+
+    #[test]
+    fn load_config_from_candidates_uses_first_existing_directory() {
+        let temp = tempdir().unwrap();
+        let system_dir = temp.path().join("system");
+        let user_dir = temp.path().join("user");
+        fs::create_dir_all(&system_dir).unwrap();
+        fs::create_dir_all(&user_dir).unwrap();
+
+        let raster = FakeRasterOps::new(sample_config());
+        let config = load_config_from_candidates(&raster, &[system_dir.clone(), user_dir]).unwrap();
+
+        assert_eq!(config.parallax_path, sample_config().parallax_path);
+        assert_eq!(raster.config_paths(), vec![system_dir]);
+    }
+
+    #[test]
+    fn load_config_from_candidates_falls_back_when_system_directory_is_missing() {
+        let temp = tempdir().unwrap();
+        let system_dir = temp.path().join("system");
+        let user_dir = temp.path().join("user");
+        fs::create_dir_all(&user_dir).unwrap();
+
+        let raster = FakeRasterOps::new(sample_config());
+        let config =
+            load_config_from_candidates(&raster, &[system_dir, user_dir.clone()]).unwrap();
+
+        assert_eq!(config.parallax_path, sample_config().parallax_path);
+        assert_eq!(raster.config_paths(), vec![user_dir]);
+    }
+
+    #[test]
+    fn load_config_from_candidates_does_not_fallback_after_existing_directory_errors() {
+        let temp = tempdir().unwrap();
+        let system_dir = temp.path().join("system");
+        let user_dir = temp.path().join("user");
+        fs::create_dir_all(&system_dir).unwrap();
+        fs::create_dir_all(&user_dir).unwrap();
+
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster.config = Err(AppError::ConfigLoad(String::from("invalid config")));
+
+        let err = match load_config_from_candidates(&raster, &[system_dir.clone(), user_dir]) {
+            Ok(_) => panic!("expected config load to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err, AppError::ConfigLoad(String::from("invalid config")));
+        assert_eq!(raster.config_paths(), vec![system_dir]);
+    }
+
+    #[test]
+    fn load_config_from_candidates_reports_both_missing_locations() {
+        let temp = tempdir().unwrap();
+        let system_dir = temp.path().join("system");
+        let user_dir = temp.path().join("user");
+        let raster = FakeRasterOps::new(sample_config());
+
+        let err = match load_config_from_candidates(&raster, &[system_dir.clone(), user_dir.clone()]) {
+            Ok(_) => panic!("expected config load to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(
+            err,
+            AppError::ConfigLoad(format!(
+                "Cannot find config files in {} or {}",
+                system_dir.display(),
+                user_dir.display()
+            ))
+        );
+        assert!(raster.config_paths().is_empty());
     }
 
     fn unique_test_user() -> CurrentUser {
@@ -1525,14 +1664,14 @@ spec:
         assert_eq!(seed.podman_path, PathBuf::from("/usr/bin/podman"));
         assert_eq!(
             seed.ro_store,
-            Some(PathBuf::from("/scratch/user/parallax/store"))
+            Some(PathBuf::from("/tmp/sarusctl-tests/parallax/store"))
         );
 
         let ro = build_readonly_ctx(&config);
         assert_eq!(ro.podman_path, PathBuf::from("/usr/bin/podman"));
         assert_eq!(
             ro.graphroot,
-            Some(PathBuf::from("/scratch/user/parallax/store"))
+            Some(PathBuf::from("/tmp/sarusctl-tests/parallax/store"))
         );
 
         let run = build_run_ctx(&config, &user);
@@ -1548,7 +1687,7 @@ spec:
         );
         assert_eq!(
             seed.ro_store,
-            Some(PathBuf::from("/scratch/user/parallax/store"))
+            Some(PathBuf::from("/tmp/sarusctl-tests/parallax/store"))
         );
         let env = run.podman_env.expect("missing env");
         assert_eq!(env.get(OsStr::new("PARALLAX_MP_UID")).unwrap(), "1234");
