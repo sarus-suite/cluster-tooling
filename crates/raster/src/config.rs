@@ -11,6 +11,7 @@ pub struct RawConfig {
     edf_system_search_path: Option<String>,
     hooks: Option<RawConfigHooks>,
     parallax_imagestore: Option<String>,
+    parallax_imagestore_keepalive: Option<bool>,
     parallax_mount_program: Option<String>,
     parallax_path: Option<String>,
     parallax_mp_uid: Option<u32>,
@@ -40,6 +41,8 @@ pub struct Config {
     pub hooks: ConfigHooks,
     #[serde(default = "get_default_parallax_imagestore")]
     pub parallax_imagestore: String,
+    #[serde(default = "get_default_parallax_imagestore_keepalive")]
+    pub parallax_imagestore_keepalive: bool,
     #[serde(default = "get_default_parallax_mount_program")]
     pub parallax_mount_program: String,
     #[serde(default = "get_default_parallax_path")]
@@ -89,6 +92,10 @@ fn get_default_edf_system_search_path() -> String {
 
 fn get_default_parallax_imagestore() -> String {
     return String::from("");
+}
+
+fn get_default_parallax_imagestore_keepalive() -> bool {
+    return false;
 }
 
 fn get_default_parallax_mount_program() -> String {
@@ -173,6 +180,10 @@ impl From<RawConfig> for Config {
                 Some(s) => s,
                 None => get_default_parallax_imagestore(),
             },
+            parallax_imagestore_keepalive: match r.parallax_imagestore_keepalive {
+                Some(s) => s,
+                None => get_default_parallax_imagestore_keepalive(),
+            },
             parallax_mount_program: match r.parallax_mount_program {
                 Some(s) => s,
                 None => get_default_parallax_mount_program(),
@@ -244,6 +255,9 @@ impl RawConfig {
         }
         if i.parallax_imagestore.is_some() {
             self.parallax_imagestore = i.parallax_imagestore;
+        }
+        if i.parallax_imagestore_keepalive.is_some() {
+            self.parallax_imagestore_keepalive = i.parallax_imagestore_keepalive;
         }
         if i.parallax_mount_program.is_some() {
             self.parallax_mount_program = i.parallax_mount_program;
@@ -481,6 +495,15 @@ pub fn update_config_by_user(config: &mut Config, edf: EDF) -> SarusResult<()> {
     let parallax_imagestore = edf.annotations.get("com.sarus.parallax_imagestore");
     if parallax_imagestore.is_some() {
         config.parallax_imagestore = parallax_imagestore.unwrap().to_string();
+    }
+
+    let parallax_imagestore_keepalive = edf.annotations.get("com.sarus.parallax_imagestore_keepalive");
+    if parallax_imagestore_keepalive.is_some() {
+        config.parallax_imagestore_keepalive = match parallax_imagestore_keepalive.unwrap().as_str() {
+            "true" => true,
+            "false" => false,
+            _ => config.parallax_imagestore_keepalive,
+        };
     }
 
     let parallax_mount_program = edf.annotations.get("com.sarus.parallax_mount_program");

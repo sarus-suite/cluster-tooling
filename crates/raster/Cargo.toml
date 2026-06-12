@@ -14,3 +14,4 @@ regex = "1.12.2"
 serial_test = "3.2.0"
 nix = { version = "0.30.1", features = ["user","fs","signal"] }
 is_executable = "1.0.5"
+walkdir = "2.5.0"
