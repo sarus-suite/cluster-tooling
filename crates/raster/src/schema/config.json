@@ -25,6 +25,10 @@
       "description": "shared filesystem path where to store/load images",
       "type": "string"
     },
+    "parallax_imagestore_keepalive": {
+      "description": "enable/disable parallax imagestore keepalive",
+      "type": "boolean"
+    },
     "parallax_mount_program": {
       "description": "filesystem path to the utilty that handles shared images mounts",
       "type": "string"
