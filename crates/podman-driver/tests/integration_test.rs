@@ -70,25 +70,27 @@ fn test_run_from_edf_detached_output() -> anyhow::Result<()> {
 // and cause repeated registry pulls.
 // Consider removal.
 #[test]
-fn test_pull() {
+fn test_pull() -> anyhow::Result<()> {
     let image = "alpine:3.22";
-    if pmd::image_exists(image, None) {
+    if pmd::image_exists(image, None)? {
         pmd::rmi(image, None);
     }
-    assert!(!pmd::image_exists(image, None));
+    assert!(!pmd::image_exists(image, None)?);
     pmd::pull(image, None);
-    assert!(pmd::image_exists(image, None));
+    assert!(pmd::image_exists(image, None)?);
+    Ok(())
 }
 
 #[test]
-fn test_rmi() {
+fn test_rmi() -> anyhow::Result<()> {
     let image = "alpine:3.22";
-    if !pmd::image_exists(image, None) {
+    if !pmd::image_exists(image, None)? {
         pmd::pull(image, None);
     }
-    assert!(pmd::image_exists(image, None));
+    assert!(pmd::image_exists(image, None)?);
     pmd::rmi(image, None);
-    assert!(!pmd::image_exists(image, None));
+    assert!(!pmd::image_exists(image, None)?);
+    Ok(())
 }
 
 #[test]

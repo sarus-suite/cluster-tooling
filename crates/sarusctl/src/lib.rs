@@ -152,6 +152,12 @@ pub trait ContainerRuntime {
     fn images(&self, ctx: &PodmanCtx) -> Result<(), AppError>;
     fn pull(&self, image: &str, ctx: &PodmanCtx, verbose: bool) -> Result<(), AppError>;
     fn image_exists(&self, image: &str, ctx: &PodmanCtx) -> Result<bool, AppError>;
+    fn parallax_exist(
+        &self,
+        parallax_path: &Path,
+        ctx: &PodmanCtx,
+        image: &str,
+    ) -> Result<bool, AppError>;
     fn parallax_migrate(
         &self,
         parallax_path: &Path,
@@ -310,7 +316,17 @@ impl ContainerRuntime for RealContainerRuntime {
     }
 
     fn image_exists(&self, image: &str, ctx: &PodmanCtx) -> Result<bool, AppError> {
-        Ok(pmd::image_exists(image, Some(ctx)))
+        pmd::image_exists(image, Some(ctx)).map_err(|e| AppError::Runtime(e.to_string()))
+    }
+
+    fn parallax_exist(
+        &self,
+        parallax_path: &Path,
+        ctx: &PodmanCtx,
+        image: &str,
+    ) -> Result<bool, AppError> {
+        pmd::parallax_exist(&parallax_path.to_path_buf(), ctx, image)
+            .map_err(|e| AppError::Runtime(e.to_string()))
     }
 
     fn parallax_migrate(
@@ -729,8 +745,8 @@ fn render_command(filepath: &str, deps: &AppDeps<'_>) -> Result<AppOutput, AppEr
 fn images_command(config: &Config, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
     let seed_ctx = build_parallax_seed_ctx(config);
 
-    // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
-    // Not necessary on pull context because that's a plain Podman invocation, and Podman resolves the graphroot location on its own.
+    // Use the Parallax seed context to pre-populate the struct with Podman path and additionalimagestore,
+    // then add the default graphroot
     let graphroot = deps.runtime.default_graphroot(&seed_ctx)?;
     let ctx = PodmanCtx {
         graphroot: Some(graphroot),
@@ -772,7 +788,7 @@ fn migrate_command(
     let seed_ctx = build_parallax_seed_ctx(config);
 
     // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
-    // Not necessary on pull context because that's a plain Podman invocation, and Podman resolves the graphroot location on its own.
+    // Not necessary on Podman commands, because Podman resolves the graphroot location on its own.
     let graphroot = deps.runtime.default_graphroot(&seed_ctx)?;
     let ctx = PodmanCtx {
         graphroot: Some(graphroot),
@@ -783,7 +799,7 @@ fn migrate_command(
     print_progress_message(&format!("Migrating {image} with Parallax..."));
     deps.runtime
         .parallax_migrate(&parallax_path, &ctx, image, options.verbose)?;
-    if !deps.runtime.image_exists(image, &ctx)? {
+    if !deps.runtime.parallax_exist(&parallax_path, &ctx, image)? {
         return Err(AppError::Runtime(format!(
             "Image {image} is still missing after migration"
         )));
@@ -801,7 +817,7 @@ fn rmi_command(
     let seed_ctx = build_parallax_seed_ctx(config);
 
     // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
-    // Not necessary on pull context because that's a plain Podman invocation, and Podman resolves the graphroot location on its own.
+    // Not necessary on Podman commands, because Podman resolves the graphroot location on its own.
     let graphroot = deps.runtime.default_graphroot(&seed_ctx)?;
     let ctx = PodmanCtx {
         graphroot: Some(graphroot),
@@ -851,11 +867,16 @@ fn run_edf_command(
     options: ExecOptions,
 ) -> Result<AppOutput, AppError> {
     let user = deps.user.current_user()?;
-    let ro_ctx = build_readonly_ctx(config);
+    let plx_ctx = build_parallax_seed_ctx(config);
     let run_ctx = build_run_ctx(config, &user);
     let mut output = AppOutput::success("");
 
-    if !deps.runtime.image_exists(&edf.image, &ro_ctx)? {
+    let parallax_path = PathBuf::from(&config.parallax_path);
+
+    if !deps
+        .runtime
+        .parallax_exist(&parallax_path, &plx_ctx, &edf.image)?
+    {
         merge_output(
             &mut output,
             pull_command(&edf.image, config, deps, options)?,
@@ -903,7 +924,7 @@ fn run_yaml_command(
     options: ExecOptions,
 ) -> Result<AppOutput, AppError> {
     let user = deps.user.current_user()?;
-    let ro_ctx = build_readonly_ctx(config);
+    let plx_ctx = build_parallax_seed_ctx(config);
     let mut run_ctx = build_run_ctx(config, &user);
     // Podman kube play doesn't seem to honor all settings from a module
     // so to avoid confusion we disable the module for the time being.
@@ -915,8 +936,13 @@ fn run_yaml_command(
     let images = extract_images_from_yaml_value(&manifest)?;
     let mut output = AppOutput::success("");
 
+    let parallax_path = PathBuf::from(&config.parallax_path);
+
     for image in images {
-        if !deps.runtime.image_exists(&image, &ro_ctx)? {
+        if !deps
+            .runtime
+            .parallax_exist(&parallax_path, &plx_ctx, &image)?
+        {
             merge_output(&mut output, pull_command(&image, config, deps, options)?);
         }
     }
@@ -1096,7 +1122,10 @@ mod tests {
 
     fn sample_config() -> Config {
         Config {
-            parallax_imagestore: String::from("/tmp/sarusctl-tests/parallax/store"),
+            parallax_imagestore: std::env::temp_dir()
+                .join("sarusctl-test-parallax-store")
+                .to_string_lossy()
+                .into_owned(),
             parallax_mount_program: String::from("/usr/local/bin/parallax_mount_program"),
             parallax_mp_uid: 1234,
             parallax_mp_gid: 4321,
@@ -1182,6 +1211,7 @@ mod tests {
         rmi_verbose: RefCell<Vec<bool>>,
         graphroot: Result<PathBuf, AppError>,
         image_exists: RefCell<HashMap<String, VecDeque<bool>>>,
+        parallax_exist: RefCell<HashMap<String, VecDeque<bool>>>,
         pull_results: RefCell<HashMap<String, Result<(), AppError>>>,
         migrate_results: RefCell<HashMap<String, Result<(), AppError>>>,
         rmi_results: RefCell<HashMap<String, Result<(), AppError>>>,
@@ -1203,6 +1233,7 @@ mod tests {
                 pull_results: RefCell::new(HashMap::new()),
                 migrate_results: RefCell::new(HashMap::new()),
                 rmi_results: RefCell::new(HashMap::new()),
+                parallax_exist: RefCell::new(HashMap::new()),
                 run_result: Ok(0),
                 kube_play_result: Ok(()),
                 kube_down_result: Ok(()),
@@ -1212,6 +1243,12 @@ mod tests {
 
         fn push_image_exists(&self, image: &str, values: Vec<bool>) {
             self.image_exists
+                .borrow_mut()
+                .insert(image.to_string(), VecDeque::from(values));
+        }
+
+        fn push_parallax_exist(&self, image: &str, values: Vec<bool>) {
+            self.parallax_exist
                 .borrow_mut()
                 .insert(image.to_string(), VecDeque::from(values));
         }
@@ -1260,6 +1297,20 @@ mod tests {
                 .borrow_mut()
                 .push(format!("image_exists:{image}"));
             let mut states = self.image_exists.borrow_mut();
+            let queue = states.entry(image.to_string()).or_default();
+            Ok(queue.pop_front().unwrap_or(false))
+        }
+
+        fn parallax_exist(
+            &self,
+            _parallax_path: &Path,
+            _ctx: &PodmanCtx,
+            image: &str,
+        ) -> Result<bool, AppError> {
+            self.calls
+                .borrow_mut()
+                .push(format!("parallax_exist:{image}"));
+            let mut states = self.parallax_exist.borrow_mut();
             let queue = states.entry(image.to_string()).or_default();
             Ok(queue.pop_front().unwrap_or(false))
         }
@@ -1703,23 +1754,18 @@ spec:
             uid: 1234,
             gid: 4321,
         };
+        let parallax_imagestore = std::env::temp_dir().join("sarusctl-test-parallax-store");
 
         let pull = build_pull_ctx(&config);
         assert_eq!(pull.podman_path, PathBuf::from("/usr/bin/podman"));
 
         let seed = build_parallax_seed_ctx(&config);
         assert_eq!(seed.podman_path, PathBuf::from("/usr/bin/podman"));
-        assert_eq!(
-            seed.ro_store,
-            Some(PathBuf::from("/tmp/sarusctl-tests/parallax/store"))
-        );
+        assert_eq!(seed.ro_store, Some(parallax_imagestore.clone()));
 
         let ro = build_readonly_ctx(&config);
         assert_eq!(ro.podman_path, PathBuf::from("/usr/bin/podman"));
-        assert_eq!(
-            ro.graphroot,
-            Some(PathBuf::from("/tmp/sarusctl-tests/parallax/store"))
-        );
+        assert_eq!(ro.graphroot, Some(parallax_imagestore.clone()));
 
         let run = build_run_ctx(&config, &user);
         assert_eq!(run.podman_path, PathBuf::from("/usr/bin/podman"));
@@ -1732,10 +1778,7 @@ spec:
             run.runroot,
             Some(PathBuf::from("/dev/shm/sarusctl-1234/runroot"))
         );
-        assert_eq!(
-            seed.ro_store,
-            Some(PathBuf::from("/tmp/sarusctl-tests/parallax/store"))
-        );
+        assert_eq!(seed.ro_store, Some(parallax_imagestore));
         let env = run.podman_env.expect("missing env");
         assert_eq!(env.get(OsStr::new("PARALLAX_MP_UID")).unwrap(), "1234");
         assert_eq!(env.get(OsStr::new("PARALLAX_MP_GID")).unwrap(), "4321");
@@ -1845,7 +1888,8 @@ spec:
         let config = sample_config();
         let raster = FakeRasterOps::new(config);
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![true, true]);
+        runtime.push_image_exists("alpine:3.22", vec![true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -1868,7 +1912,7 @@ spec:
                 String::from("image_exists:alpine:3.22"),
                 String::from("default_graphroot"),
                 String::from("migrate:alpine:3.22"),
-                String::from("image_exists:alpine:3.22")
+                String::from("parallax_exist:alpine:3.22")
             ]
         );
     }
@@ -1878,7 +1922,7 @@ spec:
         let config = sample_config();
         let raster = FakeRasterOps::new(config);
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -1898,7 +1942,7 @@ spec:
             vec![
                 String::from("default_graphroot"),
                 String::from("migrate:alpine:3.22"),
-                String::from("image_exists:alpine:3.22")
+                String::from("parallax_exist:alpine:3.22")
             ]
         );
     }
@@ -1986,7 +2030,7 @@ spec:
             .render_results
             .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -2004,9 +2048,8 @@ spec:
         assert_eq!(
             runtime.calls(),
             vec![
-                String::from("image_exists:alpine:3.22"),
-                String::from("run:alpine:3.22:[\"sh\"]"),
-                String::from("cleanup_storage"),
+                String::from("parallax_exist:alpine:3.22"),
+                String::from("run:alpine:3.22:[\"sh\"]")
             ]
         );
     }
@@ -2018,7 +2061,8 @@ spec:
             .render_results
             .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![false, true, true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![false, true]);
+        runtime.push_image_exists("alpine:3.22", vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -2038,14 +2082,13 @@ spec:
         assert_eq!(
             runtime.calls(),
             vec![
-                String::from("image_exists:alpine:3.22"),
+                String::from("parallax_exist:alpine:3.22"),
                 String::from("pull:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
                 String::from("default_graphroot"),
                 String::from("migrate:alpine:3.22"),
-                String::from("image_exists:alpine:3.22"),
-                String::from("run:alpine:3.22:[\"sh\"]"),
-                String::from("cleanup_storage"),
+                String::from("parallax_exist:alpine:3.22"),
+                String::from("run:alpine:3.22:[\"sh\"]")
             ]
         );
     }
@@ -2057,7 +2100,7 @@ spec:
             .render_results
             .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
         let user = unique_test_user();
         ensure_clean_rootdirs(&user);
         let run_ctx = build_run_ctx(&sample_config(), &user);
@@ -2092,7 +2135,7 @@ spec:
             .render_results
             .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![false]);
+        runtime.push_parallax_exist("alpine:3.22", vec![false]);
         runtime.pull_results.borrow_mut().insert(
             String::from("alpine:3.22"),
             Err(AppError::Runtime(String::from("registry offline"))),
@@ -2114,7 +2157,7 @@ spec:
         assert_eq!(
             runtime.calls(),
             vec![
-                String::from("image_exists:alpine:3.22"),
+                String::from("parallax_exist:alpine:3.22"),
                 String::from("pull:alpine:3.22")
             ]
         );
@@ -2149,8 +2192,9 @@ spec:
             Err(String::from("not an edf")),
         );
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![false, true, true]);
-        runtime.push_image_exists("ubuntu:24.04", vec![true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![false, true]);
+        runtime.push_image_exists("alpine:3.22", vec![true]);
+        runtime.push_parallax_exist("ubuntu:24.04", vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -2170,13 +2214,13 @@ spec:
         assert_eq!(
             runtime.calls(),
             vec![
-                String::from("image_exists:alpine:3.22"),
+                String::from("parallax_exist:alpine:3.22"),
                 String::from("pull:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
                 String::from("default_graphroot"),
                 String::from("migrate:alpine:3.22"),
-                String::from("image_exists:alpine:3.22"),
-                String::from("image_exists:ubuntu:24.04"),
+                String::from("parallax_exist:alpine:3.22"),
+                String::from("parallax_exist:ubuntu:24.04"),
                 format!("kube_play:{}", manifest.to_string_lossy()),
                 String::from("exec_interactive:training-pod-sidecar:[]"),
                 format!("kube_down:{}?force=true", manifest.to_string_lossy()),
@@ -2210,7 +2254,8 @@ spec:
             Err(String::from("not an edf")),
         );
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![false, true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![false]);
+        runtime.push_image_exists("alpine:3.22", vec![true]);
         runtime.migrate_results.borrow_mut().insert(
             String::from("alpine:3.22"),
             Err(AppError::Runtime(String::from("parallax broke"))),
@@ -2232,7 +2277,7 @@ spec:
         assert_eq!(
             runtime.calls(),
             vec![
-                String::from("image_exists:alpine:3.22"),
+                String::from("parallax_exist:alpine:3.22"),
                 String::from("pull:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
                 String::from("default_graphroot"),
@@ -2266,7 +2311,7 @@ spec:
             Err(String::from("not an edf")),
         );
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
         let user = unique_test_user();
         ensure_clean_rootdirs(&user);
         let mut run_ctx = build_run_ctx(&sample_config(), &user);
@@ -2322,8 +2367,8 @@ spec:
             Err(String::from("not an edf")),
         );
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![true]);
-        runtime.push_image_exists("ubuntu:24.04", vec![true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
+        runtime.push_parallax_exist("ubuntu:24.04", vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -2346,8 +2391,8 @@ spec:
         assert_eq!(
             runtime.calls(),
             vec![
-                String::from("image_exists:alpine:3.22"),
-                String::from("image_exists:ubuntu:24.04"),
+                String::from("parallax_exist:alpine:3.22"),
+                String::from("parallax_exist:ubuntu:24.04"),
             ]
         );
     }
@@ -2357,7 +2402,8 @@ spec:
         let config = sample_config();
         let raster = FakeRasterOps::new(config);
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![true, true]);
+        runtime.push_image_exists("alpine:3.22", vec![true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -2405,7 +2451,8 @@ spec:
             .render_results
             .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![false, true, true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![false, true]);
+        runtime.push_image_exists("alpine:3.22", vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
