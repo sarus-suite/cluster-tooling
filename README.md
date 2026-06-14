@@ -91,6 +91,18 @@ devcontainer exec --workspace-folder . --config .devcontainer/opensuse/devcontai
 
 You are now inside the prepared build environment.
 
+### Static `sarusctl` build with Alpine
+
+For a static `musl` build of `sarusctl`, use the Alpine devcontainer instead:
+
+```bash
+devcontainer up --workspace-folder . --config .devcontainer/alpine/devcontainer.json
+devcontainer exec --workspace-folder . --config .devcontainer/alpine/devcontainer.json -- \
+  cargo build --locked -p sarusctl --release
+```
+
+This devcontainer is intentionally scoped to `sarusctl` portability work. It does not include the Slurm headers and related system setup needed for `skybox`.
+
 ### VS Code
 
 Open the repository in VS Code and choose:
@@ -252,4 +264,3 @@ Then work on a new feature
 
 See LICENSE file for this repository.
 See individual crates for their licensing terms.
-
