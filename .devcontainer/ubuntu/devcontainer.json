@@ -8,9 +8,6 @@
   "remoteUser": "vscode",
   "updateRemoteUserUID": true,
 
-  "platform": "linux/amd64",
-  "runArgs": ["--platform=linux/amd64"],
-
   "customizations": {
     "vscode": {
       "extensions": [
