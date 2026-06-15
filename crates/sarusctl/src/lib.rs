@@ -180,6 +180,7 @@ pub trait ContainerRuntime {
     ) -> Result<i32, AppError>;
     fn kube_play(&self, filepath: &str, run_ctx: &PodmanCtx) -> Result<(), AppError>;
     fn kube_down(&self, filepath: &str, force: bool, run_ctx: &PodmanCtx) -> Result<(), AppError>;
+    fn cleanup_storage(&self, run_ctx: &PodmanCtx) -> Result<(), AppError>;
 }
 
 pub struct AppDeps<'a> {
@@ -372,6 +373,18 @@ impl ContainerRuntime for RealContainerRuntime {
     fn kube_down(&self, filepath: &str, force: bool, run_ctx: &PodmanCtx) -> Result<(), AppError> {
         pmd::kube_down(filepath, force, Some(run_ctx));
         Ok(())
+    }
+
+    fn cleanup_storage(&self, run_ctx: &PodmanCtx) -> Result<(), AppError> {
+        let out = pmd::loggable::system_reset(Some(run_ctx));
+        if out.output.status.success() {
+            Ok(())
+        } else {
+            Err(AppError::Runtime(format!(
+                "Podman storage cleanup failed: {}",
+                String::from_utf8_lossy(&out.output.stderr).trim()
+            )))
+        }
     }
 }
 
@@ -841,7 +854,9 @@ fn run_edf_command(
     let run_result = deps
         .runtime
         .run_from_edf(edf, &run_ctx, &c_ctx, container_cmd);
+    let storage_cleanup_error = deps.runtime.cleanup_storage(&run_ctx).err();
     let cleanup_warning = cleanup_podman_rootdirs(&run_ctx);
+    let cleanup_warning = merge_cleanup_warning(storage_cleanup_error, cleanup_warning);
 
     // Append warning to error in case of run failure
     output.return_code = match run_result {
@@ -894,7 +909,9 @@ fn run_yaml_command(
         .exec_interactive(&join_container, &run_ctx, container_cmd);
     let down_result = deps.runtime.kube_down(filepath, true, &run_ctx);
     // TODO check if we need to do anything else to report errors from kube_down as well
+    let storage_cleanup_error = deps.runtime.cleanup_storage(&run_ctx).err();
     let cleanup_warning = cleanup_podman_rootdirs(&run_ctx);
+    let cleanup_warning = merge_cleanup_warning(storage_cleanup_error, cleanup_warning);
 
     // Append warning to error in case of run failure
     if let Err(err) = play_result {
@@ -958,6 +975,17 @@ fn append_warning(output: &mut AppOutput, warning: String) {
 
 fn combine_error_with_warning(err: AppError, warning: String) -> AppError {
     AppError::Runtime(format!("{err}\n{warning}"))
+}
+
+fn merge_cleanup_warning(
+    storage_cleanup_error: Option<AppError>,
+    rootdir_cleanup_warning: Option<String>,
+) -> Option<String> {
+    match (storage_cleanup_error, rootdir_cleanup_warning) {
+        (Some(err), Some(warning)) => Some(format!("{err}\n{warning}")),
+        (None, warning) => warning,
+        (Some(_), None) => None,
+    }
 }
 
 fn setup_imagestore(config: &Config) -> Result<(), AppError> {
@@ -1150,6 +1178,7 @@ mod tests {
         run_result: Result<i32, AppError>,
         kube_play_result: Result<(), AppError>,
         kube_down_result: Result<(), AppError>,
+        cleanup_storage_result: Result<(), AppError>,
     }
 
     impl FakeContainerRuntime {
@@ -1167,6 +1196,7 @@ mod tests {
                 run_result: Ok(0),
                 kube_play_result: Ok(()),
                 kube_down_result: Ok(()),
+                cleanup_storage_result: Ok(()),
             }
         }
 
@@ -1296,6 +1326,13 @@ mod tests {
                 .borrow_mut()
                 .push(format!("kube_down:{filepath}?force={force}"));
             self.kube_down_result.clone()
+        }
+
+        fn cleanup_storage(&self, _run_ctx: &PodmanCtx) -> Result<(), AppError> {
+            self.calls
+                .borrow_mut()
+                .push(String::from("cleanup_storage"));
+            self.cleanup_storage_result.clone()
         }
     }
 
@@ -1958,7 +1995,8 @@ spec:
             runtime.calls(),
             vec![
                 String::from("image_exists:alpine:3.22"),
-                String::from("run:alpine:3.22:[\"sh\"]")
+                String::from("run:alpine:3.22:[\"sh\"]"),
+                String::from("cleanup_storage"),
             ]
         );
     }
@@ -1996,7 +2034,8 @@ spec:
                 String::from("default_graphroot"),
                 String::from("migrate:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
-                String::from("run:alpine:3.22:[\"sh\"]")
+                String::from("run:alpine:3.22:[\"sh\"]"),
+                String::from("cleanup_storage"),
             ]
         );
     }
@@ -2131,6 +2170,7 @@ spec:
                 format!("kube_play:{}", manifest.to_string_lossy()),
                 String::from("exec_interactive:training-pod-sidecar:[]"),
                 format!("kube_down:{}?force=true", manifest.to_string_lossy()),
+                String::from("cleanup_storage"),
             ]
         );
     }

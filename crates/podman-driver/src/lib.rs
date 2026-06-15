@@ -281,6 +281,17 @@ mod commands {
         cmd
     }
 
+    pub fn system_reset(podman_ctx: Option<&PodmanCtx>) -> Command {
+        let mut cmd = commands::base(podman_ctx);
+
+        if let Some(ctx) = podman_ctx {
+            cli_opt(&mut cmd, "--module", ctx.module.as_deref().map(OsStr::new));
+        }
+
+        cmd.args(["system", "reset", "--force"]);
+        cmd
+    }
+
     pub fn kube(podman_ctx: Option<&PodmanCtx>) -> Command {
         let mut cmd = commands::base(podman_ctx);
 
@@ -481,6 +492,12 @@ pub fn inspect(target: &str, format: Option<&str>, podman_ctx: Option<&PodmanCtx
 
 pub fn info(format: Option<&str>, podman_ctx: Option<&PodmanCtx>) -> Output {
     commands::info(format, podman_ctx)
+        .output()
+        .expect("Failed to execute command")
+}
+
+pub fn system_reset(podman_ctx: Option<&PodmanCtx>) -> Output {
+    commands::system_reset(podman_ctx)
         .output()
         .expect("Failed to execute command")
 }
@@ -735,6 +752,15 @@ pub mod loggable {
 
     pub fn image_exists(image: &str, podman_ctx: Option<&PodmanCtx>) -> ExecutedCommand {
         let mut cmd = commands::image_exists(image, podman_ctx);
+
+        ExecutedCommand {
+            command: cmd2string(&cmd),
+            output: cmd.output().expect("Failed to execute command"),
+        }
+    }
+
+    pub fn system_reset(podman_ctx: Option<&PodmanCtx>) -> ExecutedCommand {
+        let mut cmd = commands::system_reset(podman_ctx);
 
         ExecutedCommand {
             command: cmd2string(&cmd),
