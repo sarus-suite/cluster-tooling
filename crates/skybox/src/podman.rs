@@ -1,14 +1,16 @@
+use mktemp::Temp;
 use std::error::Error;
+use std::fs::{remove_dir_all};
 use std::path::PathBuf;
 use std::time::Instant;
 use sysinfo::{Pid, System};
 
-use slurm_spank::{SpankHandle, spank_log_user};
+use slurm_spank::{Context, SpankHandle, spank_log_user};
 
 use sarus_suite_podman_driver::loggable::{self as pmd, ExecutedCommand};
 use sarus_suite_podman_driver::{ContainerCtx, PodmanCtx};
 
-use crate::{SpankSkyBox, plugin_err, skybox_log_debug};
+use crate::{SpankSkyBox, plugin_err, skybox_log_debug, skybox_log_user};
 use crate::config::setup_imagestore;
 
 fn process_exists(pid: usize) -> bool {
@@ -24,6 +26,110 @@ fn process_exists(pid: usize) -> bool {
         }
     };
     ret
+}
+
+pub(crate) fn launcher_image_migrate(
+    ssb: &mut SpankSkyBox,
+    spank: &mut SpankHandle,
+) -> Result<(), Box<dyn Error>> {
+
+     match spank.context()? {
+         Context::Local | Context::Allocator => {},
+         _ => {
+             return plugin_err("launcher_image_migrate() cannot run in in this context");
+         },
+    }
+
+    let edf = match &ssb.edf {
+        Some(o) => o,
+        None => {
+            return plugin_err("couldn't find edf");
+        }
+    };
+
+    let config = &ssb.config;
+    setup_imagestore(config)?;
+
+    let temp_dir = match Temp::new_dir() {
+        Ok(tmp) => tmp,
+        Err(_) => {
+            return plugin_err("Unable to create temporary directory for ephemereal graphroot");
+        }
+    };
+
+    let ephemereal_graphroot = temp_dir.as_path();
+
+    //Check existence on parallax imagestore
+    let parallax_ctx = PodmanCtx {
+        podman_path: PathBuf::from(&config.podman_path),
+        module: None,
+        graphroot: Some(ephemereal_graphroot.to_path_buf()),
+        runroot: None,
+        parallax_mount_program: None,
+        ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
+        podman_env: None,
+    }
+    .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
+    .with_env("PARALLAX_MP_GID", config.parallax_mp_gid.to_string())
+    .with_env("PARALLAX_MP_SQUASHFUSE_CMD", config.parallax_mp_squashfuse_path.clone())
+    .with_env("PARALLAX_MP_LOGFILE", config.parallax_mp_logfile.clone());
+
+    //exit if it exists
+    if launcher_pmd_image_exists(&edf.image, &parallax_ctx) {
+        remove_dir_all(ephemereal_graphroot)?;
+        return Ok(());
+    }
+    remove_dir_all(ephemereal_graphroot)?;
+
+    //Check existence on local login graphroot
+    let local_ctx = PodmanCtx {
+        podman_path: PathBuf::from(&config.podman_path),
+        module: None,
+        graphroot: None,
+        runroot: None,
+        parallax_mount_program: None,
+        ro_store: None,
+        podman_env: None,
+    };
+
+    //exit if it doesn't exists
+    if !launcher_pmd_image_exists(&edf.image, &local_ctx) {
+        return Ok(());
+    }
+
+    //migrate from local login graphroot to IMAGESTORE
+    let ro_ctx = PodmanCtx {
+        podman_path: PathBuf::from(&config.podman_path),
+        module: None,
+        graphroot: None,
+        runroot: None,
+        parallax_mount_program: None,
+        ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
+        podman_env: None,
+    }
+    .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
+    .with_env("PARALLAX_MP_GID", config.parallax_mp_gid.to_string())
+    .with_env("PARALLAX_MP_SQUASHFUSE_CMD", config.parallax_mp_squashfuse_path.clone())
+    .with_env("PARALLAX_MP_LOGFILE", config.parallax_mp_logfile.clone());
+
+
+    //skybox_log_user!("migrating image \"{}\" to shared imagestore", edf.image);
+    match launcher_pmd_parallax_migrate(&config.parallax_path, &ro_ctx, &edf.image) {
+        Ok(_) => (),
+        #[allow(unused_variables)]
+        Err(e) => {
+            //skybox_log_user!("Error on image migration, {}", e);
+            return Ok(());
+        }
+    }
+    /*
+    if !launcher_pmd_image_exists(&edf.image, &ro_ctx) {
+        skybox_log_user!("couldn't find image on shared imagestore after migration");
+        return Ok(());
+    }
+    */
+
+    Ok(())
 }
 
 pub(crate) fn podman_pull(
@@ -252,6 +358,18 @@ pub(crate) fn pmd_image_exists(image: &str, ctx: &PodmanCtx) -> bool {
     result
 }
 
+pub(crate) fn launcher_pmd_image_exists(image: &str, ctx: &PodmanCtx) -> bool {
+    //let prefix = "podman image exists";
+
+    let ec = pmd::image_exists(&image, Some(&ctx));
+
+    let result = ec.output.status.success();
+
+    //launcher_log_ec(ec, prefix);
+
+    result
+}
+
 pub(crate) fn pmd_pull(image: &str, ctx: &PodmanCtx) -> () {
     let prefix = "podman pull";
 
@@ -270,6 +388,29 @@ pub(crate) fn pmd_parallax_migrate(
     let ec = pmd::parallax_migrate(&PathBuf::from(parallax_path), ctx, image);
 
     log_ec(ec.clone(), prefix);
+
+    match ec.output.status.code() {
+        Some(rc) => {
+            if rc != 0 {
+                return plugin_err(format!("parallax migrate exited with {rc}").as_str());
+            }
+        }
+        None => return plugin_err("parallax migrate failed badly"),
+    };
+
+    Ok(())
+}
+
+pub(crate) fn launcher_pmd_parallax_migrate(
+    parallax_path: &str,
+    ctx: &PodmanCtx,
+    image: &str,
+) -> Result<(), Box<dyn Error>> {
+    //let prefix = "parallax_migrate";
+
+    let ec = pmd::parallax_migrate(&PathBuf::from(parallax_path), ctx, image);
+
+    //launcher_log_ec(ec.clone(), prefix);
 
     match ec.output.status.code() {
         Some(rc) => {
@@ -368,6 +509,50 @@ pub(crate) fn log_ec(ec: ExecutedCommand, prefix: &str) {
         let lines = stderr.split("\n");
         for line in lines {
             skybox_log_debug!("{prefix} stderr: {}", line);
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn launcher_log_ec(ec: ExecutedCommand, prefix: &str) {
+    let rc = match ec.output.status.code() {
+        Some(ok) => format!("{ok}"),
+        None => {
+            //skybox_log_user!("{prefix} exited by signal");
+            String::from("UNKNOWN")
+        }
+    };
+
+    let mut stdout = match String::from_utf8(ec.output.stdout) {
+        Ok(ok) => ok,
+        Err(_) => String::from(""),
+    };
+    if stdout.ends_with("\n") {
+        stdout.pop();
+    };
+
+    let mut stderr = match String::from_utf8(ec.output.stderr) {
+        Ok(ok) => ok,
+        Err(_) => String::from(""),
+    };
+    if stderr.ends_with("\n") {
+        stderr.pop();
+    };
+
+    skybox_log_user!("CMD: {}", ec.command);
+    skybox_log_user!("{prefix} exit code: {}", rc);
+
+    if stdout != "" {
+        let lines = stdout.split("\n");
+        for line in lines {
+            skybox_log_user!("{prefix} stdout: {}", line);
+        }
+    }
+
+    if stderr != "" {
+        let lines = stderr.split("\n");
+        for line in lines {
+            skybox_log_user!("{prefix} stderr: {}", line);
         }
     }
 }

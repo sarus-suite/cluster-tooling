@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output};
+use std::result::Result::Ok as StdOk;
 
 pub struct PodmanCtx {
     pub podman_path: PathBuf,
@@ -333,13 +334,13 @@ mod commands {
     ) -> Command {
         let mut cmd = Command::new(parallax_path);
 
+        let graphroot = match &podman_ctx.graphroot {
+            Some(gr) => gr.clone(),
+            None => get_podman_default_graphroot(),
+        };
+
         cmd.arg("--podmanRoot")
-            .arg(
-                podman_ctx
-                    .graphroot
-                    .as_ref()
-                    .expect("Missing graphroot in parallax_migrate()"),
-            )
+            .arg(&graphroot)
             .arg("--roStoragePath")
             .arg(
                 podman_ctx
@@ -556,6 +557,25 @@ pub fn get_container_pid_from_default_file(
     cnt_pidfile.read_to_string(&mut pid)?;
     let pid: u32 = pid.parse()?;
     Ok(pid)
+}
+
+fn get_podman_default_graphroot() -> PathBuf {
+
+    fn get_fallback_graphroot() -> String {
+        let fallback = match std::env::home_dir() {
+            Some(dir) => format!("{}/.local/share/containers/storage", dir.to_string_lossy()),
+            None => String::from("/var/lib/containers/storage"),
+        };
+        fallback
+    }
+
+    let info_out = info(Some("{{.Store.GraphRoot}}"), None);
+    let graphroot = match str::from_utf8(&info_out.stdout) {
+        StdOk(gr) => gr.trim(),
+        Err(_) => &get_fallback_graphroot(),
+    };
+
+    return PathBuf::from(graphroot);
 }
 
 fn parallax_execute_command(
