@@ -5,6 +5,7 @@ use slurm_spank::SpankHandle;
 use crate::args::*;
 use crate::config::*;
 use crate::edf::*;
+use crate::podman::launcher_image_migrate;
 use crate::{SpankSkyBox, plugin_err, skybox_log_error, skybox_log_user};
 use raster::*;
 
@@ -94,6 +95,13 @@ pub(crate) fn srun_init_post_opt(
 
     update_config_by_user(&mut plugin.config, plugin.edf.clone().unwrap())?;
     let _ = set_remaining_default_args(plugin)?;
+
+    match launcher_image_migrate(plugin, spank) {
+        Ok(o) => (),
+        Err(e) => {
+            skybox_log_user!("{e}");
+        }
+    }
 
     Ok(())
 }
