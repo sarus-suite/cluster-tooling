@@ -277,6 +277,7 @@ fn user_config_dir() -> Option<PathBuf> {
 
 impl ContainerRuntime for RealContainerRuntime {
     fn default_graphroot(&self, ctx: &PodmanCtx) -> Result<PathBuf, AppError> {
+        //TODO Revise with logging: println!("Resolving default Podman graphroot...");
         let output = pmd::info(Some("{{.Store.GraphRoot}}"), Some(ctx));
         if !output.status.success() {
             return Err(AppError::PodmanInfo(
@@ -316,6 +317,7 @@ impl ContainerRuntime for RealContainerRuntime {
     }
 
     fn image_exists(&self, image: &str, ctx: &PodmanCtx) -> Result<bool, AppError> {
+        //TODO revise with logging:println!("Checking if image {image} exists in Podman...");
         pmd::image_exists(image, Some(ctx)).map_err(|e| AppError::Runtime(e.to_string()))
     }
 
