@@ -244,8 +244,12 @@ fn load_config_from_candidates(
 }
 
 fn config_dir_exists(path: &Path) -> Result<bool, AppError> {
-    match fs::metadata(path) {
-        Ok(_) => Ok(true),
+    match fs::metadata(path).map(|metadata| metadata.is_dir()) {
+        Ok(true) => Ok(true),
+        Ok(false) => Err(AppError::ConfigLoad(format!(
+            "Failed to access configuration directory {}: path exists but is not a directory",
+            path.display()
+        ))),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(err) => Err(AppError::ConfigLoad(format!(
             "Failed to access configuration directory {}: {err}",
