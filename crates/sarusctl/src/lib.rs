@@ -1,5 +1,5 @@
 use clap::ValueEnum;
-use raster::{self, EDF, config::Config, hook_run, ExecutedCommand};
+use raster::{self, EDF, ExecutedCommand, config::Config, hook_run};
 use sarus_suite_podman_driver::{self as pmd, ContainerCtx, PodmanCtx};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -193,8 +193,12 @@ pub struct RealRasterOps;
 
 impl RasterOps for RealRasterOps {
     fn load_config_path(&self, path: &Path) -> Result<Config, AppError> {
-        raster::load_config_path(Some(path.to_path_buf()), raster::config::VarExpand::Must, &None)
-            .map_err(|e| AppError::ConfigLoad(e.to_string()))
+        raster::load_config_path(
+            Some(path.to_path_buf()),
+            raster::config::VarExpand::Must,
+            &None,
+        )
+        .map_err(|e| AppError::ConfigLoad(e.to_string()))
     }
 
     fn validate(&self, path: &str) -> Result<(), String> {
@@ -460,7 +464,10 @@ pub fn build_run_ctx(config: &Config, user: &CurrentUser) -> PodmanCtx {
     }
     .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
     .with_env("PARALLAX_MP_GID", config.parallax_mp_gid.to_string())
-    .with_env("PARALLAX_MP_SQUASHFUSE_CMD", config.parallax_mp_squashfuse_path.clone())
+    .with_env(
+        "PARALLAX_MP_SQUASHFUSE_CMD",
+        config.parallax_mp_squashfuse_path.clone(),
+    )
     .with_env("PARALLAX_MP_LOGFILE", config.parallax_mp_logfile.clone())
 }
 
@@ -992,23 +999,23 @@ fn setup_imagestore(config: &Config) -> Result<(), AppError> {
     let imagestore = &config.parallax_imagestore;
     let imagestore_pb = PathBuf::from(&imagestore);
 
-    let opt_ec = hook_run(config, "parallax_imagestore_create", vec![&imagestore]).map_err(|e| {
-        AppError::Io(format!(
-            "Failed to run parallax_imagestore_create hook: {e}"
-        ))
-    })?;
+    let opt_ec =
+        hook_run(config, "parallax_imagestore_create", vec![&imagestore]).map_err(|e| {
+            AppError::Io(format!(
+                "Failed to run parallax_imagestore_create hook: {e}"
+            ))
+        })?;
 
     match opt_ec {
         Some(ec) => log_hook_ec(ec, "parallax_imagestore_create hook")?,
-        None => {},
+        None => {}
     }
 
     if !fs::exists(&imagestore_pb).map_err(|e| {
-            AppError::Io(format!(
-                "Failed to check for existence of Parallax imagestore directory: {e}"
-            ))
-        })?
-    {
+        AppError::Io(format!(
+            "Failed to check for existence of Parallax imagestore directory: {e}"
+        ))
+    })? {
         fs::create_dir_all(&imagestore_pb).map_err(|e| {
             AppError::Io(format!(
                 "Failed to create Parallax imagestore directory: {e}"
@@ -1019,12 +1026,9 @@ fn setup_imagestore(config: &Config) -> Result<(), AppError> {
 }
 
 fn log_hook_ec(ec: ExecutedCommand, prefix: &str) -> Result<(), AppError> {
-
     let rc = match ec.output.status.code() {
         Some(ok) => format!("{ok}"),
-        None => {
-            String::from("UNKNOWN")
-        }
+        None => String::from("UNKNOWN"),
     };
 
     let mut stdout = match String::from_utf8(ec.output.stdout) {
@@ -1049,7 +1053,7 @@ fn log_hook_ec(ec: ExecutedCommand, prefix: &str) -> Result<(), AppError> {
             eprintln!("{}", line);
         }
     }
-    
+
     if stdout != "" {
         let lines = stdout.split("\n");
         for line in lines {
@@ -1059,13 +1063,9 @@ fn log_hook_ec(ec: ExecutedCommand, prefix: &str) -> Result<(), AppError> {
 
     if rc != "0" {
         if rc == "UNKNOWN" {
-            return Err(AppError::Io(format!(
-                "{prefix} exited by signal"
-            )));
+            return Err(AppError::Io(format!("{prefix} exited by signal")));
         } else {
-            return Err(AppError::Io(format!(
-                "{prefix} exit code: {rc}"
-            )));
+            return Err(AppError::Io(format!("{prefix} exit code: {rc}")));
         }
     }
     Ok(())
@@ -1371,8 +1371,7 @@ mod tests {
         fs::create_dir_all(&user_dir).unwrap();
 
         let raster = FakeRasterOps::new(sample_config());
-        let config =
-            load_config_from_candidates(&raster, &[system_dir, user_dir.clone()]).unwrap();
+        let config = load_config_from_candidates(&raster, &[system_dir, user_dir.clone()]).unwrap();
 
         assert_eq!(config.parallax_path, sample_config().parallax_path);
         assert_eq!(raster.config_paths(), vec![user_dir]);
@@ -1405,10 +1404,11 @@ mod tests {
         let user_dir = temp.path().join("user");
         let raster = FakeRasterOps::new(sample_config());
 
-        let err = match load_config_from_candidates(&raster, &[system_dir.clone(), user_dir.clone()]) {
-            Ok(_) => panic!("expected config load to fail"),
-            Err(err) => err,
-        };
+        let err =
+            match load_config_from_candidates(&raster, &[system_dir.clone(), user_dir.clone()]) {
+                Ok(_) => panic!("expected config load to fail"),
+                Err(err) => err,
+            };
 
         assert_eq!(
             err,
