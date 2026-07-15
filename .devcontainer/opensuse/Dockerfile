@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 opensuse/leap:15.5
+FROM opensuse/leap:15.5
 
 # Basic tooling + deps
 RUN zypper -n refresh && \
@@ -71,5 +71,4 @@ RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-to
 USER root
 
 ENV CPATH=/usr/local/include:/usr/local/include/slurm:/usr/include
-
 

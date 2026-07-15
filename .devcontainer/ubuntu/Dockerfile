@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 ghcr.io/sarus-suite/cluster-tooling/skybox-dev-base:latest AS base
+FROM ghcr.io/sarus-suite/cluster-tooling/skybox-dev-base:latest AS base
 
 FROM base AS chef-planner
 

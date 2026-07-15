@@ -6,10 +6,6 @@
   "remoteUser": "vscode",
   "updateRemoteUserUID": true,
 
-  "platform": "linux/amd64",
-
-  "runArgs": ["--platform=linux/amd64"],
-
   "mounts": [
     "type=volume,source=skybox-target,target=/workspaces/target"
   ],
@@ -33,4 +29,3 @@
     }
   }
 }
-

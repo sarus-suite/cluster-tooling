@@ -1,0 +1,41 @@
+{
+  "name": "sarusctl-static (alpine + musl)",
+  "build": {
+    "dockerfile": "Containerfile",
+    "context": "../..",
+    "args": {
+      "USERNAME": "${localEnv:USER:vscode}",
+      "USER_UID": "${localEnv:UID:1000}",
+      "USER_GID": "${localEnv:GID:1000}"
+    }
+  },
+  "workspaceFolder": "/workspaces/cluster-tooling",
+  "containerEnv": {
+    "HOME": "/home/${localEnv:USER:vscode}"
+  },
+  "remoteUser": "${localEnv:USER:vscode}",
+  "updateRemoteUserUID": false,
+  "runArgs": ["--userns=host"],
+  "mounts": [
+    "type=volume,source=sarusctl-static-cargo-registry,target=/usr/local/cargo/registry",
+    "type=volume,source=sarusctl-static-cargo-git,target=/usr/local/cargo/git",
+    "type=volume,source=sarusctl-static-rustup,target=/usr/local/rustup"
+  ],
+  "postCreateCommand": "sh -lc 'sudo mkdir -p /usr/local/cargo/registry /usr/local/cargo/git /usr/local/rustup && sudo chown -R $(id -u):$(id -g) /usr/local/cargo /usr/local/rustup'",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "fill-labs.dependi",
+        "vadimcn.vscode-lldb",
+        "openai.chatgpt",
+        "anthropic.claude-code"
+      ],
+      "settings": {
+        "rust-analyzer.check.command": "clippy",
+        "editor.formatOnSave": true
+      }
+    }
+  }
+}
