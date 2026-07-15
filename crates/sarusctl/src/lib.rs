@@ -141,6 +141,7 @@ pub trait UserContext {
 }
 
 pub trait RasterOps {
+    fn load_config(&self) -> Result<Config, AppError>;
     fn load_config_path(&self, path: &Path) -> Result<Config, AppError>;
     fn validate(&self, path: &str) -> Result<(), String>;
     fn render(&self, path: &str) -> Result<EDF, String>;
@@ -192,6 +193,10 @@ pub struct AppDeps<'a> {
 pub struct RealRasterOps;
 
 impl RasterOps for RealRasterOps {
+    fn load_config(&self) -> Result<Config, AppError> {
+        load_config_with_fallback(self)
+    }
+
     fn load_config_path(&self, path: &Path) -> Result<Config, AppError> {
         raster::load_config_path(
             Some(path.to_path_buf()),
@@ -679,21 +684,26 @@ pub fn execute_command_with_options(
     match command {
         CommandSpec::Validate { filepath, .. } => validate_command(&filepath, deps),
         CommandSpec::Render { filepath, .. } => render_command(&filepath, deps),
-        CommandSpec::Images => images_command(deps),
+        CommandSpec::Images => {
+            let config = deps.raster.load_config()?;
+            images_command(&config, deps)
+        }
         CommandSpec::Pull { image } => {
-            // pull_command() and migrate_command() are also called internally by other functions,
-            // so they receive the config from the outside to avoid loading it multiple times.
-            let config = load_config_with_fallback(deps.raster)?;
+            let config = deps.raster.load_config()?;
             setup_imagestore(&config)?;
             pull_command(&image, &config, deps, options)
         }
         CommandSpec::Migrate { image } => {
-            let config = load_config_with_fallback(deps.raster)?;
+            let config = deps.raster.load_config()?;
             setup_imagestore(&config)?;
             migrate_command(&image, &config, deps, options)
         }
-        CommandSpec::Rmi { image } => rmi_command(&image, deps, options),
+        CommandSpec::Rmi { image } => {
+            let config = deps.raster.load_config()?;
+            rmi_command(&image, &config, deps, options)
+        }
         CommandSpec::Run {
+            // Run is the only command that loads the config on its own to facilitate testing of invalid EDF files without needing a valid config present
             filepath,
             container_cmd,
         } => run_command(&filepath, &container_cmd, deps, options),
@@ -716,9 +726,8 @@ fn render_command(filepath: &str, deps: &AppDeps<'_>) -> Result<AppOutput, AppEr
     })
 }
 
-fn images_command(deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
-    let config = load_config_with_fallback(deps.raster)?;
-    let seed_ctx = build_parallax_seed_ctx(&config);
+fn images_command(config: &Config, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
+    let seed_ctx = build_parallax_seed_ctx(config);
 
     // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
     // Not necessary on pull context because that's a plain Podman invocation, and Podman resolves the graphroot location on its own.
@@ -728,7 +737,7 @@ fn images_command(deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
         ..seed_ctx
     };
 
-    setup_imagestore(&config)?;
+    setup_imagestore(config)?;
 
     deps.runtime.images(&ctx)?;
     Ok(AppOutput::success(""))
@@ -785,11 +794,11 @@ fn migrate_command(
 
 fn rmi_command(
     image: &str,
+    config: &Config,
     deps: &AppDeps<'_>,
     options: ExecOptions,
 ) -> Result<AppOutput, AppError> {
-    let config = load_config_with_fallback(deps.raster)?;
-    let seed_ctx = build_parallax_seed_ctx(&config);
+    let seed_ctx = build_parallax_seed_ctx(config);
 
     // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
     // Not necessary on pull context because that's a plain Podman invocation, and Podman resolves the graphroot location on its own.
@@ -799,7 +808,7 @@ fn rmi_command(
         ..seed_ctx
     };
     let parallax_path = PathBuf::from(&config.parallax_path);
-    setup_imagestore(&config)?;
+    setup_imagestore(config)?;
 
     deps.runtime
         .parallax_rmi(&parallax_path, &ctx, image, options.verbose)?;
@@ -816,7 +825,7 @@ fn run_command(
         Ok(edf) => {
             // Loading config in each branch is a small duplication,
             // but allows to integration test invalid EDF cases without needing a valid config present
-            let config = load_config_with_fallback(deps.raster)?;
+            let config = deps.raster.load_config()?;
             setup_imagestore(&config)?;
             run_edf_command(&edf, container_cmd, &config, deps, options)
         }
@@ -827,7 +836,7 @@ fn run_command(
                 AppError::UnsupportedInput(format!("{filepath} is not valid EDF nor YAML"))
             })?;
 
-            let config = load_config_with_fallback(deps.raster)?;
+            let config = deps.raster.load_config()?;
             setup_imagestore(&config)?;
             run_yaml_command(filepath, container_cmd, &config, deps, options)
         }
@@ -1121,7 +1130,6 @@ mod tests {
 
     impl FakeRasterOps {
         fn new(config: Config) -> Self {
-            ensure_default_user_config_dir();
             Self {
                 config: Ok(config),
                 config_paths: RefCell::new(Vec::new()),
@@ -1135,13 +1143,11 @@ mod tests {
         }
     }
 
-    fn ensure_default_user_config_dir() {
-        if let Some(path) = user_config_dir() {
-            fs::create_dir_all(path).unwrap();
-        }
-    }
-
     impl RasterOps for FakeRasterOps {
+        fn load_config(&self) -> Result<Config, AppError> {
+            self.config.clone()
+        }
+
         fn load_config_path(&self, path: &Path) -> Result<Config, AppError> {
             self.config_paths.borrow_mut().push(path.to_path_buf());
             self.config.clone()
