@@ -11,6 +11,10 @@ struct Args {
     #[arg(long, short)]
     verbose: bool,
 
+    /// Override the Parallax imagestore path from the configuration
+    #[arg(long, value_name = "PATH")]
+    parallax_imagestore: Option<String>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -78,6 +82,7 @@ fn main() {
     };
     let options = ExecOptions {
         verbose: args.verbose,
+        parallax_imagestore: args.parallax_imagestore,
     };
 
     match execute_command_with_options(command.clone(), &deps, options) {

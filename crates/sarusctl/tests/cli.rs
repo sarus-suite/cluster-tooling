@@ -12,6 +12,7 @@ fn help_lists_subcommands() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--verbose"))
+        .stdout(predicate::str::contains("--parallax-imagestore"))
         .stdout(predicate::str::contains("validate"))
         .stdout(predicate::str::contains("render"))
         .stdout(predicate::str::contains("run"));
@@ -43,6 +44,36 @@ fn validate_accepts_top_level_verbose_flag() {
         .assert()
         .success()
         .stdout(predicate::str::contains("is a valid EDF file"));
+}
+
+#[test]
+fn validate_accepts_top_level_parallax_imagestore_flag() {
+    let mut cmd = Command::cargo_bin("sarusctl").unwrap();
+    cmd.args([
+        "--parallax-imagestore",
+        "/tmp/sarusctl-imagestore",
+        "validate",
+        &fixture("valid.toml"),
+    ])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("is a valid EDF file"));
+}
+
+#[test]
+fn validate_rejects_parallax_imagestore_flag_after_subcommand() {
+    let mut cmd = Command::cargo_bin("sarusctl").unwrap();
+    cmd.args([
+        "validate",
+        &fixture("valid.toml"),
+        "--parallax-imagestore",
+        "/tmp/sarusctl-imagestore",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains(
+        "unexpected argument '--parallax-imagestore'",
+    ));
 }
 
 #[test]
