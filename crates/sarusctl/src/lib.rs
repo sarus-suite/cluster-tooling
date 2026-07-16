@@ -13,9 +13,10 @@ use uuid::Uuid;
 
 // TODO review pub status in this file, restrict pub only to entities needed in main.rs and tests
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExecOptions {
     pub verbose: bool,
+    pub parallax_imagestore: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -703,29 +704,40 @@ pub fn execute_command_with_options(
         CommandSpec::Validate { filepath, .. } => validate_command(&filepath, deps),
         CommandSpec::Render { filepath, .. } => render_command(&filepath, deps),
         CommandSpec::Images => {
-            let config = deps.raster.load_config()?;
+            let config = load_config_with_options(deps.raster, &options)?;
             images_command(&config, deps)
         }
         CommandSpec::Pull { image } => {
-            let config = deps.raster.load_config()?;
+            let config = load_config_with_options(deps.raster, &options)?;
             setup_imagestore(&config)?;
-            pull_command(&image, &config, deps, options)
+            pull_command(&image, &config, deps, &options)
         }
         CommandSpec::Migrate { image } => {
-            let config = deps.raster.load_config()?;
+            let config = load_config_with_options(deps.raster, &options)?;
             setup_imagestore(&config)?;
-            migrate_command(&image, &config, deps, options)
+            migrate_command(&image, &config, deps, &options)
         }
         CommandSpec::Rmi { image } => {
-            let config = deps.raster.load_config()?;
-            rmi_command(&image, &config, deps, options)
+            let config = load_config_with_options(deps.raster, &options)?;
+            rmi_command(&image, &config, deps, &options)
         }
         CommandSpec::Run {
             // Run is the only command that loads the config on its own to facilitate testing of invalid EDF files without needing a valid config present
             filepath,
             container_cmd,
-        } => run_command(&filepath, &container_cmd, deps, options),
+        } => run_command(&filepath, &container_cmd, deps, &options),
     }
+}
+
+fn load_config_with_options(
+    raster: &dyn RasterOps,
+    options: &ExecOptions,
+) -> Result<Config, AppError> {
+    let mut config = raster.load_config()?;
+    if let Some(parallax_imagestore) = &options.parallax_imagestore {
+        config.parallax_imagestore = parallax_imagestore.clone();
+    }
+    Ok(config)
 }
 
 fn validate_command(filepath: &str, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
@@ -765,7 +777,7 @@ fn pull_command(
     image: &str,
     config: &Config,
     deps: &AppDeps<'_>,
-    options: ExecOptions,
+    options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
     let ctx = build_pull_ctx(config);
     print_progress_message(&format!("Pulling {image} with Podman..."));
@@ -785,7 +797,7 @@ fn migrate_command(
     image: &str,
     config: &Config,
     deps: &AppDeps<'_>,
-    options: ExecOptions,
+    options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
     let seed_ctx = build_parallax_seed_ctx(config);
 
@@ -814,7 +826,7 @@ fn rmi_command(
     image: &str,
     config: &Config,
     deps: &AppDeps<'_>,
-    options: ExecOptions,
+    options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
     let seed_ctx = build_parallax_seed_ctx(config);
 
@@ -837,13 +849,13 @@ fn run_command(
     filepath: &str,
     container_cmd: &[String],
     deps: &AppDeps<'_>,
-    options: ExecOptions,
+    options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
     match deps.raster.render(filepath) {
         Ok(edf) => {
             // Loading config in each branch is a small duplication,
             // but allows to integration test invalid EDF cases without needing a valid config present
-            let config = deps.raster.load_config()?;
+            let config = load_config_with_options(deps.raster, options)?;
             setup_imagestore(&config)?;
             run_edf_command(&edf, container_cmd, &config, deps, options)
         }
@@ -854,7 +866,7 @@ fn run_command(
                 AppError::UnsupportedInput(format!("{filepath} is not valid EDF nor YAML"))
             })?;
 
-            let config = deps.raster.load_config()?;
+            let config = load_config_with_options(deps.raster, options)?;
             setup_imagestore(&config)?;
             run_yaml_command(filepath, container_cmd, &config, deps, options)
         }
@@ -866,7 +878,7 @@ fn run_edf_command(
     container_cmd: &[String],
     config: &Config,
     deps: &AppDeps<'_>,
-    options: ExecOptions,
+    options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
     let user = deps.user.current_user()?;
     let plx_ctx = build_parallax_seed_ctx(config);
@@ -923,7 +935,7 @@ fn run_yaml_command(
     container_cmd: &[String],
     config: &Config,
     deps: &AppDeps<'_>,
-    options: ExecOptions,
+    options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
     let user = deps.user.current_user()?;
     let plx_ctx = build_parallax_seed_ctx(config);
@@ -1484,23 +1496,18 @@ mod tests {
         assert!(raster.config_paths().is_empty());
     }
 
-    fn unique_test_user() -> CurrentUser {
-        CurrentUser {
-            uid: Uuid::new_v4().as_u128() as u32,
-            gid: 1,
-        }
-    }
+    #[test]
+    fn load_config_with_options_overrides_parallax_imagestore() {
+        let raster = FakeRasterOps::new(sample_config());
+        let override_path = String::from("/overridden/parallax/imagestore");
+        let options = ExecOptions {
+            parallax_imagestore: Some(override_path.clone()),
+            ..ExecOptions::default()
+        };
 
-    fn ensure_clean_rootdirs(user: &CurrentUser) {
-        let roots_base = PathBuf::from("/dev/shm").join(format!("sarusctl-{}", user.uid));
-        if let Err(err) = fs::remove_dir_all(&roots_base) {
-            assert_eq!(
-                err.kind(),
-                ErrorKind::NotFound,
-                "failed to remove stale test rootdirs {}: {err}",
-                roots_base.display()
-            );
-        }
+        let config = load_config_with_options(&raster, &options).unwrap();
+
+        assert_eq!(config.parallax_imagestore, override_path);
     }
 
     #[test]
@@ -2097,6 +2104,25 @@ spec:
         );
     }
 
+    fn unique_test_user() -> CurrentUser {
+        CurrentUser {
+            uid: Uuid::new_v4().as_u128() as u32,
+            gid: 1,
+        }
+    }
+
+    fn ensure_clean_rootdirs(user: &CurrentUser) {
+        let roots_base = PathBuf::from("/dev/shm").join(format!("sarusctl-{}", user.uid));
+        if let Err(err) = fs::remove_dir_all(&roots_base) {
+            assert_eq!(
+                err.kind(),
+                ErrorKind::NotFound,
+                "failed to remove stale test rootdirs {}: {err}",
+                roots_base.display()
+            );
+        }
+    }
+
     #[test]
     fn run_edf_removes_rootdirs_after_run() {
         let mut raster = FakeRasterOps::new(sample_config());
@@ -2417,7 +2443,10 @@ spec:
                 image: String::from("alpine:3.22"),
             },
             &mock_deps(&raster, &runtime, &user),
-            ExecOptions { verbose: true },
+            ExecOptions {
+                verbose: true,
+                ..ExecOptions::default()
+            },
         )
         .unwrap();
 
@@ -2440,7 +2469,10 @@ spec:
                 image: String::from("alpine:3.22"),
             },
             &mock_deps(&raster, &runtime, &user),
-            ExecOptions { verbose: true },
+            ExecOptions {
+                verbose: true,
+                ..ExecOptions::default()
+            },
         )
         .unwrap();
 
@@ -2467,7 +2499,10 @@ spec:
                 container_cmd: vec![String::from("sh")],
             },
             &mock_deps(&raster, &runtime, &user),
-            ExecOptions { verbose: true },
+            ExecOptions {
+                verbose: true,
+                ..ExecOptions::default()
+            },
         )
         .unwrap();
 
