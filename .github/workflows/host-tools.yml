@@ -17,7 +17,7 @@ on:
         description: parallax release version to fetch
         required: false
         type: string
-        default: "0.10.1"
+        default: "0.10.3"
       podman-static-url:
         description: URL of the podman static tarball to fetch
         required: false
@@ -61,7 +61,7 @@ on:
         description: parallax release version to fetch
         required: false
         type: string
-        default: "0.9.12"
+        default: "0.10.3"
       podman-static-url:
         description: URL of the podman static tarball to fetch
         required: false
@@ -105,7 +105,7 @@ jobs:
 
           artifact_name="${{ inputs.artifact-name || github.event.inputs.artifact-name || 'host-tools-linux-amd64' }}"
           squashfuse_version="${{ inputs.squashfuse-version || github.event.inputs.squashfuse-version || '0.6.1' }}"
-          parallax_version="${{ inputs.parallax-version || github.event.inputs.parallax-version || '0.9.12' }}"
+          parallax_version="${{ inputs.parallax-version || github.event.inputs.parallax-version || '0.10.3' }}"
           podman_static_url="${{ inputs.podman-static-url || github.event.inputs.podman-static-url || 'https://github.com/mgoltzsche/podman-static/releases/latest/download/podman-linux-amd64.tar.gz' }}"
           bats_ref="${{ inputs.bats-ref || github.event.inputs.bats-ref || 'v1.11.1' }}"
           bats_support_ref="${{ inputs.bats-support-ref || github.event.inputs.bats-support-ref || 'v0.3.0' }}"
