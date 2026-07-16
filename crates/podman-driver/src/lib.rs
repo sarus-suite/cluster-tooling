@@ -40,6 +40,7 @@ pub struct ContainerCtx {
     pub detach: bool,
     pub set_env: bool,
     pub pidfile: Option<PathBuf>,
+    pub user: Option<String>,
 }
 
 mod commands {
@@ -111,6 +112,7 @@ mod commands {
         cli_flag(&mut cmd, !edf.writable, "--read-only");
 
         cli_opt(&mut cmd, "--name", Some(OsStr::new(&c_ctx.name)));
+        cli_opt(&mut cmd, "--user", c_ctx.user.as_deref().map(OsStr::new));
         cli_opt(
             &mut cmd,
             "--pidfile",
@@ -842,6 +844,7 @@ mod tests {
             detach: true,
             set_env: true,
             pidfile: Some(PathBuf::from("/tmp/test/pidfile")),
+            user: Some(String::from("1234:4321")),
         };
 
         let edf_path = std::env::current_dir()
@@ -854,7 +857,7 @@ mod tests {
         assert_eq!(cmd.get_program(), OsStr::new("/usr/bin/podman"));
 
         let args: Vec<&OsStr> = cmd.get_args().collect();
-        assert_eq!(args.len(), 40);
+        assert_eq!(args.len(), 42);
 
         let args_head: Vec<&OsStr> = vec![
             OsStr::new("--root"),
@@ -874,11 +877,13 @@ mod tests {
             OsStr::new("--read-only"),
             OsStr::new("--name"),
             OsStr::new("edf_test"),
+            OsStr::new("--user"),
+            OsStr::new("1234:4321"),
             OsStr::new("--pidfile"),
             OsStr::new("/tmp/test/pidfile"),
             OsStr::new("--entrypoint="),
         ];
-        assert_eq!(args[..20], args_head);
+        assert_eq!(args[..22], args_head);
 
         // Use any() and iterator windows to be flexible w.r.t HashMap ordering and
         // at the same time check that option/value pairs are respected
