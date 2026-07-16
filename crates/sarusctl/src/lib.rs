@@ -2051,7 +2051,8 @@ spec:
             runtime.calls(),
             vec![
                 String::from("parallax_exist:alpine:3.22"),
-                String::from("run:alpine:3.22:[\"sh\"]")
+                String::from("run:alpine:3.22:[\"sh\"]"),
+                String::from("cleanup_storage")
             ]
         );
     }
@@ -2090,7 +2091,8 @@ spec:
                 String::from("default_graphroot"),
                 String::from("migrate:alpine:3.22"),
                 String::from("parallax_exist:alpine:3.22"),
-                String::from("run:alpine:3.22:[\"sh\"]")
+                String::from("run:alpine:3.22:[\"sh\"]"),
+                String::from("cleanup_storage")
             ]
         );
     }
