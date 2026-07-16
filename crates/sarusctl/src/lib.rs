@@ -904,6 +904,7 @@ fn run_edf_command(
         detach: false,
         set_env: true,
         pidfile: None,
+        user: Some(user.uid.to_string()),
     };
 
     let run_result = deps
