@@ -24,6 +24,7 @@ fn test_run_from_edf_output() {
         detach: false,
         set_env: true,
         pidfile: None,
+        user: None,
     };
 
     let edf_path = std::env::current_dir()
@@ -47,6 +48,7 @@ fn test_run_from_edf_detached_output() -> anyhow::Result<()> {
         detach: true,
         set_env: true,
         pidfile: Some(PathBuf::from("/tmp/sarus-edf-test-pidfile")),
+        user: None,
     };
 
     let edf_path = std::env::current_dir()
@@ -138,6 +140,7 @@ fn test_get_container_pid_from_pidfile() -> anyhow::Result<()> {
         detach: true,
         set_env: true,
         pidfile: Some(PathBuf::from("/tmp/sarus-edf-test-pidfile")),
+        user: None,
     };
 
     let edf_path = std::env::current_dir()
