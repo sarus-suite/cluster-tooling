@@ -478,8 +478,12 @@ pub fn build_readonly_ctx(config: &Config) -> PodmanCtx {
 
 /// Context for running containers. Fully custom Sarus Suite parameters (Podman module, Parallax imagestore, etc.).
 /// Uses sarusctl-specific graphroot and runroot to not tamper with default podman rootdirs
-pub fn build_run_ctx(config: &Config, user: &CurrentUser) -> PodmanCtx {
-    let roots_base = PathBuf::from("/dev/shm").join(format!("sarusctl-{}", user.uid));
+pub fn build_run_ctx(config: &Config, user: &CurrentUser, run_id: &Uuid) -> PodmanCtx {
+    let roots_base = PathBuf::from("/dev/shm").join(format!(
+        "sarusctl-{}-{}",
+        user.uid,
+        &run_id.simple().to_string()[..12]
+    ));
 
     PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
@@ -880,9 +884,10 @@ fn run_edf_command(
     deps: &AppDeps<'_>,
     options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
+    let run_id = Uuid::new_v4();
     let user = deps.user.current_user()?;
     let plx_ctx = build_parallax_seed_ctx(config);
-    let run_ctx = build_run_ctx(config, &user);
+    let run_ctx = build_run_ctx(config, &user, &run_id);
     let mut output = AppOutput::success("");
 
     let parallax_path = PathBuf::from(&config.parallax_path);
@@ -897,7 +902,7 @@ fn run_edf_command(
         );
     }
 
-    let container_name = format!("sarusctl-{}", &Uuid::new_v4().simple().to_string()[..8]);
+    let container_name = format!("sarusctl-{}", &run_id.simple().to_string()[..12]);
     let c_ctx = ContainerCtx {
         name: container_name,
         interactive: io::stdin().is_terminal(),
@@ -941,7 +946,7 @@ fn run_yaml_command(
 ) -> Result<AppOutput, AppError> {
     let user = deps.user.current_user()?;
     let plx_ctx = build_parallax_seed_ctx(config);
-    let mut run_ctx = build_run_ctx(config, &user);
+    let mut run_ctx = build_run_ctx(config, &user, &Uuid::new_v4());
     // Podman kube play doesn't seem to honor all settings from a module
     // so to avoid confusion we disable the module for the time being.
     // The settings from the module have to be specified in the k8s yaml, if desired
@@ -1133,7 +1138,6 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
     use std::ffi::OsStr;
-    use std::io::ErrorKind;
     use tempfile::tempdir;
 
     fn sample_config() -> Config {
@@ -1222,6 +1226,8 @@ mod tests {
 
     struct FakeContainerRuntime {
         calls: RefCell<Vec<String>>,
+        create_run_rootdirs: bool,
+        created_run_rootdirs: RefCell<Vec<PathBuf>>,
         pull_verbose: RefCell<Vec<bool>>,
         migrate_verbose: RefCell<Vec<bool>>,
         rmi_verbose: RefCell<Vec<bool>>,
@@ -1241,6 +1247,8 @@ mod tests {
         fn new() -> Self {
             Self {
                 calls: RefCell::new(Vec::new()),
+                create_run_rootdirs: false,
+                created_run_rootdirs: RefCell::new(Vec::new()),
                 pull_verbose: RefCell::new(Vec::new()),
                 migrate_verbose: RefCell::new(Vec::new()),
                 rmi_verbose: RefCell::new(Vec::new()),
@@ -1255,6 +1263,32 @@ mod tests {
                 kube_down_result: Ok(()),
                 cleanup_storage_result: Ok(()),
             }
+        }
+
+        fn with_run_rootdir_creation(mut self) -> Self {
+            self.create_run_rootdirs = true;
+            self
+        }
+
+        fn create_and_record_run_rootdirs(&self, run_ctx: &PodmanCtx) {
+            if !self.create_run_rootdirs {
+                return;
+            }
+
+            let graphroot = run_ctx.graphroot.as_ref().expect("missing graphroot");
+            let runroot = run_ctx.runroot.as_ref().expect("missing runroot");
+            let roots_base = graphroot.parent().expect("graphroot has no parent");
+            assert_eq!(runroot.parent(), Some(roots_base));
+
+            fs::create_dir_all(graphroot).expect("failed to create test graphroot");
+            fs::create_dir_all(runroot).expect("failed to create test runroot");
+            self.created_run_rootdirs
+                .borrow_mut()
+                .push(roots_base.to_path_buf());
+        }
+
+        fn created_run_rootdirs(&self) -> Vec<PathBuf> {
+            self.created_run_rootdirs.borrow().clone()
         }
 
         fn push_image_exists(&self, image: &str, values: Vec<bool>) {
@@ -1364,10 +1398,11 @@ mod tests {
         fn run_from_edf(
             &self,
             edf: &EDF,
-            _run_ctx: &PodmanCtx,
+            run_ctx: &PodmanCtx,
             _container_ctx: &ContainerCtx,
             container_cmd: &[String],
         ) -> Result<i32, AppError> {
+            self.create_and_record_run_rootdirs(run_ctx);
             self.calls
                 .borrow_mut()
                 .push(format!("run:{}:{container_cmd:?}", edf.image));
@@ -1386,7 +1421,8 @@ mod tests {
             self.run_result.clone()
         }
 
-        fn kube_play(&self, filepath: &str, _run_ctx: &PodmanCtx) -> Result<(), AppError> {
+        fn kube_play(&self, filepath: &str, run_ctx: &PodmanCtx) -> Result<(), AppError> {
+            self.create_and_record_run_rootdirs(run_ctx);
             self.calls
                 .borrow_mut()
                 .push(format!("kube_play:{filepath}"));
@@ -1761,6 +1797,7 @@ spec:
     #[test]
     fn build_context_helpers_match_expected_fields() {
         let config = sample_config();
+        let run_id = Uuid::parse_str("a1a2a3a4b1b2c1c2d1d2d3d4d5d6d7d8").unwrap();
         let user = CurrentUser {
             uid: 1234,
             gid: 4321,
@@ -1778,16 +1815,18 @@ spec:
         assert_eq!(ro.podman_path, PathBuf::from("/usr/bin/podman"));
         assert_eq!(ro.graphroot, Some(parallax_imagestore.clone()));
 
-        let run = build_run_ctx(&config, &user);
+        let run = build_run_ctx(&config, &user, &run_id);
         assert_eq!(run.podman_path, PathBuf::from("/usr/bin/podman"));
         assert_eq!(run.module, Some(String::from("hpc")));
         assert_eq!(
             run.graphroot,
-            Some(PathBuf::from("/dev/shm/sarusctl-1234/graphroot"))
+            Some(PathBuf::from(
+                "/dev/shm/sarusctl-1234-a1a2a3a4b1b2/graphroot"
+            ))
         );
         assert_eq!(
             run.runroot,
-            Some(PathBuf::from("/dev/shm/sarusctl-1234/runroot"))
+            Some(PathBuf::from("/dev/shm/sarusctl-1234-a1a2a3a4b1b2/runroot"))
         );
         assert_eq!(seed.ro_store, Some(parallax_imagestore));
         let env = run.podman_env.expect("missing env");
@@ -2113,13 +2152,11 @@ spec:
         }
     }
 
-    fn ensure_clean_rootdirs(user: &CurrentUser) {
-        let roots_base = PathBuf::from("/dev/shm").join(format!("sarusctl-{}", user.uid));
-        if let Err(err) = fs::remove_dir_all(&roots_base) {
-            assert_eq!(
-                err.kind(),
-                ErrorKind::NotFound,
-                "failed to remove stale test rootdirs {}: {err}",
+    fn assert_rootdirs_removed(roots_base: &Path) {
+        if roots_base.exists() {
+            let cleanup_result = fs::remove_dir_all(roots_base);
+            panic!(
+                "Podman rootdirs were not removed after run: {}; test cleanup result: {cleanup_result:?}",
                 roots_base.display()
             );
         }
@@ -2131,15 +2168,9 @@ spec:
         raster
             .render_results
             .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
-        let runtime = FakeContainerRuntime::new();
+        let runtime = FakeContainerRuntime::new().with_run_rootdir_creation();
         runtime.push_parallax_exist("alpine:3.22", vec![true]);
         let user = unique_test_user();
-        ensure_clean_rootdirs(&user);
-        let run_ctx = build_run_ctx(&sample_config(), &user);
-        let roots_base = run_ctx.graphroot.unwrap().parent().unwrap().to_path_buf();
-        fs::create_dir_all(roots_base.join("graphroot")).unwrap();
-        fs::create_dir_all(roots_base.join("runroot")).unwrap();
-        assert!(roots_base.exists());
 
         let output = execute_command(
             CommandSpec::Run {
@@ -2151,13 +2182,9 @@ spec:
         .unwrap();
 
         assert_eq!(output.return_code, 0);
-        if roots_base.exists() {
-            ensure_clean_rootdirs(&user);
-            panic!(
-                "Podman rootdirs were not removed after EDF run: {}",
-                roots_base.display()
-            );
-        }
+        let rootdirs = runtime.created_run_rootdirs();
+        assert_eq!(rootdirs.len(), 1);
+        assert_rootdirs_removed(&rootdirs[0]);
     }
 
     #[test]
@@ -2342,16 +2369,9 @@ spec:
             manifest.to_string_lossy().into_owned(),
             Err(String::from("not an edf")),
         );
-        let runtime = FakeContainerRuntime::new();
+        let runtime = FakeContainerRuntime::new().with_run_rootdir_creation();
         runtime.push_parallax_exist("alpine:3.22", vec![true]);
         let user = unique_test_user();
-        ensure_clean_rootdirs(&user);
-        let mut run_ctx = build_run_ctx(&sample_config(), &user);
-        run_ctx.module = None;
-        let roots_base = run_ctx.graphroot.unwrap().parent().unwrap().to_path_buf();
-        fs::create_dir_all(roots_base.join("graphroot")).unwrap();
-        fs::create_dir_all(roots_base.join("runroot")).unwrap();
-        assert!(roots_base.exists());
 
         let output = execute_command(
             CommandSpec::Run {
@@ -2363,13 +2383,9 @@ spec:
         .unwrap();
 
         assert_eq!(output.return_code, 0);
-        if roots_base.exists() {
-            ensure_clean_rootdirs(&user);
-            panic!(
-                "Podman rootdirs were not removed after YAML run: {}",
-                roots_base.display()
-            );
-        }
+        let rootdirs = runtime.created_run_rootdirs();
+        assert_eq!(rootdirs.len(), 1);
+        assert_rootdirs_removed(&rootdirs[0]);
     }
 
     #[test]
