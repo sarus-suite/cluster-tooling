@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::str;
 use std::time::{Duration, Instant};
@@ -900,7 +900,8 @@ fn run_edf_command(
     let container_name = format!("sarusctl-{}", &Uuid::new_v4().simple().to_string()[..8]);
     let c_ctx = ContainerCtx {
         name: container_name,
-        interactive: true,
+        interactive: io::stdin().is_terminal(),
+        tty: io::stdin().is_terminal() && io::stdout().is_terminal(),
         detach: false,
         set_env: true,
         pidfile: None,
