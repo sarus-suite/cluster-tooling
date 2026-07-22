@@ -37,6 +37,7 @@ impl PodmanCtx {
 pub struct ContainerCtx {
     pub name: String,
     pub interactive: bool,
+    pub tty: bool,
     pub detach: bool,
     pub set_env: bool,
     pub pidfile: Option<PathBuf>,
@@ -108,7 +109,8 @@ mod commands {
 
         cmd.arg("--rm");
         cli_flag(&mut cmd, c_ctx.detach, "--detach");
-        cli_flag(&mut cmd, c_ctx.interactive, "-it");
+        cli_flag(&mut cmd, c_ctx.interactive, "--interactive");
+        cli_flag(&mut cmd, c_ctx.tty, "--tty");
         cli_flag(&mut cmd, !edf.writable, "--read-only");
 
         cli_opt(&mut cmd, "--name", Some(OsStr::new(&c_ctx.name)));
@@ -841,6 +843,7 @@ mod tests {
         let c_ctx = ContainerCtx {
             name: String::from("edf_test"),
             interactive: true,
+            tty: true,
             detach: true,
             set_env: true,
             pidfile: Some(PathBuf::from("/tmp/test/pidfile")),
@@ -857,7 +860,7 @@ mod tests {
         assert_eq!(cmd.get_program(), OsStr::new("/usr/bin/podman"));
 
         let args: Vec<&OsStr> = cmd.get_args().collect();
-        assert_eq!(args.len(), 42);
+        assert_eq!(args.len(), 43);
 
         let args_head: Vec<&OsStr> = vec![
             OsStr::new("--root"),
@@ -873,7 +876,8 @@ mod tests {
             OsStr::new("run"),
             OsStr::new("--rm"),
             OsStr::new("--detach"),
-            OsStr::new("-it"),
+            OsStr::new("--interactive"),
+            OsStr::new("--tty"),
             OsStr::new("--read-only"),
             OsStr::new("--name"),
             OsStr::new("edf_test"),
@@ -883,7 +887,7 @@ mod tests {
             OsStr::new("/tmp/test/pidfile"),
             OsStr::new("--entrypoint="),
         ];
-        assert_eq!(args[..22], args_head);
+        assert_eq!(args[..23], args_head);
 
         // Use any() and iterator windows to be flexible w.r.t HashMap ordering and
         // at the same time check that option/value pairs are respected
@@ -928,9 +932,10 @@ mod tests {
             ]));
 
         // Image and container command must be positionally at the end of args
-        let (_, args_tail) = args.split_at(args.len() - 2);
-        assert_eq!(args_tail[0], OsStr::new("ubuntu:24.04"));
-        assert_eq!(args_tail[1], OsStr::new("bash"));
+        assert_eq!(
+            args[args.len() - 2..],
+            [OsStr::new("ubuntu:24.04"), OsStr::new("bash")]
+        );
     }
 
     #[test]
@@ -950,22 +955,29 @@ mod tests {
         let parallax_path = PathBuf::from("/usr/local/sarus-test/parallax");
         let image = String::from("ubuntu:24.04");
 
-        let cmd = commands::parallax(&parallax_path, &p_ctx, &image, "migrate");
+        let cmd = commands::parallax(&parallax_path, &p_ctx, &image, "migrate").unwrap();
 
         assert_eq!(cmd.get_program(), parallax_path);
 
         let args: Vec<&OsStr> = cmd.get_args().collect();
         assert_eq!(args.len(), 7);
-
-        let args_expected: Vec<&OsStr> = vec![
-            OsStr::new("--podmanRoot"),
-            OsStr::new(p_ctx.graphroot.as_deref().unwrap()),
-            OsStr::new("--roStoragePath"),
-            OsStr::new(p_ctx.ro_store.as_deref().unwrap()),
-            OsStr::new("--migrate"),
-            OsStr::new("--image"),
-            OsStr::new(&image),
-        ];
-        assert_eq!(args, args_expected);
+        assert!(args.windows(2).any(|w| w
+            == [
+                OsStr::new("--podmanRoot"),
+                OsStr::new(p_ctx.graphroot.as_deref().unwrap())
+            ]));
+        assert!(args.windows(2).any(|w| w
+            == [
+                OsStr::new("--roStoragePath"),
+                OsStr::new(p_ctx.ro_store.as_deref().unwrap())
+            ]));
+        assert_eq!(
+            args[args.len() - 3..],
+            [
+                OsStr::new("--migrate"),
+                OsStr::new("--image"),
+                OsStr::new(&image)
+            ]
+        );
     }
 }

@@ -21,6 +21,7 @@ fn test_run_from_edf_output() {
     let ctx = ContainerCtx {
         name: String::from("sarus_edf_test"),
         interactive: false,
+        tty: false,
         detach: false,
         set_env: true,
         pidfile: None,
@@ -45,6 +46,7 @@ fn test_run_from_edf_detached_output() -> anyhow::Result<()> {
     let ctx = ContainerCtx {
         name: String::from("sarus_edf_test"),
         interactive: false,
+        tty: false,
         detach: true,
         set_env: true,
         pidfile: Some(PathBuf::from("/tmp/sarus-edf-test-pidfile")),
@@ -137,6 +139,7 @@ fn test_get_container_pid_from_pidfile() -> anyhow::Result<()> {
     let ctx = ContainerCtx {
         name: String::from("sarus_read_cnt_pidfile_test"),
         interactive: false,
+        tty: false,
         detach: true,
         set_env: true,
         pidfile: Some(PathBuf::from("/tmp/sarus-edf-test-pidfile")),
