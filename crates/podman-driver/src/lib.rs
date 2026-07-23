@@ -39,6 +39,8 @@ pub struct ContainerCtx {
     pub interactive: bool,
     pub tty: bool,
     pub detach: bool,
+    /// Remove the container automatically when its process exits.
+    pub auto_remove: bool,
     pub set_env: bool,
     pub pidfile: Option<PathBuf>,
     pub user: Option<String>,
@@ -107,7 +109,7 @@ mod commands {
     {
         let mut cmd = commands::run(p_ctx);
 
-        cmd.arg("--rm");
+        cli_flag(&mut cmd, c_ctx.auto_remove, "--rm");
         cli_flag(&mut cmd, c_ctx.detach, "--detach");
         cli_flag(&mut cmd, c_ctx.interactive, "--interactive");
         cli_flag(&mut cmd, c_ctx.tty, "--tty");
@@ -205,6 +207,27 @@ mod commands {
         }
 
         cmd.args(["rm", name]);
+        cmd
+    }
+
+    pub fn container_exists(name: &str, podman_ctx: Option<&PodmanCtx>) -> Command {
+        let mut cmd = base(podman_ctx);
+        cmd.args(["container", "exists", name]);
+        cmd
+    }
+
+    pub fn container_cleanup(name: &str, podman_ctx: Option<&PodmanCtx>) -> Command {
+        let mut cmd = base(podman_ctx);
+
+        if let Some(ctx) = podman_ctx {
+            cli_storage_opt(
+                &mut cmd,
+                "additionalimagestore",
+                ctx.ro_store.as_deref().map(Path::as_os_str),
+            );
+        }
+
+        cmd.args(["container", "cleanup", "--rm", name]);
         cmd
     }
 
@@ -466,6 +489,33 @@ pub fn rm(name: &str, podman_ctx: Option<&PodmanCtx>) {
         .expect("Failed to execute command");
 }
 
+pub fn container_exists(name: &str, podman_ctx: Option<&PodmanCtx>) -> anyhow::Result<bool> {
+    let output = commands::container_exists(name, podman_ctx).output()?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "podman container exists failed for {name}: {}",
+                stderr.trim()
+            )
+        }
+    }
+}
+
+pub fn container_cleanup(name: &str, podman_ctx: Option<&PodmanCtx>) -> anyhow::Result<()> {
+    let output = commands::container_cleanup(name, podman_ctx).output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "podman container cleanup failed for {name}: {}",
+            stderr.trim()
+        );
+    }
+    Ok(())
+}
+
 pub fn stop(name: &str, podman_ctx: Option<&PodmanCtx>) {
     commands::stop(name, podman_ctx)
         .output()
@@ -515,10 +565,22 @@ pub fn kube_play(filepath: &str, podman_ctx: Option<&PodmanCtx>) {
         .expect("Failed to execute command");
 }
 
+pub fn kube_play_output(filepath: &str, podman_ctx: Option<&PodmanCtx>) -> Output {
+    commands::kube_play(filepath, podman_ctx)
+        .output()
+        .expect("Failed to execute command")
+}
+
 pub fn kube_down(filepath: &str, force: bool, podman_ctx: Option<&PodmanCtx>) {
     commands::kube_down(filepath, force, podman_ctx)
         .status()
         .expect("Failed to execute command");
+}
+
+pub fn kube_down_output(filepath: &str, force: bool, podman_ctx: Option<&PodmanCtx>) -> Output {
+    commands::kube_down(filepath, force, podman_ctx)
+        .output()
+        .expect("Failed to execute command")
 }
 
 pub fn version(module: Option<&str>) -> Output {
@@ -826,9 +888,8 @@ mod tests {
     use super::*;
     use raster;
 
-    #[test]
-    fn test_run_from_edf_command() {
-        let p_ctx = PodmanCtx {
+    fn test_podman_ctx() -> PodmanCtx {
+        PodmanCtx {
             podman_path: PathBuf::from("/usr/bin/podman"),
             module: Some(String::from("hpc")),
             graphroot: Some(PathBuf::from("/dev/shm/sarus-test/graphroot")),
@@ -838,23 +899,34 @@ mod tests {
             )),
             ro_store: Some(PathBuf::from("/scratch/user/parallax/store")),
             podman_env: None,
-        };
+        }
+    }
 
-        let c_ctx = ContainerCtx {
+    fn test_container_ctx(auto_remove: bool) -> ContainerCtx {
+        ContainerCtx {
             name: String::from("edf_test"),
             interactive: true,
             tty: true,
             detach: true,
+            auto_remove,
             set_env: true,
             pidfile: Some(PathBuf::from("/tmp/test/pidfile")),
             user: Some(String::from("1234:4321")),
-        };
+        }
+    }
 
+    fn test_edf() -> EDF {
         let edf_path = std::env::current_dir()
             .unwrap()
             .join("tests/edf/run_from_edf_test.toml");
-        let edf =
-            raster::render(edf_path.to_string_lossy().into_owned()).expect("Failed rendering EDF");
+        raster::render(edf_path.to_string_lossy().into_owned()).expect("Failed rendering EDF")
+    }
+
+    #[test]
+    fn test_run_from_edf_command() {
+        let p_ctx = test_podman_ctx();
+        let c_ctx = test_container_ctx(true);
+        let edf = test_edf();
 
         let cmd = commands::run_from_edf(&edf, Some(&p_ctx), &c_ctx, ["bash"]);
         assert_eq!(cmd.get_program(), OsStr::new("/usr/bin/podman"));
@@ -939,18 +1011,40 @@ mod tests {
     }
 
     #[test]
+    fn test_run_from_edf_auto_remove_option() {
+        let p_ctx = test_podman_ctx();
+        let edf = test_edf();
+
+        let retained_cmd =
+            commands::run_from_edf(&edf, Some(&p_ctx), &test_container_ctx(false), ["bash"]);
+        assert!(!retained_cmd.get_args().any(|arg| arg == OsStr::new("--rm")));
+    }
+
+    #[test]
+    fn test_container_cleanup_command() {
+        let p_ctx = test_podman_ctx();
+        let cleanup_cmd = commands::container_cleanup("edf_test", Some(&p_ctx));
+        assert_eq!(cleanup_cmd.get_program(), OsStr::new("/usr/bin/podman"));
+        assert_eq!(
+            cleanup_cmd.get_args().collect::<Vec<_>>(),
+            vec![
+                OsStr::new("--root"),
+                OsStr::new("/dev/shm/sarus-test/graphroot"),
+                OsStr::new("--runroot"),
+                OsStr::new("/dev/shm/sarus-test/runroot"),
+                OsStr::new("--storage-opt"),
+                OsStr::new("additionalimagestore=/scratch/user/parallax/store"),
+                OsStr::new("container"),
+                OsStr::new("cleanup"),
+                OsStr::new("--rm"),
+                OsStr::new("edf_test"),
+            ]
+        );
+    }
+
+    #[test]
     fn test_parallax_command() {
-        let p_ctx = PodmanCtx {
-            podman_path: PathBuf::from("/usr/bin/podman"),
-            module: Some(String::from("hpc")),
-            graphroot: Some(PathBuf::from("/dev/shm/sarus-test/graphroot")),
-            runroot: Some(PathBuf::from("/dev/shm/sarus-test/runroot")),
-            parallax_mount_program: Some(PathBuf::from(
-                "/usr/local/sarus-test/parallax_mount_program",
-            )),
-            ro_store: Some(PathBuf::from("/scratch/user/parallax/store")),
-            podman_env: None,
-        };
+        let p_ctx = test_podman_ctx();
 
         let parallax_path = PathBuf::from("/usr/local/sarus-test/parallax");
         let image = String::from("ubuntu:24.04");
