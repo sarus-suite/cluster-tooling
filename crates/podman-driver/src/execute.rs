@@ -8,6 +8,7 @@ pub(crate) fn execute_captured(mut command: Command) -> Result<Output> {
     execute_captured_rendered(&mut command, &rendered)
 }
 
+// TODO: Consider if this should be named `execute_captured_checked` for consistency
 pub(crate) fn execute_checked(mut command: Command) -> Result<Output> {
     let rendered = render_command(&command);
     let output = execute_captured_rendered(&mut command, &rendered)?;
@@ -44,6 +45,7 @@ pub(crate) fn execute_probe(command: Command) -> Result<bool> {
     execute_captured(command).map(|output| output.status.success())
 }
 
+// TODO: Consider to merge this with `execute_probe` and introduce a parameter describing an optional exit policy
 pub(crate) fn execute_probe_with_false_code(command: Command, false_code: i32) -> Result<bool> {
     let rendered = render_command(&command);
     let mut command = command;
@@ -159,12 +161,9 @@ mod tests {
 
         let error = execute_checked(command).unwrap_err();
         assert_eq!(error.exit_status().and_then(ExitStatus::code), Some(7));
+        assert_eq!(error.stdout(), Some("output"));
         assert_eq!(error.stderr(), Some("error"));
         assert!(error.to_string().contains("error"));
-        assert!(matches!(
-            error,
-            DriverError::CommandFailed { ref stdout, .. } if stdout == "output"
-        ));
     }
 
     #[test]

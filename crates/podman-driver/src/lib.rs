@@ -168,6 +168,7 @@ pub fn version(module: Option<&str>) -> Result<Output> {
 }
 
 /// Returns a container PID obtained through `podman inspect`.
+/// Note: Podman yields PID `0` for stopped containers.
 ///
 /// This helper is retained for compatibility but is a candidate for future deprecation because
 /// current workspace consumers obtain container PIDs through other mechanisms.
@@ -179,7 +180,13 @@ pub fn get_container_pid(name: &str, podman_ctx: Option<&PodmanCtx>) -> Result<u
     )
 }
 
-/// Returns a container PID from Podman's default overlay-storage PID file.
+/// Retrieves the pid of a running container from the default pidfile for an overlay store driver
+/// If the runroot is passed as argument, this function is much faster than get_container_pid(),
+/// which uses `podman inspect`.
+/// This function does not work if:
+///   - the container is stopped
+///   - a custom pidfile was specified in `podman run`
+///   - storage driver is not overlay
 ///
 /// This helper is retained for compatibility but is a candidate for future deprecation because
 /// current workspace consumers obtain container PIDs through other mechanisms. It does not work
@@ -191,6 +198,10 @@ pub fn get_container_pid_from_default_file(
     let runroot = match runroot {
         Some(runroot) => runroot.clone(),
         None => {
+            // If we weren't given a runroot as argument, retrieve it from `podman info`
+            // Notice that here we pass None as podman context: if a specific podman context were
+            // to be passed to this function just to propagate the runroot, then the caller could
+            // have provided the runroot directly by passing the related PodmanCtx field
             let output = info(Some("{{.Store.RunRoot}}"), None)?;
             let value = parse_text("podman info runroot output", &output.stdout)?;
             PathBuf::from(value.trim())
@@ -213,6 +224,7 @@ pub fn parallax_exist(
     podman_ctx: &PodmanCtx,
     image: &str,
 ) -> Result<bool> {
+    // TODO: parallax commands maybe don't need to return a Result anymore.
     let command = command::parallax(parallax_path, podman_ctx, image, "exist")?;
     execute::execute_probe(command)
 }

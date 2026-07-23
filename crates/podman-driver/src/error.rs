@@ -19,7 +19,7 @@ pub enum DriverError {
     Spawn {
         command: String,
         #[source]
-        source: io::Error,
+        source: io::Error, // TODO: should this be a process-related error type instead of io::Error?
     },
 
     #[error("`{command}` failed with {status}: {stderr}")]
@@ -57,6 +57,13 @@ impl DriverError {
     pub fn exit_status(&self) -> Option<&ExitStatus> {
         match self {
             Self::CommandFailed { status, .. } => Some(status),
+            _ => None,
+        }
+    }
+
+    pub fn stdout(&self) -> Option<&str> {
+        match self {
+            Self::CommandFailed { stdout, .. } => Some(stdout),
             _ => None,
         }
     }

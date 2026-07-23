@@ -11,6 +11,7 @@ pub(crate) fn base(podman_ctx: Option<&PodmanCtx>) -> Command {
     };
 
     let mut command = Command::new(&ctx.podman_path);
+
     if let Some(environment) = &ctx.podman_env {
         command.envs(environment);
     }
@@ -63,11 +64,7 @@ where
     let mut command = run(podman_ctx);
     cli_flag(&mut command, container_ctx.auto_remove, "--rm");
     cli_flag(&mut command, container_ctx.detach, "--detach");
-    cli_flag(
-        &mut command,
-        container_ctx.interactive,
-        "--interactive",
-    );
+    cli_flag(&mut command, container_ctx.interactive, "--interactive");
     cli_flag(&mut command, container_ctx.tty, "--tty");
     cli_flag(&mut command, !edf.writable, "--read-only");
     cli_opt(
@@ -85,6 +82,8 @@ where
         "--pidfile",
         container_ctx.pidfile.as_deref().map(Path::as_os_str),
     );
+
+    // TODO: support entrypoint redefinition as well
     cli_flag(&mut command, !edf.entrypoint, "--entrypoint=");
 
     if !edf.workdir.is_empty() {
@@ -308,18 +307,21 @@ fn cli_flag(command: &mut Command, enabled: bool, name: &str) {
     }
 }
 
+// TODO: Consider using AsRef<OsStr> or Into<OsStr> to streamline passing of value
 fn cli_opt(command: &mut Command, name: &str, value: Option<&OsStr>) {
     if let Some(value) = value {
         command.arg(name).arg(value);
     }
 }
 
+// TODO: Consider using AsRef<OsStr> or Into<OsStr> to streamline passing of value
 fn cli_storage_opt(command: &mut Command, name: &str, value: Option<&OsStr>) {
     if let Some(value) = value {
         cli_kv(command, "--storage-opt", OsStr::new(name), value);
     }
 }
 
+// TODO: Consider using AsRef<OsStr> or Into<OsStr> to streamline passing of value
 fn cli_kv(command: &mut Command, name: &str, key: &OsStr, value: &OsStr) {
     command.arg(name).arg(os_string_key_value(key, value));
 }
@@ -336,8 +338,209 @@ fn os_string_key_value(key: &OsStr, value: &OsStr) -> OsString {
 mod tests {
     use super::*;
 
-    fn context() -> PodmanCtx {
+    fn podman_context() -> PodmanCtx {
         PodmanCtx {
+            podman_path: PathBuf::from("/usr/bin/podman"),
+            module: Some(String::from("hpc")),
+            graphroot: Some(PathBuf::from("/dev/shm/sarus-test/graphroot")),
+            runroot: Some(PathBuf::from("/dev/shm/sarus-test/runroot")),
+            parallax_mount_program: Some(PathBuf::from(
+                "/usr/local/sarus-test/parallax_mount_program",
+            )),
+            ro_store: Some(PathBuf::from("/scratch/user/parallax/store")),
+            podman_env: None,
+        }
+    }
+
+    #[test]
+    fn run_from_edf_cli_syntax() {
+        let p_ctx = podman_context();
+
+        let c_ctx = ContainerCtx {
+            name: String::from("edf_test"),
+            interactive: true,
+            tty: true,
+            detach: true,
+            auto_remove: true,
+            set_env: true,
+            pidfile: Some(PathBuf::from("/tmp/test/pidfile")),
+            user: Some(String::from("1234:4321")),
+        };
+
+        let edf_path = std::env::current_dir()
+            .unwrap()
+            .join("tests/edf/run_from_edf_test.toml");
+        let edf =
+            raster::render(edf_path.to_string_lossy().into_owned()).expect("Failed rendering EDF");
+
+        let cmd = run_from_edf(&edf, Some(&p_ctx), &c_ctx, ["bash"]);
+        assert_eq!(cmd.get_program(), OsStr::new("/usr/bin/podman"));
+
+        let args: Vec<&OsStr> = cmd.get_args().collect();
+        assert_eq!(args.len(), 43);
+
+        let args_head: Vec<&OsStr> = vec![
+            OsStr::new("--root"),
+            OsStr::new("/dev/shm/sarus-test/graphroot"),
+            OsStr::new("--runroot"),
+            OsStr::new("/dev/shm/sarus-test/runroot"),
+            OsStr::new("--module"),
+            OsStr::new("hpc"),
+            OsStr::new("--storage-opt"),
+            OsStr::new("additionalimagestore=/scratch/user/parallax/store"),
+            OsStr::new("--storage-opt"),
+            OsStr::new("mount_program=/usr/local/sarus-test/parallax_mount_program"),
+            OsStr::new("run"),
+            OsStr::new("--rm"),
+            OsStr::new("--detach"),
+            OsStr::new("--interactive"),
+            OsStr::new("--tty"),
+            OsStr::new("--read-only"),
+            OsStr::new("--name"),
+            OsStr::new("edf_test"),
+            OsStr::new("--user"),
+            OsStr::new("1234:4321"),
+            OsStr::new("--pidfile"),
+            OsStr::new("/tmp/test/pidfile"),
+            OsStr::new("--entrypoint="),
+        ];
+        assert_eq!(args[..23], args_head);
+
+        // Use any() and iterator windows to be flexible w.r.t HashMap ordering and
+        // at the same time check that option/value pairs are respected
+        assert!(
+            args.windows(2)
+                .any(|w| w == [OsStr::new("--workdir"), OsStr::new("/develop")])
+        );
+        assert!(args.windows(2).any(|w| w
+            == [
+                OsStr::new("--volume"),
+                OsStr::new("/home/user/test:/develop")
+            ]));
+        assert!(
+            args.windows(2)
+                .any(|w| w == [OsStr::new("--volume"), OsStr::new("/src2:/dst2")])
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w == [OsStr::new("--device"), OsStr::new("/dev/fuse")])
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w == [OsStr::new("--device"), OsStr::new("nvidia.com/gpu=all")])
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w == [OsStr::new("--env"), OsStr::new("TEST_1=EDF!")])
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w == [OsStr::new("--env"), OsStr::new("TEST_2=foobar")])
+        );
+        assert!(args.windows(2).any(|w| w
+            == [
+                OsStr::new("--annotation"),
+                OsStr::new("com.hooks.test1.enabled=true")
+            ]));
+        assert!(args.windows(2).any(|w| w
+            == [
+                OsStr::new("--annotation"),
+                OsStr::new("com.hooks.test2.enabled=false")
+            ]));
+
+        // Image and container command must be positionally at the end of args
+        assert_eq!(
+            args[args.len() - 2..],
+            [OsStr::new("ubuntu:24.04"), OsStr::new("bash")]
+        );
+    }
+
+    #[test]
+    fn run_from_edf_handles_interactive_and_tty_independently() {
+        let edf_path = std::env::current_dir()
+            .unwrap()
+            .join("tests/edf/run_from_edf_test.toml");
+        let edf =
+            raster::render(edf_path.to_string_lossy().into_owned()).expect("Failed rendering EDF");
+
+        for (interactive, tty) in [(false, false), (true, false), (false, true), (true, true)] {
+            let container_ctx = ContainerCtx {
+                name: String::from("edf_test"),
+                interactive,
+                tty,
+                detach: false,
+                auto_remove: true,
+                set_env: false,
+                pidfile: None,
+                user: None,
+            };
+
+            let command = run_from_edf(&edf, None, &container_ctx, std::iter::empty::<&str>());
+            let arguments: Vec<&OsStr> = command.get_args().collect();
+
+            assert_eq!(
+                arguments.contains(&OsStr::new("--interactive")),
+                interactive
+            );
+            assert_eq!(arguments.contains(&OsStr::new("--tty")), tty);
+            assert!(!arguments.contains(&OsStr::new("-it")));
+        }
+
+        let retained_container_ctx = ContainerCtx {
+            name: String::from("retained"),
+            interactive: false,
+            tty: false,
+            detach: false,
+            auto_remove: false,
+            set_env: false,
+            pidfile: None,
+            user: None,
+        };
+        let command = run_from_edf(
+            &edf,
+            None,
+            &retained_container_ctx,
+            std::iter::empty::<&str>(),
+        );
+        assert!(!command.get_args().any(|argument| argument == "--rm"));
+    }
+
+    #[test]
+    fn parallax_cli_syntax() {
+        let p_ctx = podman_context();
+
+        let parallax_path = PathBuf::from("/usr/local/sarus-test/parallax");
+        let image = String::from("ubuntu:24.04");
+
+        let cmd = parallax(&parallax_path, &p_ctx, &image, "migrate").unwrap();
+
+        assert_eq!(cmd.get_program(), parallax_path);
+
+        let args: Vec<&OsStr> = cmd.get_args().collect();
+        assert_eq!(args.len(), 7);
+        assert!(args.windows(2).any(|w| w
+            == [
+                OsStr::new("--podmanRoot"),
+                OsStr::new(p_ctx.graphroot.as_deref().unwrap())
+            ]));
+        assert!(args.windows(2).any(|w| w
+            == [
+                OsStr::new("--roStoragePath"),
+                OsStr::new(p_ctx.ro_store.as_deref().unwrap())
+            ]));
+        assert_eq!(
+            args[args.len() - 3..],
+            [
+                OsStr::new("--migrate"),
+                OsStr::new("--image"),
+                OsStr::new(&image)
+            ]
+        );
+    }
+
+    #[test]
+    fn parallax_requires_read_only_store() {
+        let p_ctx = PodmanCtx {
             podman_path: PathBuf::from("podman"),
             module: None,
             graphroot: None,
@@ -345,12 +548,9 @@ mod tests {
             parallax_mount_program: None,
             ro_store: None,
             podman_env: None,
-        }
-    }
+        };
 
-    #[test]
-    fn parallax_requires_read_only_store() {
-        let error = parallax(&PathBuf::from("parallax"), &context(), "image", "exist").unwrap_err();
+        let error = parallax(&PathBuf::from("parallax"), &p_ctx, "image", "exist").unwrap_err();
 
         assert!(matches!(
             error,
@@ -363,7 +563,7 @@ mod tests {
 
     #[test]
     fn container_cleanup_uses_read_only_store() {
-        let mut podman_ctx = context();
+        let mut podman_ctx = podman_context();
         podman_ctx.graphroot = Some(PathBuf::from("/tmp/graphroot"));
         podman_ctx.runroot = Some(PathBuf::from("/tmp/runroot"));
         podman_ctx.ro_store = Some(PathBuf::from("/shared/imagestore"));
