@@ -188,7 +188,7 @@ pub trait ContainerRuntime {
     ) -> Result<i32, AppError>;
     fn kube_play(&self, filepath: &str, run_ctx: &PodmanCtx) -> Result<(), AppError>;
     fn kube_down(&self, filepath: &str, force: bool, run_ctx: &PodmanCtx) -> Result<(), AppError>;
-    fn cleanup_storage(&self, run_ctx: &PodmanCtx) -> Result<(), AppError>;
+    fn cleanup_container(&self, container_name: &str, run_ctx: &PodmanCtx) -> Result<(), AppError>;
 }
 
 pub struct AppDeps<'a> {
@@ -398,25 +398,37 @@ impl ContainerRuntime for RealContainerRuntime {
     }
 
     fn kube_play(&self, filepath: &str, run_ctx: &PodmanCtx) -> Result<(), AppError> {
-        pmd::kube_play(filepath, Some(run_ctx));
-        Ok(())
+        let output = pmd::kube_play_output(filepath, Some(run_ctx));
+        podman_output_result(output, "Podman kube play")
     }
 
     fn kube_down(&self, filepath: &str, force: bool, run_ctx: &PodmanCtx) -> Result<(), AppError> {
-        pmd::kube_down(filepath, force, Some(run_ctx));
-        Ok(())
+        let output = pmd::kube_down_output(filepath, force, Some(run_ctx));
+        podman_output_result(output, "Podman kube down")
     }
 
-    fn cleanup_storage(&self, run_ctx: &PodmanCtx) -> Result<(), AppError> {
-        let out = pmd::loggable::system_reset(Some(run_ctx));
-        if out.output.status.success() {
-            Ok(())
-        } else {
-            Err(AppError::Runtime(format!(
-                "Podman storage cleanup failed: {}",
-                String::from_utf8_lossy(&out.output.stderr).trim()
-            )))
+    fn cleanup_container(&self, container_name: &str, run_ctx: &PodmanCtx) -> Result<(), AppError> {
+        let exists = pmd::container_exists(container_name, Some(run_ctx))
+            .map_err(|e| AppError::Runtime(e.to_string()))?;
+        if !exists {
+            return Ok(());
         }
+
+        pmd::container_cleanup(container_name, Some(run_ctx))
+            .map_err(|e| AppError::Runtime(e.to_string()))
+    }
+}
+
+fn podman_output_result(output: std::process::Output, operation: &str) -> Result<(), AppError> {
+    if output.status.success() {
+        let _ = io::stdout().write_all(&output.stdout);
+        let _ = io::stderr().write_all(&output.stderr);
+        Ok(())
+    } else {
+        Err(AppError::Runtime(format!(
+            "{operation} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
     }
 }
 
@@ -908,6 +920,7 @@ fn run_edf_command(
         interactive: io::stdin().is_terminal(),
         tty: io::stdin().is_terminal() && io::stdout().is_terminal(),
         detach: false,
+        auto_remove: false,
         set_env: true,
         pidfile: None,
         user: Some(user.uid.to_string()),
@@ -916,9 +929,8 @@ fn run_edf_command(
     let run_result = deps
         .runtime
         .run_from_edf(edf, &run_ctx, &c_ctx, container_cmd);
-    let storage_cleanup_error = deps.runtime.cleanup_storage(&run_ctx).err();
-    let cleanup_warning = cleanup_podman_rootdirs(&run_ctx);
-    let cleanup_warning = merge_cleanup_warning(storage_cleanup_error, cleanup_warning);
+    let container_cleanup_result = deps.runtime.cleanup_container(&c_ctx.name, &run_ctx);
+    let cleanup_warning = finalize_podman_cleanup(&run_ctx, &container_cleanup_result);
 
     // Append warning to error in case of run failure
     output.return_code = match run_result {
@@ -971,14 +983,12 @@ fn run_yaml_command(
     let join_container = get_join_container_from_yaml_manifest(&manifest)?;
 
     let play_result = deps.runtime.kube_play(filepath, &run_ctx);
-    let exec_result = deps
-        .runtime
-        .exec_interactive(&join_container, &run_ctx, container_cmd);
+    let exec_result = play_result.as_ref().ok().map(|_| {
+        deps.runtime
+            .exec_interactive(&join_container, &run_ctx, container_cmd)
+    });
     let down_result = deps.runtime.kube_down(filepath, true, &run_ctx);
-    // TODO check if we need to do anything else to report errors from kube_down as well
-    let storage_cleanup_error = deps.runtime.cleanup_storage(&run_ctx).err();
-    let cleanup_warning = cleanup_podman_rootdirs(&run_ctx);
-    let cleanup_warning = merge_cleanup_warning(storage_cleanup_error, cleanup_warning);
+    let cleanup_warning = finalize_podman_cleanup(&run_ctx, &down_result);
 
     // Append warning to error in case of run failure
     if let Err(err) = play_result {
@@ -987,7 +997,8 @@ fn run_yaml_command(
             None => err,
         });
     }
-    output.return_code = match exec_result {
+    output.return_code = match exec_result.expect("exec result missing after successful kube play")
+    {
         Ok(return_code) => return_code,
         Err(err) => {
             return Err(match cleanup_warning {
@@ -1044,14 +1055,15 @@ fn combine_error_with_warning(err: AppError, warning: String) -> AppError {
     AppError::Runtime(format!("{err}\n{warning}"))
 }
 
-fn merge_cleanup_warning(
-    storage_cleanup_error: Option<AppError>,
-    rootdir_cleanup_warning: Option<String>,
+fn finalize_podman_cleanup(
+    run_ctx: &PodmanCtx,
+    podman_cleanup_result: &Result<(), AppError>,
 ) -> Option<String> {
-    match (storage_cleanup_error, rootdir_cleanup_warning) {
-        (Some(err), Some(warning)) => Some(format!("{err}\n{warning}")),
-        (None, warning) => warning,
-        (Some(_), None) => None,
+    match podman_cleanup_result {
+        Ok(()) => cleanup_podman_rootdirs(run_ctx),
+        Err(err) => Some(format!(
+            "Warning: Podman rootdirs retained because workload cleanup failed: {err}"
+        )),
     }
 }
 
@@ -1240,7 +1252,7 @@ mod tests {
         run_result: Result<i32, AppError>,
         kube_play_result: Result<(), AppError>,
         kube_down_result: Result<(), AppError>,
-        cleanup_storage_result: Result<(), AppError>,
+        cleanup_container_result: Result<(), AppError>,
     }
 
     impl FakeContainerRuntime {
@@ -1261,7 +1273,7 @@ mod tests {
                 run_result: Ok(0),
                 kube_play_result: Ok(()),
                 kube_down_result: Ok(()),
-                cleanup_storage_result: Ok(()),
+                cleanup_container_result: Ok(()),
             }
         }
 
@@ -1441,11 +1453,15 @@ mod tests {
             self.kube_down_result.clone()
         }
 
-        fn cleanup_storage(&self, _run_ctx: &PodmanCtx) -> Result<(), AppError> {
+        fn cleanup_container(
+            &self,
+            _container_name: &str,
+            _run_ctx: &PodmanCtx,
+        ) -> Result<(), AppError> {
             self.calls
                 .borrow_mut()
-                .push(String::from("cleanup_storage"));
-            self.cleanup_storage_result.clone()
+                .push(String::from("cleanup_container"));
+            self.cleanup_container_result.clone()
         }
     }
 
@@ -2100,7 +2116,7 @@ spec:
             vec![
                 String::from("parallax_exist:alpine:3.22"),
                 String::from("run:alpine:3.22:[\"sh\"]"),
-                String::from("cleanup_storage")
+                String::from("cleanup_container")
             ]
         );
     }
@@ -2140,7 +2156,7 @@ spec:
                 String::from("migrate:alpine:3.22"),
                 String::from("parallax_exist:alpine:3.22"),
                 String::from("run:alpine:3.22:[\"sh\"]"),
-                String::from("cleanup_storage")
+                String::from("cleanup_container")
             ]
         );
     }
@@ -2185,6 +2201,75 @@ spec:
         let rootdirs = runtime.created_run_rootdirs();
         assert_eq!(rootdirs.len(), 1);
         assert_rootdirs_removed(&rootdirs[0]);
+    }
+
+    #[test]
+    fn run_edf_preserves_exit_code_after_container_cleanup() {
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster
+            .render_results
+            .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
+        let mut runtime = FakeContainerRuntime::new();
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
+        runtime.run_result = Ok(127);
+
+        let output = execute_command(
+            CommandSpec::Run {
+                filepath: String::from("job.edf"),
+                container_cmd: vec![String::from("missing-command")],
+            },
+            &mock_deps(
+                &raster,
+                &runtime,
+                &FakeUserContext {
+                    user: unique_test_user(),
+                },
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(output.return_code, 127);
+        assert_eq!(output.stderr, "");
+        assert_eq!(
+            runtime.calls().last().map(String::as_str),
+            Some("cleanup_container")
+        );
+    }
+
+    #[test]
+    fn run_edf_retains_rootdirs_when_container_cleanup_fails() {
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster
+            .render_results
+            .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
+        let mut runtime = FakeContainerRuntime::new().with_run_rootdir_creation();
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
+        runtime.cleanup_container_result =
+            Err(AppError::Runtime(String::from("cleanup still active")));
+
+        let output = execute_command(
+            CommandSpec::Run {
+                filepath: String::from("job.edf"),
+                container_cmd: vec![String::from("true")],
+            },
+            &mock_deps(
+                &raster,
+                &runtime,
+                &FakeUserContext {
+                    user: unique_test_user(),
+                },
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(output.return_code, 0);
+        assert!(output.stderr.contains("cleanup still active"));
+        assert!(output.stderr.contains("rootdirs retained"));
+
+        let rootdirs = runtime.created_run_rootdirs();
+        assert_eq!(rootdirs.len(), 1);
+        assert!(rootdirs[0].exists());
+        fs::remove_dir_all(&rootdirs[0]).unwrap();
     }
 
     #[test]
@@ -2283,7 +2368,6 @@ spec:
                 format!("kube_play:{}", manifest.to_string_lossy()),
                 String::from("exec_interactive:training-pod-sidecar:[]"),
                 format!("kube_down:{}?force=true", manifest.to_string_lossy()),
-                String::from("cleanup_storage"),
             ]
         );
     }
@@ -2383,6 +2467,119 @@ spec:
         .unwrap();
 
         assert_eq!(output.return_code, 0);
+        let rootdirs = runtime.created_run_rootdirs();
+        assert_eq!(rootdirs.len(), 1);
+        assert_rootdirs_removed(&rootdirs[0]);
+    }
+
+    #[test]
+    fn run_yaml_retains_rootdirs_when_kube_down_fails() {
+        let temp = tempdir().unwrap();
+        let manifest = temp.path().join("pod.yaml");
+        fs::write(
+            &manifest,
+            r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: training-pod
+spec:
+  containers:
+    - name: app
+      image: alpine:3.22
+"#,
+        )
+        .unwrap();
+
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster.render_results.insert(
+            manifest.to_string_lossy().into_owned(),
+            Err(String::from("not an edf")),
+        );
+        let mut runtime = FakeContainerRuntime::new().with_run_rootdir_creation();
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
+        runtime.kube_down_result = Err(AppError::Runtime(String::from("pod still active")));
+
+        let err = execute_command(
+            CommandSpec::Run {
+                filepath: manifest.to_string_lossy().into_owned(),
+                container_cmd: vec![],
+            },
+            &mock_deps(
+                &raster,
+                &runtime,
+                &FakeUserContext {
+                    user: unique_test_user(),
+                },
+            ),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("pod still active"));
+        assert!(err.to_string().contains("rootdirs retained"));
+
+        let rootdirs = runtime.created_run_rootdirs();
+        assert_eq!(rootdirs.len(), 1);
+        assert!(rootdirs[0].exists());
+        fs::remove_dir_all(&rootdirs[0]).unwrap();
+    }
+
+    #[test]
+    fn run_yaml_skips_exec_after_kube_play_failure_but_still_tears_down() {
+        let temp = tempdir().unwrap();
+        let manifest = temp.path().join("pod.yaml");
+        fs::write(
+            &manifest,
+            r#"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: training-pod
+spec:
+  containers:
+    - name: app
+      image: alpine:3.22
+"#,
+        )
+        .unwrap();
+
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster.render_results.insert(
+            manifest.to_string_lossy().into_owned(),
+            Err(String::from("not an edf")),
+        );
+        let mut runtime = FakeContainerRuntime::new().with_run_rootdir_creation();
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
+        runtime.kube_play_result = Err(AppError::Runtime(String::from("play failed")));
+
+        let err = execute_command(
+            CommandSpec::Run {
+                filepath: manifest.to_string_lossy().into_owned(),
+                container_cmd: vec![],
+            },
+            &mock_deps(
+                &raster,
+                &runtime,
+                &FakeUserContext {
+                    user: unique_test_user(),
+                },
+            ),
+        )
+        .unwrap_err();
+
+        assert_eq!(err, AppError::Runtime(String::from("play failed")));
+        assert!(
+            !runtime
+                .calls()
+                .iter()
+                .any(|call| call.starts_with("exec_interactive:"))
+        );
+        assert!(
+            runtime
+                .calls()
+                .iter()
+                .any(|call| call.starts_with("kube_down:"))
+        );
         let rootdirs = runtime.created_run_rootdirs();
         assert_eq!(rootdirs.len(), 1);
         assert_rootdirs_removed(&rootdirs[0]);
