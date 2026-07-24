@@ -69,6 +69,9 @@ where
     ))
 }
 
+// TODO: naming inconsistency with run_* functions above:
+//       - run()  is passthrough, run_output() is captured
+//       - exec() is captured,    exec_interactive() is passthrough
 pub fn exec<I, S>(
     container: &str,
     podman_ctx: Option<&PodmanCtx>,

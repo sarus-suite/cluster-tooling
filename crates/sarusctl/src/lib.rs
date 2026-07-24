@@ -279,12 +279,8 @@ fn user_config_dir() -> Option<PathBuf> {
 impl ContainerRuntime for RealContainerRuntime {
     fn default_graphroot(&self, ctx: &PodmanCtx) -> Result<PathBuf, AppError> {
         //TODO Revise with logging: println!("Resolving default Podman graphroot...");
-        let output = pmd::info(Some("{{.Store.GraphRoot}}"), Some(ctx));
-        if !output.status.success() {
-            return Err(AppError::PodmanInfo(
-                String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            ));
-        }
+        let output = pmd::info(Some("{{.Store.GraphRoot}}"), Some(ctx))
+            .map_err(|e| AppError::PodmanInfo(e.to_string()))?;
         let graphroot = str::from_utf8(&output.stdout)
             .map_err(|e| AppError::PodmanInfo(e.to_string()))?
             .trim();
@@ -292,28 +288,17 @@ impl ContainerRuntime for RealContainerRuntime {
     }
 
     fn images(&self, ctx: &PodmanCtx) -> Result<(), AppError> {
-        pmd::images(Some(ctx));
+        let _ = pmd::images(Some(ctx));
         Ok(())
     }
 
     fn pull(&self, image: &str, ctx: &PodmanCtx, verbose: bool) -> Result<(), AppError> {
         if verbose {
-            let status = pmd::pull_streaming(image, Some(ctx));
-            if status.success() {
-                Ok(())
-            } else {
-                Err(AppError::Runtime(format!("Failed to pull image {image}")))
-            }
+            pmd::pull_streaming(image, Some(ctx))
+                .map_err(|_| AppError::Runtime(format!("Failed to pull image {image}")))
         } else {
-            let out = pmd::loggable::pull(image, Some(ctx));
-            if out.output.status.success() {
-                Ok(())
-            } else {
-                Err(AppError::Runtime(format!(
-                    "Failed to pull image {image}: {}",
-                    String::from_utf8_lossy(&out.output.stderr).trim()
-                )))
-            }
+            pmd::pull(image, Some(ctx))
+                .map_err(|e| AppError::Runtime(format!("Failed to pull image {image}: {e}")))
         }
     }
 
@@ -378,6 +363,7 @@ impl ContainerRuntime for RealContainerRuntime {
         container_cmd: &[String],
     ) -> Result<i32, AppError> {
         pmd::run_from_edf(edf, Some(run_ctx), container_ctx, container_cmd)
+            .map_err(|e| AppError::Runtime(e.to_string()))?
             .code()
             .ok_or_else(|| {
                 AppError::Runtime(String::from("Container process terminated by signal"))
@@ -391,6 +377,7 @@ impl ContainerRuntime for RealContainerRuntime {
         container_cmd: &[String],
     ) -> Result<i32, AppError> {
         pmd::exec_interactive(container_name, Some(podman_ctx), container_cmd)
+            .map_err(|e| AppError::Runtime(e.to_string()))?
             .code()
             .ok_or_else(|| {
                 AppError::Runtime(String::from("Container process terminated by signal"))
@@ -398,13 +385,13 @@ impl ContainerRuntime for RealContainerRuntime {
     }
 
     fn kube_play(&self, filepath: &str, run_ctx: &PodmanCtx) -> Result<(), AppError> {
-        let output = pmd::kube_play_output(filepath, Some(run_ctx));
-        podman_output_result(output, "Podman kube play")
+        pmd::kube_play(filepath, Some(run_ctx))
+            .map_err(|e| AppError::Runtime(format!("Podman kube play failed: {e}")))
     }
 
     fn kube_down(&self, filepath: &str, force: bool, run_ctx: &PodmanCtx) -> Result<(), AppError> {
-        let output = pmd::kube_down_output(filepath, force, Some(run_ctx));
-        podman_output_result(output, "Podman kube down")
+        pmd::kube_down(filepath, force, Some(run_ctx))
+            .map_err(|e| AppError::Runtime(format!("Podman kube down failed: {e}")))
     }
 
     fn cleanup_container(&self, container_name: &str, run_ctx: &PodmanCtx) -> Result<(), AppError> {
@@ -416,19 +403,6 @@ impl ContainerRuntime for RealContainerRuntime {
 
         pmd::container_cleanup(container_name, Some(run_ctx))
             .map_err(|e| AppError::Runtime(e.to_string()))
-    }
-}
-
-fn podman_output_result(output: std::process::Output, operation: &str) -> Result<(), AppError> {
-    if output.status.success() {
-        let _ = io::stdout().write_all(&output.stdout);
-        let _ = io::stderr().write_all(&output.stderr);
-        Ok(())
-    } else {
-        Err(AppError::Runtime(format!(
-            "{operation} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )))
     }
 }
 
