@@ -297,8 +297,7 @@ where
     S: AsRef<std::ffi::OsStr>,
 {
     let t0 = Instant::now();
-    // TODO: consider if this should be a captured output call instead of passthrough
-    let status = pmd::run_from_edf(edf, Some(p_ctx), c_ctx, cmd);
+    let output = pmd::run_from_edf_output(edf, Some(p_ctx), c_ctx, cmd);
     let tend = t0.elapsed();
 
     if config.perfmon {
@@ -308,7 +307,7 @@ where
         );
     }
 
-    match status?.code() {
+    match output?.status.code() {
         Some(rc) => {
             if rc != 0 {
                 return plugin_err(format!("podman run exited with {rc}").as_str());
