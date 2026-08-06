@@ -20,7 +20,10 @@ pub mod imagestore;
 pub mod mount;
 
 pub use crate::common::expand_vars_string;
-pub use crate::config::{Config, VarExpand, load_config, load_config_path, update_config_by_user};
+pub use crate::config::{
+    Config, ConfigResolutionError, VarExpand, load_config, load_config_path, load_config_xdg,
+    config_search_paths, resolve_config_dir, update_config_by_user,
+};
 pub use crate::hooks::{hook_run, ExecutedCommand};
 pub use crate::imagestore::{imagestore_keepalive};
 
