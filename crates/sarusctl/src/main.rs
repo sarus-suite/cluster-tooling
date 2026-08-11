@@ -4,9 +4,14 @@ use sarusctl::{
     RealUserContext, execute_command_with_options, format_output,
 };
 
+const SARUSCTL_VERSION: &str = match option_env!("SARUSCTL_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 /// CLI tool for sarus-suite
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version = SARUSCTL_VERSION, about)]
 struct Args {
     #[arg(long, short)]
     verbose: bool,
