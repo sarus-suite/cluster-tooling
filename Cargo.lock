@@ -1653,6 +1653,7 @@ dependencies = [
  "sysinfo",
  "text_io",
  "toml",
+ "tracing",
  "users",
 ]
 

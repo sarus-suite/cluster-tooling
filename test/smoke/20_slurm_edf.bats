@@ -5,7 +5,7 @@ load /usr/local/lib/bats-support/load
 load /usr/local/lib/bats-assert/load
 
 setup_file() {
-  smoke_require_cmds_or_skip podman parallax parallax-mount-program mksquashfs srun
+  smoke_require_cmds_or_skip podman parallax parallax-mount-program mksquashfs srun timeout
   smoke_init_file_env
 }
 
@@ -50,6 +50,48 @@ teardown_file() {
   assert_success
   assert_output --partial "/etc/os-release"
   assert_output --partial "/bin/sh"
+}
+
+@test "missing edf is reported once through the user-facing SPANK log" {
+  local report_count
+
+  run srun -p debug -t 3 -A default -J srun-skybox-missing-edf \
+    -n 1 --edf=skybox-ci-missing-edf true
+
+  assert_failure
+  assert_output --partial "[skybox] Error 006"
+  assert_output --partial "skybox-ci-missing-edf"
+
+  report_count="$(
+    awk 'index($0, "[skybox] Error 006") { count++ } END { print count + 0 }' <<<"$output"
+  )"
+  assert_equal "$report_count" "1"
+}
+
+@test "podman startup failure is detailed once and promptly propagated to sibling tasks" {
+  local detail_count
+
+  smoke_write_edf "broken-device" "busybox:latest" \
+    'devices = ["/dev/skybox-ci-missing-device"]'
+
+  run timeout 15s srun -p debug -t 3 -A default -J srun-skybox-start-failure \
+    -N 1 -n 2 --ntasks-per-node=2 --edf=broken-device true
+
+  assert_failure
+  if [ "$status" -eq 124 ]; then
+    echo "srun timed out instead of propagating the Podman startup failure" >&3
+    false
+  fi
+
+  assert_output --partial "[skybox]"
+  assert_output --partial "failed with exit status"
+  assert_output --partial "/dev/skybox-ci-missing-device"
+  assert_output --partial "Podman container startup failed on local task 0"
+
+  detail_count="$(
+    awk 'index($0, "failed with exit status") { count++ } END { print count + 0 }' <<<"$output"
+  )"
+  assert_equal "$detail_count" "1"
 }
 
 @test "podman remove busybox from the parallax ro store" {
