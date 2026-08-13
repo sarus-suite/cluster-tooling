@@ -1,6 +1,6 @@
 use bstr::ByteSlice;
-use raster;
 use sarus_suite_podman_driver::{self as pmd, ContainerCtx};
+use std::error::Error;
 use std::fs::File;
 use std::io::prelude::*;
 use std::path::PathBuf;
@@ -8,7 +8,8 @@ use std::time::Instant;
 
 #[test]
 fn test_run_output() {
-    let out = pmd::run_output(["--rm", "ubuntu:24.04", "cat", "/etc/os-release"], None);
+    let out = pmd::run_output(["--rm", "ubuntu:24.04", "cat", "/etc/os-release"], None)
+        .expect("Failed to run container");
     assert!(
         out.stdout
             .as_slice()
@@ -34,7 +35,8 @@ fn test_run_from_edf_output() {
         .join("tests/edf/alpine.toml");
     let edf =
         raster::render(edf_path.to_string_lossy().into_owned()).expect("Failed to render EDF");
-    let out = pmd::run_from_edf_output(&edf, None, &ctx, ["grep", "PRETTY", "/etc/os-release"]);
+    let out = pmd::run_from_edf_output(&edf, None, &ctx, ["grep", "PRETTY", "/etc/os-release"])
+        .expect("Failed to run container from EDF");
     assert!(
         out.stdout
             .as_slice()
@@ -43,7 +45,7 @@ fn test_run_from_edf_output() {
 }
 
 #[test]
-fn test_run_from_edf_detached_output() -> anyhow::Result<()> {
+fn test_run_from_edf_detached_output() -> Result<(), Box<dyn Error>> {
     let ctx = ContainerCtx {
         name: String::from("sarus_edf_test"),
         interactive: false,
@@ -60,12 +62,12 @@ fn test_run_from_edf_detached_output() -> anyhow::Result<()> {
         .join("tests/edf/alpine.toml");
     let edf =
         raster::render(edf_path.to_string_lossy().into_owned()).expect("Failed rendering EDF");
-    let out = pmd::run_from_edf_output(&edf, None, &ctx, ["sleep", "3"]);
+    let out = pmd::run_from_edf_output(&edf, None, &ctx, ["sleep", "3"])?;
 
     let run_stdout = str::from_utf8(&out.stdout)?;
     let run_stdout = String::from(run_stdout.trim());
 
-    let insp_out = pmd::inspect(&ctx.name, Some("{{.Id}}"), None);
+    let insp_out = pmd::inspect(&ctx.name, Some("{{.Id}}"), None)?;
     let cnt_id = str::from_utf8(&insp_out.stdout)?;
     let cnt_id = cnt_id.trim();
     assert_eq!(run_stdout, cnt_id);
@@ -76,31 +78,31 @@ fn test_run_from_edf_detached_output() -> anyhow::Result<()> {
 // and cause repeated registry pulls.
 // Consider removal.
 #[test]
-fn test_pull() -> anyhow::Result<()> {
+fn test_pull() -> Result<(), Box<dyn Error>> {
     let image = "alpine:3.22";
     if pmd::image_exists(image, None)? {
-        pmd::rmi(image, None);
+        pmd::rmi(image, None)?;
     }
     assert!(!pmd::image_exists(image, None)?);
-    pmd::pull(image, None);
+    pmd::pull(image, None)?;
     assert!(pmd::image_exists(image, None)?);
     Ok(())
 }
 
 #[test]
-fn test_rmi() -> anyhow::Result<()> {
+fn test_rmi() -> Result<(), Box<dyn Error>> {
     let image = "alpine:3.22";
     if !pmd::image_exists(image, None)? {
-        pmd::pull(image, None);
+        pmd::pull(image, None)?;
     }
     assert!(pmd::image_exists(image, None)?);
-    pmd::rmi(image, None);
+    pmd::rmi(image, None)?;
     assert!(!pmd::image_exists(image, None)?);
     Ok(())
 }
 
 #[test]
-fn test_get_container_pid() -> anyhow::Result<()> {
+fn test_get_container_pid() -> Result<(), Box<dyn Error>> {
     let cnt_name = String::from("sarus_get_cnt_pid_test");
     let run = pmd::run_output(
         [
@@ -113,7 +115,7 @@ fn test_get_container_pid() -> anyhow::Result<()> {
             "5",
         ],
         None,
-    );
+    )?;
     assert!(run.status.success(), "Could not run container!");
 
     let t0 = Instant::now();
@@ -137,7 +139,7 @@ fn test_get_container_pid() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_get_container_pid_from_pidfile() -> anyhow::Result<()> {
+fn test_get_container_pid_from_pidfile() -> Result<(), Box<dyn Error>> {
     let ctx = ContainerCtx {
         name: String::from("sarus_read_cnt_pidfile_test"),
         interactive: false,
@@ -154,7 +156,7 @@ fn test_get_container_pid_from_pidfile() -> anyhow::Result<()> {
         .join("tests/edf/alpine.toml");
     let edf =
         raster::render(edf_path.to_string_lossy().into_owned()).expect("Failed rendering EDF");
-    let run = pmd::run_from_edf_output(&edf, None, &ctx, ["sleep", "5"]);
+    let run = pmd::run_from_edf_output(&edf, None, &ctx, ["sleep", "5"])?;
     assert!(run.status.success(), "Could not run container!");
 
     let mut cnt_pidfile = File::open(ctx.pidfile.as_ref().unwrap())?;
