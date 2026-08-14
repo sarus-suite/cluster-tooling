@@ -9,7 +9,7 @@ MANIFEST_DIR="${OUT_DIR}/share"
 
 SQUASHFUSE_VERSION="${SQUASHFUSE_VERSION:-0.6.1}"
 PARALLAX_VERSION="${PARALLAX_VERSION:-0.10.3}"
-PODMAN_STATIC_URL="${PODMAN_STATIC_URL:-https://github.com/mgoltzsche/podman-static/releases/latest/download/podman-linux-amd64.tar.gz}"
+PODMAN_STATIC_URL="${PODMAN_STATIC_URL:-https://github.com/mgoltzsche/podman-static/releases/download/v5.8.1/podman-linux-amd64.tar.gz}"
 BATS_REF="${BATS_REF:-v1.11.1}"
 BATS_SUPPORT_REF="${BATS_SUPPORT_REF:-v0.3.0}"
 BATS_ASSERT_REF="${BATS_ASSERT_REF:-v2.1.0}"
