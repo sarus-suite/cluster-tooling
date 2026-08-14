@@ -60,11 +60,15 @@ jobs:
             # Keep Cargo's temporary build tree out of the checked-out workspace.
             export CARGO_TARGET_DIR=/tmp/sarusctl-target
             cargo test --locked -p sarusctl
+            package_version="$(awk -F '"' '$1 ~ /^version[[:space:]]*=/ { print $2; exit }' crates/sarusctl/Cargo.toml)"
+            export SARUSCTL_VERSION="${package_version}-ci+g${{ github.sha }}"
             cargo build --locked --release -p sarusctl --target x86_64-unknown-linux-musl
             install -Dm0755 \
               "${CARGO_TARGET_DIR}/x86_64-unknown-linux-musl/release/sarusctl" \
               dist/sarusctl
+            printf '%s\n' "${SARUSCTL_VERSION}" > dist/sarusctl.version
             test -x dist/sarusctl
+            test "$(dist/sarusctl --version)" = "sarusctl ${SARUSCTL_VERSION}"
 
       - name: Download and verify sarus-suite bundle
         shell: bash
@@ -88,6 +92,11 @@ jobs:
             --import-binary "${GITHUB_WORKSPACE}/dist/sarusctl" \
             -- bash -lc '
               set -euxo pipefail
+              expected_version="$(< dist/sarusctl.version)"
+              injected_binary="$(command -v sarusctl)"
+              test "${injected_binary}" = "${SARUS_SUITE_BIN}/sarusctl"
+              test "$(sarusctl --version)" = "sarusctl ${expected_version}"
+              cmp --silent dist/sarusctl "${injected_binary}"
               sarus-suite-check
               SARUSCTL_BINARY=sarusctl bats --print-output-on-failure \
                 test/smoke/10_podman_rootless.bats \
