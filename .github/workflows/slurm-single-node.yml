@@ -49,8 +49,8 @@ jobs:
           sudo install -m 0755 /tmp/host-tools/bin/* /usr/local/bin/
 
           # Keep legacy paths stable for the existing workflow.
-          if [ -x /usr/local/libexec/podman/conmon ]; then
-            sudo ln -sf /usr/local/libexec/podman/conmon /usr/local/bin/conmon
+          if [ -x /usr/local/lib/podman/conmon ]; then
+            sudo ln -sf /usr/local/lib/podman/conmon /usr/local/bin/conmon
           fi
           sudo ln -sf /usr/local/bin/squashfuse /usr/bin/squashfuse
           sudo ln -sf /usr/local/bin/squashfuse_ll /usr/bin/squashfuse_ll
