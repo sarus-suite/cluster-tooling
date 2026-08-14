@@ -18,8 +18,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      SARUS_SUITE_VERSION: v26.7.3
-      SARUS_SUITE_AMD64_SHA256: 1f3ced049dd47a33b31ac4d64b7c9ec707eedd6fc422e156f0ebbeef123c9ffa
+      SARUS_SUITE_VERSION: v26.8.1
+      SARUS_SUITE_AMD64_SHA256: c6e8ee55197fbf5f664a89c1ffc42cca0176fde8c9a16aebae9a62bccd6f75c8
 
     steps:
       - uses: actions/checkout@v4
@@ -57,13 +57,13 @@ jobs:
           push: never
           runCmd: |
             set -euxo pipefail
-            # The CI workspace bind mount is not writable by the Alpine
-            # devcontainer user, so keep Cargo's temporary build tree in /tmp.
+            # Keep Cargo's temporary build tree out of the checked-out workspace.
             export CARGO_TARGET_DIR=/tmp/sarusctl-target
             cargo test --locked -p sarusctl
             cargo build --locked --release -p sarusctl --target x86_64-unknown-linux-musl
-            mkdir -p dist
-            cp -f "${CARGO_TARGET_DIR}/x86_64-unknown-linux-musl/release/sarusctl" dist/sarusctl
+            install -Dm0755 \
+              "${CARGO_TARGET_DIR}/x86_64-unknown-linux-musl/release/sarusctl" \
+              dist/sarusctl
             test -x dist/sarusctl
 
       - name: Download and verify sarus-suite bundle

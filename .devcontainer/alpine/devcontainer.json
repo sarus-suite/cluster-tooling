@@ -14,7 +14,7 @@
     "HOME": "/home/${localEnv:USER:vscode}"
   },
   "remoteUser": "${localEnv:USER:vscode}",
-  "updateRemoteUserUID": false,
+  "updateRemoteUserUID": true,
   "runArgs": ["--userns=host"],
   "mounts": [
     "type=volume,source=sarusctl-static-cargo-registry,target=/usr/local/cargo/registry",
