@@ -7,7 +7,7 @@ load /usr/local/lib/bats-assert/load
 setup_file() {
   local repo_root
 
-  smoke_require_cmds_or_skip podman parallax parallax-mount-program mksquashfs srun
+  smoke_require_cmds_or_skip podman parallax parallax-mount-program mksquashfs
   repo_root="$(smoke_repo_root)"
   if [ ! -x "${repo_root}/dist/sarusctl" ]; then
     skip "missing required binary: dist/sarusctl"
@@ -20,6 +20,8 @@ teardown_file() {
 }
 
 @test "edf annotations set a custom mount-program logfile for srun" {
+  smoke_require_cmds_or_skip srun
+
   smoke_write_edf "busybox" "busybox:latest" "
 [annotations]
 com.sarus.parallax_mp_logfile = \"${ANNOTATION_LOGFILE}\"

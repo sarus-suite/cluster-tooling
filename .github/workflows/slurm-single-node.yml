@@ -12,6 +12,85 @@ jobs:
   host-tools:
     uses: ./.github/workflows/host-tools.yml
 
+  bundle-runtime-smoke:
+    name: bundle runtime smoke
+    needs: host-tools
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SARUS_SUITE_VERSION: v26.7.3
+      SARUS_SUITE_AMD64_SHA256: 1f3ced049dd47a33b31ac4d64b7c9ec707eedd6fc422e156f0ebbeef123c9ffa
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Phase 1 keeps the host-tools job solely for Bats and its assertion
+      # libraries. Podman, Parallax, and their runtime configuration come from
+      # the released sarus-suite bundle below.
+      - name: Download Bats test framework
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.host-tools.outputs.artifact-name }}
+          path: .ci-artifacts
+
+      - name: Install Bats test framework
+        shell: bash
+        run: |
+          set -euxo pipefail
+          tar -C "${RUNNER_TEMP}" -xzf ".ci-artifacts/${{ needs.host-tools.outputs.artifact-name }}.tar.gz"
+          sudo cp -R "${RUNNER_TEMP}/host-tools/bats/." /usr/local/
+          command -v bats
+
+      - name: Allow unprivileged user namespaces
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          fi
+          unshare -Ur true
+
+      - name: Build static sarusctl in Alpine devcontainer
+        uses: devcontainers/ci@v0.3
+        with:
+          configFile: .devcontainer/alpine/devcontainer.json
+          push: never
+          runCmd: |
+            set -euxo pipefail
+            cargo test --locked -p sarusctl
+            cargo build --locked --release -p sarusctl --target x86_64-unknown-linux-musl
+            mkdir -p dist
+            cp -f target/x86_64-unknown-linux-musl/release/sarusctl dist/sarusctl
+            test -x dist/sarusctl
+
+      - name: Download and verify sarus-suite bundle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bundle="sarus-suite-${SARUS_SUITE_VERSION}-amd64.tar.gz"
+          url="https://github.com/sarus-suite/sarus-suite/releases/download/${SARUS_SUITE_VERSION}/${bundle}"
+          curl --fail --location --retry 3 --output "${RUNNER_TEMP}/${bundle}" "${url}"
+          echo "${SARUS_SUITE_AMD64_SHA256}  ${RUNNER_TEMP}/${bundle}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/sarus-suite-bundle"
+          tar -C "${RUNNER_TEMP}/sarus-suite-bundle" -xzf "${RUNNER_TEMP}/${bundle}"
+          test -x "${RUNNER_TEMP}/sarus-suite-bundle/sarus-suite/bin/sarus-suite-shell"
+
+      - name: Run rootless runtime smoke tests in sarus-suite bundle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          suite_root="${RUNNER_TEMP}/sarus-suite-bundle/sarus-suite"
+          "${suite_root}/bin/sarus-suite-shell" \
+            --state-root "${RUNNER_TEMP}/sarus-suite-state" \
+            --import-binary "${GITHUB_WORKSPACE}/dist/sarusctl" \
+            -- bash -lc '
+              set -euxo pipefail
+              sarus-suite-check
+              SARUSCTL_BINARY=sarusctl bats --print-output-on-failure \
+                test/smoke/10_podman_rootless.bats \
+                test/smoke/30_annotations_sarusctl.bats
+            '
+
   slurm:
     needs: host-tools
     runs-on: ubuntu-24.04
