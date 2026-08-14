@@ -853,7 +853,9 @@ fn run_command(
         Ok(edf) => {
             // Loading config in each branch is a small duplication,
             // but allows to integration test invalid EDF cases without needing a valid config present
-            let config = load_config_with_options(deps.raster, options)?;
+            let mut config = load_config_with_options(deps.raster, options)?;
+            raster::update_config_by_user(&mut config, edf.clone())
+                .map_err(|e| AppError::ConfigLoad(e.to_string()))?;
             setup_imagestore(&config)?;
             run_edf_command(&edf, container_cmd, &config, deps, options)
         }
@@ -1268,6 +1270,7 @@ mod tests {
         pull_verbose: RefCell<Vec<bool>>,
         migrate_verbose: RefCell<Vec<bool>>,
         rmi_verbose: RefCell<Vec<bool>>,
+        run_logfiles: RefCell<Vec<Option<String>>>,
         graphroot: Result<PathBuf, AppError>,
         image_exists: RefCell<HashMap<String, VecDeque<bool>>>,
         parallax_exist: RefCell<HashMap<String, VecDeque<bool>>>,
@@ -1289,6 +1292,7 @@ mod tests {
                 pull_verbose: RefCell::new(Vec::new()),
                 migrate_verbose: RefCell::new(Vec::new()),
                 rmi_verbose: RefCell::new(Vec::new()),
+                run_logfiles: RefCell::new(Vec::new()),
                 graphroot: Ok(PathBuf::from("/graphroot")),
                 image_exists: RefCell::new(HashMap::new()),
                 pull_results: RefCell::new(HashMap::new()),
@@ -1354,6 +1358,10 @@ mod tests {
 
         fn rmi_verbose(&self) -> Vec<bool> {
             self.rmi_verbose.borrow().clone()
+        }
+
+        fn run_logfiles(&self) -> Vec<Option<String>> {
+            self.run_logfiles.borrow().clone()
         }
     }
 
@@ -1440,6 +1448,13 @@ mod tests {
             container_cmd: &[String],
         ) -> Result<i32, AppError> {
             self.create_and_record_run_rootdirs(run_ctx);
+            self.run_logfiles.borrow_mut().push(
+                run_ctx
+                    .podman_env
+                    .as_ref()
+                    .and_then(|env| env.get(OsStr::new("PARALLAX_MP_LOGFILE")))
+                    .map(|path| path.to_string_lossy().into_owned()),
+            );
             self.calls
                 .borrow_mut()
                 .push(format!("run:{}:{container_cmd:?}", edf.image));
@@ -2137,6 +2152,40 @@ spec:
                 String::from("cleanup_container")
             ]
         );
+    }
+
+    #[test]
+    fn run_edf_applies_mount_program_annotations() {
+        let logfile = String::from("/tmp/edf-annotation.log");
+        let mut edf = sample_edf("alpine:3.22");
+        edf.annotations.insert(
+            String::from("com.sarus.parallax_mp_logfile"),
+            logfile.clone(),
+        );
+        edf.annotations.insert(
+            String::from("com.sarus.parallax_mp_squashfuse_path"),
+            String::from("/custom/squashfuse_ll"),
+        );
+
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster.render_results.insert(String::from("job.edf"), Ok(edf));
+        let runtime = FakeContainerRuntime::new();
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
+        let user = FakeUserContext {
+            user: CurrentUser { uid: 1, gid: 1 },
+        };
+
+        let output = execute_command(
+            CommandSpec::Run {
+                filepath: String::from("job.edf"),
+                container_cmd: vec![String::from("true")],
+            },
+            &mock_deps(&raster, &runtime, &user),
+        )
+        .unwrap();
+
+        assert_eq!(output.return_code, 0);
+        assert_eq!(runtime.run_logfiles(), vec![Some(logfile)]);
     }
 
     #[test]
