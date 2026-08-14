@@ -45,13 +45,15 @@ com.sarus.parallax_mp_squashfuse_path = \"squashfuse_ll\"
 }
 
 @test "sarusctl run honors the mount-program logfile annotation" {
-  smoke_write_edf "busybox" "busybox:latest" "
+  # Use a distinct image from the preceding test so Podman must invoke the
+  # mount program instead of reusing the existing busybox mount.
+  smoke_write_edf "annotated-busybox" "busybox:1.36.1" "
 [annotations]
 com.sarus.parallax_mp_logfile = \"${ANNOTATION_LOGFILE}\"
 com.sarus.parallax_mp_squashfuse_path = \"squashfuse_ll\"
 "
 
-  run "$SARUSCTL_BINARY" --verbose run busybox true
+  run "$SARUSCTL_BINARY" --verbose run annotated-busybox true
   assert_success
 
   run stat -c '%s %n' "$ANNOTATION_LOGFILE"

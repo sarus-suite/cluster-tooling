@@ -80,28 +80,33 @@ jobs:
           echo "${SARUS_SUITE_AMD64_SHA256}  ${RUNNER_TEMP}/${bundle}" | sha256sum --check --strict
           mkdir -p "${RUNNER_TEMP}/sarus-suite-bundle"
           tar -C "${RUNNER_TEMP}/sarus-suite-bundle" -xzf "${RUNNER_TEMP}/${bundle}"
-          test -x "${RUNNER_TEMP}/sarus-suite-bundle/sarus-suite/bin/sarus-suite-shell"
+          test -x "${RUNNER_TEMP}/sarus-suite-bundle/sarus-suite/bin/sarus-suite-system-install"
 
-      - name: Run rootless runtime smoke tests in sarus-suite bundle
+      - name: Install sarus-suite bundle and run rootless runtime smoke tests
         shell: bash
         run: |
           set -euxo pipefail
           suite_root="${RUNNER_TEMP}/sarus-suite-bundle/sarus-suite"
-          "${suite_root}/bin/sarus-suite-shell" \
-            --state-root "${RUNNER_TEMP}/sarus-suite-state" \
-            --import-binary "${GITHUB_WORKSPACE}/dist/sarusctl" \
-            -- bash -lc '
-              set -euxo pipefail
-              expected_version="$(< dist/sarusctl.version)"
-              injected_binary="$(command -v sarusctl)"
-              test "${injected_binary}" = "${SARUS_SUITE_BIN}/sarusctl"
-              test "$(sarusctl --version)" = "sarusctl ${expected_version}"
-              cmp --silent dist/sarusctl "${injected_binary}"
-              sarus-suite-check
-              SARUSCTL_BINARY=sarusctl bats --print-output-on-failure \
-                test/smoke/10_podman_rootless.bats \
-                test/smoke/30_annotations_sarusctl.bats
-            '
+          sudo "${suite_root}/bin/sarus-suite-system-install" \
+            --force \
+            --import-binary "${GITHUB_WORKSPACE}/dist/sarusctl"
+
+          export PATH="/usr/local/bin:${PATH}"
+          # Do not inherit bundle-shell settings: the test must exercise only
+          # the Parallax values derived from its EDF annotations.
+          for name in ${!PARALLAX_@}; do
+            unset "${name}"
+          done
+
+          expected_version="$(< dist/sarusctl.version)"
+          injected_binary="$(command -v sarusctl)"
+          test "${injected_binary}" = "/usr/local/bin/sarusctl"
+          test "$(sarusctl --version)" = "sarusctl ${expected_version}"
+          cmp --silent dist/sarusctl "${injected_binary}"
+          sarus-suite-check
+          SARUSCTL_BINARY=sarusctl bats --print-output-on-failure \
+            test/smoke/10_podman_rootless.bats \
+            test/smoke/30_annotations_sarusctl.bats
 
   slurm:
     needs: host-tools
