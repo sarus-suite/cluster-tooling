@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::path::PathBuf;
+use std::process::Output;
 use std::time::Instant;
+use regex::Regex;
 use sysinfo::{Pid, System};
 
 use slurm_spank::{SpankHandle, spank_log_user};
@@ -302,11 +304,11 @@ pub(crate) fn pmd_run<I, S>(
     cmd: I,
 ) -> Result<(), Box<dyn Error>>
 where
-    I: IntoIterator<Item = S>,
+    I: IntoIterator<Item = S> + Clone,
     S: AsRef<std::ffi::OsStr>,
 {
     let t0 = Instant::now();
-    let result = pmd::run_from_edf_output(edf, Some(p_ctx), c_ctx, cmd);
+    let result = pmd::run_from_edf_output(edf, Some(p_ctx), c_ctx, cmd.clone());
     let tend = t0.elapsed();
 
     if config.perfmon {
@@ -316,6 +318,27 @@ where
         );
     }
 
-    result?;
+    let output = result?;
+
+    if ! is_pmd_run_worth_a_retry(&output) {
+        return Ok(());
+    }
+
+    // Retry Once
+    pmd_run(edf, config, p_ctx, c_ctx, cmd)?;
+
     Ok(())
+}
+
+fn is_pmd_run_worth_a_retry(output: &Output) -> bool {
+    let out = output.clone();
+    if ! out.status.success() {
+        for line in String::from_utf8(out.stderr).unwrap().lines() {
+            let re = Regex::new(r"nvidia-container-cli: \w+ error: driver rpc error: timed out").unwrap();
+            if re.is_match(line) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
