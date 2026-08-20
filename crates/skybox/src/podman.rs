@@ -325,6 +325,9 @@ where
     }
 
     // Retry Once
+    skybox_log_debug!("Known issue, wait 1 second then retry");
+    let pause = std::time::Duration::from_secs(1);
+    std::thread::sleep(pause);
     pmd_run(edf, config, p_ctx, c_ctx, cmd)?;
 
     Ok(())
