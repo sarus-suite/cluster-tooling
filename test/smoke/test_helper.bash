@@ -15,14 +15,14 @@ smoke_require_cmds_or_skip() {
 
 smoke_init_file_env() {
   export SMOKE_REPO_ROOT="$(smoke_repo_root)"
-  export PODMAN_BINARY="/usr/local/bin/podman"
-  export PARALLAX_BINARY="/usr/local/bin/parallax"
-  export MOUNT_PROGRAM_PATH="/usr/local/bin/parallax-mount-program"
-  export MKSQUASHFS_PATH="/usr/bin/mksquashfs"
-  export SARUSCTL_BINARY="${SMOKE_REPO_ROOT}/dist/sarusctl"
+  export PODMAN_BINARY="${PODMAN_BINARY:-$(command -v podman)}"
+  export PARALLAX_BINARY="${PARALLAX_BINARY:-$(command -v parallax)}"
+  export MOUNT_PROGRAM_PATH="${MOUNT_PROGRAM_PATH:-$(command -v parallax-mount-program)}"
+  export MKSQUASHFS_PATH="${MKSQUASHFS_PATH:-$(command -v mksquashfs)}"
+  export SARUSCTL_BINARY="${SARUSCTL_BINARY:-${SMOKE_REPO_ROOT}/dist/sarusctl}"
   export PARALLAX_MP_UID="$(id -u)"
   export PARALLAX_MP_GID="$(id -g)"
-  export PARALLAX_MP_SQUASHFUSE_CMD="/usr/bin/squashfuse_ll"
+  export PARALLAX_MP_SQUASHFUSE_CMD="${PARALLAX_MP_SQUASHFUSE_CMD:-$(command -v squashfuse_ll)}"
 
   export SMOKE_TMPDIR="$(mktemp -d)"
   export HOME="${SMOKE_TMPDIR}/home"

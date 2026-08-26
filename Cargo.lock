@@ -1482,6 +1482,7 @@ dependencies = [
  "sarus-suite-podman-driver",
  "serde",
  "serde_json",
+ "serial_test",
  "tempfile",
  "users",
  "uuid",

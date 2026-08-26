@@ -6,174 +6,101 @@ on:
 
 permissions:
   contents: read
-  packages: write
+
+env:
+  SARUS_SUITE_VERSION: v26.8.1
+  SARUS_SUITE_AMD64_SHA256: c6e8ee55197fbf5f664a89c1ffc42cca0176fde8c9a16aebae9a62bccd6f75c8
 
 jobs:
-  host-tools:
-    uses: ./.github/workflows/host-tools.yml
-
   slurm:
-    needs: host-tools
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+
+      - name: Install Bats test framework
+        uses: bats-core/bats-action@77d6fb60505b4d0d1d73e48bd035b55074bbfb43 # 4.0.0
+        with:
+          bats-version: 1.14.0
+          support-version: 0.3.0
+          support-path: /usr/local/lib/bats-support
+          assert-version: 2.1.0
+          assert-path: /usr/local/lib/bats-assert
+          detik-install: false
+          file-install: false
 
       - name: Restore apt package archive cache
         id: restore-apt-archives
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: .ci-cache/apt-archives/*.deb
           key: ${{ runner.os }}-${{ runner.arch }}-apt-archives-slurm-${{ hashFiles('.github/workflows/slurm-single-node.yml') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-apt-archives-slurm-
 
-      - name: Download reusable host tools bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.host-tools.outputs.artifact-name }}
-          path: .ci-artifacts
-
-      - name: Install reusable host tools bundle
+      - name: Download and verify sarus-suite bundle
         shell: bash
         run: |
           set -euxo pipefail
+          bundle="sarus-suite-${SARUS_SUITE_VERSION}-amd64.tar.gz"
+          url="https://github.com/sarus-suite/sarus-suite/releases/download/${SARUS_SUITE_VERSION}/${bundle}"
+          curl --fail --location --retry 3 --output "${RUNNER_TEMP}/${bundle}" "${url}"
+          echo "${SARUS_SUITE_AMD64_SHA256}  ${RUNNER_TEMP}/${bundle}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/sarus-suite-bundle"
+          tar -C "${RUNNER_TEMP}/sarus-suite-bundle" -xzf "${RUNNER_TEMP}/${bundle}"
+          test -x "${RUNNER_TEMP}/sarus-suite-bundle/sarus-suite/bin/sarus-suite-system-install"
 
-          tar -C /tmp -xzf ".ci-artifacts/${{ needs.host-tools.outputs.artifact-name }}.tar.gz"
-
-          sudo mkdir -p /usr/local/libexec /usr/local/share
-          sudo cp -R /tmp/host-tools/podman-static/usr/. /usr/
-          sudo cp -R /tmp/host-tools/podman-static/etc/. /etc/
-          sudo cp -R /tmp/host-tools/bats/. /usr/local/
-          sudo install -m 0755 /tmp/host-tools/bin/* /usr/local/bin/
-
-          # Keep legacy paths stable for the existing workflow.
-          if [ -x /usr/local/lib/podman/conmon ]; then
-            sudo ln -sf /usr/local/lib/podman/conmon /usr/local/bin/conmon
-          fi
-          sudo ln -sf /usr/local/bin/squashfuse /usr/bin/squashfuse
-          sudo ln -sf /usr/local/bin/squashfuse_ll /usr/bin/squashfuse_ll
-
-          command -v podman
-          command -v conmon
-          command -v squashfuse_ll
-          command -v parallax
-          command -v bats
-
-      - name: Allow unprivileged user namespaces (work around Ubuntu 24.04 AppArmor restriction)
+      - name: Enable unprivileged user namespaces
         run: |
           set -euxo pipefail
-
-          # Disable Ubuntu's AppArmor restriction that can make `unshare(CLONE_NEWUSER)` fail with EPERM
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
           fi
-
-          # Show status
-          sysctl kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true
-          sysctl kernel.unprivileged_userns_clone 2>/dev/null || true
-          sysctl user.max_user_namespaces 2>/dev/null || true
-
-
-      - name: Check user namespaces availability
-        run: |
-          set -euxo pipefail
-          echo "== sysctls =="
-          cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || true
-          cat /proc/sys/user/max_user_namespaces 2>/dev/null || true
-      
-          echo "== unshare probe =="
-          if unshare -Ur true 2>/dev/null; then
-            echo "unshare -Ur: OK (user namespaces usable)"
-          else
-            echo "unshare -Ur: FAIL (user namespaces not usable here)"
-          fi
-      
-          echo "== kernel config hint =="
-          zgrep CONFIG_USER_NS /proc/config.gz 2>/dev/null || true
-          grep CONFIG_USER_NS "/boot/config-$(uname -r)" 2>/dev/null || true
+          unshare -Ur true
 
       - name: Login to GHCR
+        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build libskybox.so in devcontainer (fail early on build)
-        if: github.event_name != 'pull_request'
+      - name: Build debug artifacts in devcontainer
         uses: devcontainers/ci@v0.3
         with:
           configFile: .devcontainer/ubuntu/devcontainer.json
           imageName: ${{ format('ghcr.io/{0}/skybox-devcontainer-cache', github.repository) }}
           cacheFrom: ${{ format('ghcr.io/{0}/skybox-devcontainer-cache:latest', github.repository) }}
-          push: always
+          push: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && 'always' || 'never' }}
           runCmd: |
             set -euxo pipefail
-            ci_phase_start="${SECONDS}"
-            log_phase() {
-              local label="$1"
-              local now="${SECONDS}"
-              echo "::notice::[devcontainer-ci] ${label} (+$((now - ci_phase_start))s)"
-              ci_phase_start="${now}"
-            }
-
-            # Building skybox
-            log_phase "starting cargo build -p skybox --release"
-            cargo build --locked -p skybox --release
-
-            # Build and test sarusctl
-            log_phase "finished skybox build; starting cargo build -p sarusctl --release"
-            cargo build --locked -p sarusctl --release
-            log_phase "finished sarusctl build; starting cargo test -p sarusctl --test cli"
+            cargo build --locked -p skybox
+            cargo build --locked -p sarusctl
             cargo test --locked -p sarusctl --test cli
+            install -Dm0755 "${CARGO_TARGET_DIR}/debug/libskybox.so" dist/libskybox.so
+            install -Dm0755 "${CARGO_TARGET_DIR}/debug/sarusctl" dist/sarusctl
 
-            # Copy artifact into the workspace
-            log_phase "finished sarusctl cli test; copying artifacts"
-            mkdir -p dist
-            cp -f "${CARGO_TARGET_DIR}/release/libskybox.so" dist/libskybox.so
-            cp -f "${CARGO_TARGET_DIR}/release/sarusctl" dist/sarusctl
-            ls -l dist/libskybox.so
-            ls -l dist/sarusctl
-            log_phase "artifacts copied"
+      - name: Install sarus-suite bundle with locally built sarusctl
+        shell: bash
+        run: |
+          set -euxo pipefail
+          suite_root="${RUNNER_TEMP}/sarus-suite-bundle/sarus-suite"
+          sudo "${suite_root}/bin/sarus-suite-system-install" \
+            --force \
+            --import-binary "${GITHUB_WORKSPACE}/dist/sarusctl"
 
-      - name: Build libskybox.so in devcontainer (pull request)
-        if: github.event_name == 'pull_request'
-        uses: devcontainers/ci@v0.3
-        with:
-          configFile: .devcontainer/ubuntu/devcontainer.json
-          imageName: ${{ format('ghcr.io/{0}/skybox-devcontainer-cache', github.repository) }}
-          cacheFrom: ${{ format('ghcr.io/{0}/skybox-devcontainer-cache:latest', github.repository) }}
-          push: never
-          runCmd: |
-            set -euxo pipefail
-            ci_phase_start="${SECONDS}"
-            log_phase() {
-              local label="$1"
-              local now="${SECONDS}"
-              echo "::notice::[devcontainer-ci] ${label} (+$((now - ci_phase_start))s)"
-              ci_phase_start="${now}"
-            }
-
-            # Building skybox
-            log_phase "starting cargo build -p skybox --release"
-            cargo build --locked -p skybox --release
-
-            # Build and test sarusctl
-            log_phase "finished skybox build; starting cargo build -p sarusctl --release"
-            cargo build --locked -p sarusctl --release
-            log_phase "finished sarusctl build; starting cargo test -p sarusctl --test cli"
-            cargo test --locked -p sarusctl --test cli
-
-            # Copy artifact into the workspace
-            log_phase "finished sarusctl cli test; copying artifacts"
-            mkdir -p dist
-            cp -f "${CARGO_TARGET_DIR}/release/libskybox.so" dist/libskybox.so
-            cp -f "${CARGO_TARGET_DIR}/release/sarusctl" dist/sarusctl
-            ls -l dist/libskybox.so
-            ls -l dist/sarusctl
-            log_phase "artifacts copied"
+          export PATH="/usr/local/bin:${PATH}"
+          test "$(command -v sarusctl)" = "/usr/local/bin/sarusctl"
+          cmp --silent dist/sarusctl /usr/local/bin/sarusctl
+          command -v podman
+          command -v parallax
+          command -v parallax-mount-program
+          command -v squashfuse_ll
       
       - name: Install libskybox.so into /usr/lib64/slurm on runner
         shell: bash
@@ -185,7 +112,7 @@ jobs:
           ls -l /usr/lib64/slurm/libskybox.so
 
 
-      - name: Install Slurm + Munge (+ SlurmDBD + MariaDB)
+      - name: Install Slurm and host packages
         run: |
           set -euxo pipefail
           APT_ARCHIVE_CACHE_DIR="${GITHUB_WORKSPACE}/.ci-cache/apt-archives"
@@ -196,7 +123,8 @@ jobs:
           sudo apt-get -o Dir::Cache::archives="${APT_ARCHIVE_CACHE_DIR}" install -y --no-install-recommends \
             munge \
             slurmctld slurmd slurm-client slurmdbd \
-            mariadb-server
+            mariadb-server \
+            uidmap
 
 
       - name: Configure Munge
@@ -473,123 +401,6 @@ jobs:
             fi
           fi
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            lsb-release \
-            btrfs-progs \
-            libbtrfs-dev \
-            lvm2 \
-            libdevmapper-dev \
-            squashfs-tools \
-            fuse-overlayfs \
-            inotify-tools
-
-
-      - name: Tool versions (podman + fuse/squash tools)
-        shell: bash
-        run: |
-          set -euo pipefail
-      
-          echo "=== OS / Kernel ==="
-          uname -a || true
-          cat /etc/os-release || true
-          echo
-      
-          # Helper: print "name: path" then try common version flags
-          show_ver() {
-            local label="$1"; shift
-            local bin="$1"; shift || true
-      
-            echo "--- ${label} ---"
-            if [[ "$bin" == /* ]]; then
-              if [[ ! -x "$bin" ]]; then
-                echo "path: $bin (missing or not executable)"
-                echo
-                return 0
-              fi
-              echo "path: $bin"
-            else
-              if ! command -v "$bin" >/dev/null 2>&1; then
-                echo "path: (not found in PATH)"
-                echo
-                return 0
-              fi
-              echo "path: $(command -v "$bin")"
-            fi
-      
-            # Try a few common patterns; stop at the first that works.
-            if "$bin" --version >/dev/null 2>&1; then
-              "$bin" --version
-            elif "$bin" version >/dev/null 2>&1; then
-              "$bin" version
-            elif "$bin" -V >/dev/null 2>&1; then
-              "$bin" -V
-            elif "$bin" -v >/dev/null 2>&1; then
-              "$bin" -v
-            else
-              echo "version: (no supported version flag detected)"
-            fi
-            echo
-          }
-      
-          echo "=== Podman static binaries (/usr/local/bin) ==="
-          show_ver "podman (static)"       /usr/local/bin/podman
-          show_ver "crun (static)"         /usr/local/bin/crun
-          show_ver "runc (static)"         /usr/local/bin/runc
-          show_ver "fuse-overlayfs (static)" /usr/local/bin/fuse-overlayfs
-          show_ver "fusermount3 (static)"  /usr/local/bin/fusermount3
-          show_ver "pasta (static)"        /usr/local/bin/pasta
-          show_ver "pasta.avx2 (static)"   /usr/local/bin/pasta.avx2
-      
-          echo "=== System binaries (PATH) you care about ==="
-          show_ver "fuse-overlayfs (PATH)" fuse-overlayfs
-          show_ver "fusermount3 (PATH)"    fusermount3
-          show_ver "crun (PATH)"           crun
-          show_ver "runc (PATH)"           runc
-          show_ver "podman (PATH)"         podman
-          show_ver "slirp4netns (PATH)"    slirp4netns
-          show_ver "netavark (PATH)"       netavark
-          show_ver "aardvark-dns (PATH)"   aardvark-dns
-
-          echo "=== output for squashfuse ==="
-          squashfuse --version |& head -n 1 || true
-          echo
-
-          echo "=== Podman view of runtime / helpers (podman info) ==="
-          /usr/local/bin/podman info --debug || true
-
-
-      - name: Rootless Podman host prerequisites (uidmap + subuid/subgid + slirp4netns)
-        run: |
-          set -euxo pipefail
-
-          # 1) newuidmap/newgidmap (rootless prerequisite)
-          # 3) slirp4netns (common rootless networking helper)
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends uidmap slirp4netns
-
-          # 2) Ensure subordinate ID ranges exist for the runner user
-          if ! grep -qE '^runner:' /etc/subuid; then
-            echo "runner:100000:65536" | sudo tee -a /etc/subuid >/dev/null
-          fi
-          if ! grep -qE '^runner:' /etc/subgid; then
-            echo "runner:100000:65536" | sudo tee -a /etc/subgid >/dev/null
-          fi
-
-          # Sanity checks
-          command -v newuidmap
-          command -v newgidmap
-          podman info
-
-      - name: Save apt package archive cache
-        if: steps.restore-apt-archives.outputs.cache-hit != 'true' && github.event_name == 'push'
-        uses: actions/cache/save@v4
-        with:
-          path: .ci-cache/apt-archives/*.deb
-          key: ${{ steps.restore-apt-archives.outputs.cache-primary-key }}
-
       - name: Fix AppArmor profile for /usr/local/bin/podman
         run: |
           set -euxo pipefail
@@ -601,66 +412,33 @@ jobs:
             echo "No apparmor_parser or /etc/apparmor.d/podman found; skipping AppArmor adjustment."
           fi
 
-      - name: Write /etc/containers/containers.conf (global)
-        shell: bash
+      - name: Configure rootless container prerequisites
         run: |
-          set -euo pipefail
-          sudo mkdir -p /etc/containers
-          sudo tee /etc/containers/containers.conf >/dev/null <<'EOF'
-          [engine]
-          runtime = "crun"
-      
-          [engine.runtimes]
-          crun = ["/usr/local/bin/crun"]
-          EOF
+          set -euxo pipefail
 
-      - name: Create Podman module hpc
-        shell: bash
-        run: |
-          set -euo pipefail
-      
-          # Resolve actual installed binary paths
-          CRUN_PATH="$(command -v crun)"
-          CONMON_PATH="$(command -v conmon)"
-      
-          echo "Detected crun:   ${CRUN_PATH}"
-          echo "Detected conmon: ${CONMON_PATH}"
-      
-          # Create the modules directory Podman searches
-          sudo mkdir -p /etc/containers/containers.conf.modules
-      
-          # Write the 'hpc' module file
-          sudo tee /etc/containers/containers.conf.modules/hpc >/dev/null <<EOF
-          [containers]
-          ipcns = "host"
-          netns = "host"
-          pidns = "host"
-          utsns = "host"
-          #userns = "keep-id"
-          cgroupns = "host"
-          cgroups = "no-conmon"
-      
-          tz = "local"
-      
-          # Mounting /tmp as a temporary measure to propagate Slurm PMIx dirs until we have dedicated hook
-          mounts = ["type=bind,src=/tmp,dst=/tmp"]
-      
-          [engine]
-          runtime = "crun"
-          conmon_path = ["${CONMON_PATH}"]
-      
-          [engine.runtimes]
-          crun = ["${CRUN_PATH}"]
-          EOF
-      
-          # Sanity check: show what we wrote
-          sudo ls -l /etc/containers/containers.conf.modules/hpc
-          sudo sed -n '1,200p' /etc/containers/containers.conf.modules/hpc
+          if ! grep -qE '^runner:' /etc/subuid; then
+            echo "runner:100000:65536" | sudo tee -a /etc/subuid >/dev/null
+          fi
+          if ! grep -qE '^runner:' /etc/subgid; then
+            echo "runner:100000:65536" | sudo tee -a /etc/subgid >/dev/null
+          fi
 
+          test -e /dev/fuse
+          command -v newuidmap
+          command -v newgidmap
+          sarus-suite-check
+          podman info
 
+      - name: Save apt package archive cache
+        if: steps.restore-apt-archives.outputs.cache-hit != 'true' && github.event_name == 'push'
+        uses: actions/cache/save@v5
+        with:
+          path: .ci-cache/apt-archives/*.deb
+          key: ${{ steps.restore-apt-archives.outputs.cache-primary-key }}
 
       - name: Run organized Bats smoke tests
         shell: bash
         run: |
           set -euxo pipefail
           bats --print-output-on-failure test/smoke
+

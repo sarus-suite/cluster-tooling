@@ -7,7 +7,7 @@ load /usr/local/lib/bats-assert/load
 setup_file() {
   local repo_root
 
-  smoke_require_cmds_or_skip podman parallax parallax-mount-program mksquashfs srun
+  smoke_require_cmds_or_skip podman parallax parallax-mount-program mksquashfs
   repo_root="$(smoke_repo_root)"
   if [ ! -x "${repo_root}/dist/sarusctl" ]; then
     skip "missing required binary: dist/sarusctl"
@@ -20,6 +20,8 @@ teardown_file() {
 }
 
 @test "edf annotations set a custom mount-program logfile for srun" {
+  smoke_require_cmds_or_skip srun
+
   smoke_write_edf "busybox" "busybox:latest" "
 [annotations]
 com.sarus.parallax_mp_logfile = \"${ANNOTATION_LOGFILE}\"
@@ -43,13 +45,15 @@ com.sarus.parallax_mp_squashfuse_path = \"squashfuse_ll\"
 }
 
 @test "sarusctl run honors the mount-program logfile annotation" {
-  smoke_write_edf "busybox" "busybox:latest" "
+  # Use a distinct image from the preceding test so Podman must invoke the
+  # mount program instead of reusing the existing busybox mount.
+  smoke_write_edf "annotated-busybox" "busybox:1.36.1" "
 [annotations]
 com.sarus.parallax_mp_logfile = \"${ANNOTATION_LOGFILE}\"
 com.sarus.parallax_mp_squashfuse_path = \"squashfuse_ll\"
 "
 
-  run "$SARUSCTL_BINARY" --verbose run busybox true
+  run "$SARUSCTL_BINARY" --verbose run annotated-busybox true
   assert_success
 
   run stat -c '%s %n' "$ANNOTATION_LOGFILE"
