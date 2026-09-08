@@ -7,6 +7,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 use toml::Value;
 use toml::map::Map;
+use tracing::instrument;
 
 use crate::common::{expand_vars_hashmap, expand_vars_vec};
 use crate::error::{SarusError, SarusResult};
@@ -21,11 +22,11 @@ pub mod mount;
 
 pub use crate::common::expand_vars_string;
 pub use crate::config::{
-    Config, ConfigResolutionError, VarExpand, load_config, load_config_path, load_config_xdg,
-    config_search_paths, resolve_config_dir, update_config_by_user,
+    Config, ConfigResolutionError, VarExpand, config_search_paths, load_config, load_config_path,
+    load_config_xdg, resolve_config_dir, update_config_by_user,
 };
-pub use crate::hooks::{hook_run, ExecutedCommand};
-pub use crate::imagestore::{imagestore_keepalive};
+pub use crate::hooks::{ExecutedCommand, hook_run};
+pub use crate::imagestore::imagestore_keepalive;
 
 #[allow(dead_code)]
 #[derive(Derivative, Serialize, Deserialize, Clone, Default)]
@@ -42,7 +43,7 @@ pub struct RawEDF {
 }
 
 #[allow(dead_code)]
-#[derive(Derivative, Serialize, Deserialize, Clone)]
+#[derive(Derivative, Serialize, Deserialize, Clone, Debug)]
 pub struct EDF {
     #[serde(default = "get_default_annotations")]
     pub annotations: HashMap<String, String>,
@@ -136,7 +137,6 @@ impl RawEDF {
 
 impl EDF {
     pub fn to_toml_string(&self) -> SarusResult<String> {
-
         let toml = match toml::to_string(&self) {
             Ok(t) => t,
             Err(e) => {
@@ -585,13 +585,13 @@ pub fn render_from_search_paths(
     Ok(e)
 }
 
+#[instrument]
 pub fn render(path: String) -> SarusResult<EDF> {
     let sp = get_search_paths();
     render_from_search_paths(path, sp, &None)
 }
 
 pub fn get_edf_from_string(content: String) -> SarusResult<EDF> {
-
     let toml_value = match toml::from_str(content.as_str()) {
         Ok(v) => v,
         Err(e) => {

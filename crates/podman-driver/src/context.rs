@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+#[derive(Debug)]
 pub struct PodmanCtx {
     pub podman_path: PathBuf,
     pub module: Option<String>,
@@ -28,6 +29,7 @@ impl PodmanCtx {
     }
 }
 
+#[derive(Debug)]
 pub struct ContainerCtx {
     pub name: String,
     pub interactive: bool,

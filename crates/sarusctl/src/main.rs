@@ -3,6 +3,9 @@ use sarusctl::{
     AppDeps, CommandSpec, ExecOptions, FormatOutput, RealContainerRuntime, RealRasterOps,
     RealUserContext, execute_command_with_options, format_output,
 };
+use std::process::ExitCode;
+use tracing::{self, Level, span};
+use tracing_subscriber::{self, fmt::format::FmtSpan};
 
 const SARUSCTL_VERSION: &str = match option_env!("SARUSCTL_VERSION") {
     Some(version) => version,
@@ -73,7 +76,13 @@ impl From<Command> for CommandSpec {
     }
 }
 
-fn main() {
+fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_span_events(FmtSpan::CLOSE)
+        .init();
+    let _main_span = span!(Level::INFO, "main").entered();
+
+    let _cli_span = span!(Level::INFO, "args").entered();
     let args = Args::parse();
     let command: CommandSpec = args.command.into();
 
@@ -89,7 +98,9 @@ fn main() {
         verbose: args.verbose,
         parallax_imagestore: args.parallax_imagestore,
     };
+    drop(_cli_span);
 
+    // TODO: Evaluate if it's more elegant to return a Result
     match execute_command_with_options(command.clone(), &deps, options) {
         Ok(output) => {
             let formatted = format_output(command.output_format(), &output);
@@ -99,11 +110,11 @@ fn main() {
             if !formatted.stderr.is_empty() {
                 eprintln!("{}", formatted.stderr);
             }
-            std::process::exit(output.return_code);
+            ExitCode::from(output.return_code as u8)
         }
         Err(err) => {
             eprintln!("{err}");
-            std::process::exit(1);
+            ExitCode::from(1)
         }
     }
 }

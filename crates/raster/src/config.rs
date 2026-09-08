@@ -6,6 +6,7 @@ use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use tracing::instrument;
 
 const CONFIG_PATH: &str = "/etc/sarus-suite";
 const XDG_CONFIG_DIR: &str = "/etc/xdg";
@@ -51,7 +52,7 @@ pub struct RawConfigHooks {
     parallax_imagestore_create: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct Config {
     #[serde(default = "get_default_edf_system_search_path")]
     pub edf_system_search_path: String,
@@ -91,7 +92,7 @@ pub struct Config {
     pub tracking_tool: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct ConfigHooks {
     #[serde(default = "get_default_hook_parallax_imagestore_create")]
     pub parallax_imagestore_create: String,
@@ -180,7 +181,7 @@ fn get_default_hook_parallax_imagestore_create() -> String {
 fn get_default_hooks() -> ConfigHooks {
     return ConfigHooks {
         parallax_imagestore_create: get_default_hook_parallax_imagestore_create(),
-    }
+    };
 }
 
 impl From<RawConfig> for Config {
@@ -468,7 +469,11 @@ pub fn config_search_paths(
         .filter(|path| path.is_absolute())
         .collect::<Vec<_>>();
 
-    paths.extend(system_dirs.into_iter().map(|path| path.join(CONFIG_DIR_NAME)));
+    paths.extend(
+        system_dirs
+            .into_iter()
+            .map(|path| path.join(CONFIG_DIR_NAME)),
+    );
 
     let default_system_dir = PathBuf::from(XDG_CONFIG_DIR).join(CONFIG_DIR_NAME);
     if !paths.contains(&default_system_dir) {
@@ -544,7 +549,11 @@ fn resolve_config_dir_from_paths(paths: &[PathBuf]) -> Result<PathBuf, ConfigRes
     Err(ConfigResolutionError {
         reason: format!(
             "Cannot find config files in {}",
-            paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(" or ")
+            paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" or ")
         ),
     })
 }
@@ -612,12 +621,15 @@ fn load_raw_config_from_dir(
     Ok(rcfg)
 }
 
+#[instrument]
 pub fn update_config_by_user(config: &mut Config, edf: EDF) -> SarusResult<()> {
-    let parallax_imagestore_create = edf.annotations.get("com.sarus.hooks.parallax_imagestore_create");
+    let parallax_imagestore_create = edf
+        .annotations
+        .get("com.sarus.hooks.parallax_imagestore_create");
     if parallax_imagestore_create.is_some() {
         match parallax_imagestore_create.unwrap().as_str() {
-            "false" => { config.hooks.parallax_imagestore_create = String::from("") },
-            _ => {},
+            "false" => config.hooks.parallax_imagestore_create = String::from(""),
+            _ => {}
         }
     }
 
@@ -626,9 +638,12 @@ pub fn update_config_by_user(config: &mut Config, edf: EDF) -> SarusResult<()> {
         config.parallax_imagestore = parallax_imagestore.unwrap().to_string();
     }
 
-    let parallax_imagestore_keepalive = edf.annotations.get("com.sarus.parallax_imagestore_keepalive");
+    let parallax_imagestore_keepalive = edf
+        .annotations
+        .get("com.sarus.parallax_imagestore_keepalive");
     if parallax_imagestore_keepalive.is_some() {
-        config.parallax_imagestore_keepalive = match parallax_imagestore_keepalive.unwrap().as_str() {
+        config.parallax_imagestore_keepalive = match parallax_imagestore_keepalive.unwrap().as_str()
+        {
             "true" => true,
             "false" => false,
             _ => config.parallax_imagestore_keepalive,
@@ -724,8 +739,8 @@ pub fn remove_sarus_annotations(edf: &mut EDF) -> SarusResult<()> {
 mod tests {
     use super::*;
     use crate::tests::get_rendered_edf;
-    use std::ffi::OsStr;
     use serial_test::serial;
+    use std::ffi::OsStr;
 
     fn get_rendered_config(cfg_dir: &str) -> SarusResult<Config> {
         let cwd = std::env::current_dir()

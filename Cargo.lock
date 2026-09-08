@@ -1301,6 +1301,7 @@ dependencies = [
  "serial_test",
  "shellexpand",
  "toml",
+ "tracing",
  "walkdir",
 ]
 
@@ -1484,6 +1485,8 @@ dependencies = [
  "serde_json",
  "serial_test",
  "tempfile",
+ "tracing",
+ "tracing-subscriber",
  "users",
  "uuid",
  "yaml_serde",
