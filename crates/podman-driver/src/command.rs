@@ -29,24 +29,7 @@ pub(crate) fn base(podman_ctx: Option<&PodmanCtx>) -> Command {
 }
 
 pub(crate) fn run(podman_ctx: Option<&PodmanCtx>) -> Command {
-    let mut command = base(podman_ctx);
-    if let Some(ctx) = podman_ctx {
-        cli_opt(
-            &mut command,
-            "--module",
-            ctx.module.as_deref().map(OsStr::new),
-        );
-        cli_storage_opt(
-            &mut command,
-            "additionalimagestore",
-            ctx.ro_store.as_deref().map(Path::as_os_str),
-        );
-        cli_storage_opt(
-            &mut command,
-            "mount_program",
-            ctx.parallax_mount_program.as_deref().map(Path::as_os_str),
-        );
-    }
+    let mut command = base_with_hpc_options(podman_ctx);
     command.arg("run");
     command
 }
@@ -61,58 +44,33 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let mut command = run(podman_ctx);
-    cli_flag(&mut command, container_ctx.auto_remove, "--rm");
-    cli_flag(&mut command, container_ctx.detach, "--detach");
-    cli_flag(&mut command, container_ctx.interactive, "--interactive");
-    cli_flag(&mut command, container_ctx.tty, "--tty");
-    cli_flag(&mut command, !edf.writable, "--read-only");
-    cli_opt(
-        &mut command,
-        "--name",
-        Some(OsStr::new(&container_ctx.name)),
-    );
-    cli_opt(
-        &mut command,
-        "--user",
-        container_ctx.user.as_deref().map(OsStr::new),
-    );
-    cli_opt(
-        &mut command,
-        "--pidfile",
-        container_ctx.pidfile.as_deref().map(Path::as_os_str),
-    );
+    add_run_args_to_command(run(podman_ctx), edf, container_ctx, container_command)
+}
 
-    // TODO: support entrypoint redefinition as well
-    cli_flag(&mut command, !edf.entrypoint, "--entrypoint=");
+pub(crate) fn create(podman_ctx: Option<&PodmanCtx>) -> Command {
+    let mut command = base_with_hpc_options(podman_ctx);
+    command.arg("create");
+    command
+}
 
-    if !edf.workdir.is_empty() {
-        cli_opt(&mut command, "--workdir", Some(OsStr::new(&edf.workdir)));
-    }
-    for mount in &edf.mounts {
-        cli_opt(
-            &mut command,
-            "--volume",
-            Some(OsStr::new(&mount.to_volume_string())),
-        );
-    }
-    for device in &edf.devices {
-        cli_opt(&mut command, "--device", Some(OsStr::new(device)));
-    }
-    if container_ctx.set_env {
-        for (key, value) in &edf.env {
-            cli_kv(&mut command, "--env", OsStr::new(key), OsStr::new(value));
-        }
-    }
-    for (key, value) in &edf.annotations {
-        cli_kv(
-            &mut command,
-            "--annotation",
-            OsStr::new(key),
-            OsStr::new(value),
-        );
-    }
-    command.arg(&edf.image).args(container_command);
+pub(crate) fn create_from_edf<I, S>(
+    edf: &EDF,
+    podman_ctx: Option<&PodmanCtx>,
+    container_ctx: &ContainerCtx,
+    container_command: I,
+) -> Command
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    add_run_args_to_command(create(podman_ctx), edf, container_ctx, container_command)
+}
+
+pub(crate) fn start(container: &str, podman_ctx: Option<&PodmanCtx>, attach: bool) -> Command {
+    let mut command = base(podman_ctx);
+    command.arg("start");
+    cli_flag(&mut command, attach, "--attach");
+    command.arg(container);
     command
 }
 
@@ -298,6 +256,92 @@ fn base_with_read_only_store(podman_ctx: Option<&PodmanCtx>) -> Command {
             ctx.ro_store.as_deref().map(Path::as_os_str),
         );
     }
+    command
+}
+
+fn base_with_hpc_options(podman_ctx: Option<&PodmanCtx>) -> Command {
+    let mut command = base(podman_ctx);
+    if let Some(ctx) = podman_ctx {
+        cli_opt(
+            &mut command,
+            "--module",
+            ctx.module.as_deref().map(OsStr::new),
+        );
+        cli_storage_opt(
+            &mut command,
+            "additionalimagestore",
+            ctx.ro_store.as_deref().map(Path::as_os_str),
+        );
+        cli_storage_opt(
+            &mut command,
+            "mount_program",
+            ctx.parallax_mount_program.as_deref().map(Path::as_os_str),
+        );
+    }
+    command
+}
+
+fn add_run_args_to_command<I, S>(
+    mut command: Command,
+    edf: &EDF,
+    container_ctx: &ContainerCtx,
+    container_command: I,
+) -> Command
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    cli_flag(&mut command, container_ctx.auto_remove, "--rm");
+    cli_flag(&mut command, container_ctx.detach, "--detach");
+    cli_flag(&mut command, container_ctx.interactive, "--interactive");
+    cli_flag(&mut command, container_ctx.tty, "--tty");
+    cli_flag(&mut command, !edf.writable, "--read-only");
+    cli_opt(
+        &mut command,
+        "--name",
+        Some(OsStr::new(&container_ctx.name)),
+    );
+    cli_opt(
+        &mut command,
+        "--user",
+        container_ctx.user.as_deref().map(OsStr::new),
+    );
+    cli_opt(
+        &mut command,
+        "--pidfile",
+        container_ctx.pidfile.as_deref().map(Path::as_os_str),
+    );
+
+    // TODO: support entrypoint redefinition as well
+    cli_flag(&mut command, !edf.entrypoint, "--entrypoint=");
+
+    if !edf.workdir.is_empty() {
+        cli_opt(&mut command, "--workdir", Some(OsStr::new(&edf.workdir)));
+    }
+    for mount in &edf.mounts {
+        cli_opt(
+            &mut command,
+            "--volume",
+            Some(OsStr::new(&mount.to_volume_string())),
+        );
+    }
+    for device in &edf.devices {
+        cli_opt(&mut command, "--device", Some(OsStr::new(device)));
+    }
+    if container_ctx.set_env {
+        for (key, value) in &edf.env {
+            cli_kv(&mut command, "--env", OsStr::new(key), OsStr::new(value));
+        }
+    }
+    for (key, value) in &edf.annotations {
+        cli_kv(
+            &mut command,
+            "--annotation",
+            OsStr::new(key),
+            OsStr::new(value),
+        );
+    }
+    command.arg(&edf.image).args(container_command);
     command
 }
 

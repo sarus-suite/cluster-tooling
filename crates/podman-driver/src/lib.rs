@@ -69,6 +69,54 @@ where
     ))
 }
 
+pub fn create_from_edf<I, S>(
+    edf: &EDF,
+    podman_ctx: Option<&PodmanCtx>,
+    container_ctx: &ContainerCtx,
+    container_command: I,
+) -> Result<ExitStatus>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    execute::execute_passthrough(command::create_from_edf(
+        edf,
+        podman_ctx,
+        container_ctx,
+        container_command,
+    ))
+}
+
+pub fn create_from_edf_output<I, S>(
+    edf: &EDF,
+    podman_ctx: Option<&PodmanCtx>,
+    container_ctx: &ContainerCtx,
+    container_command: I,
+) -> Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    execute::execute_checked(command::create_from_edf(
+        edf,
+        podman_ctx,
+        container_ctx,
+        container_command,
+    ))
+}
+
+pub fn start(container: &str, podman_ctx: Option<&PodmanCtx>, attach: bool) -> Result<ExitStatus> {
+    execute::execute_passthrough(command::start(container, podman_ctx, attach))
+}
+
+pub fn start_output(
+    container: &str,
+    podman_ctx: Option<&PodmanCtx>,
+    attach: bool,
+) -> Result<Output> {
+    execute::execute_checked(command::start(container, podman_ctx, attach))
+}
+
 // TODO: naming inconsistency with run_* functions above:
 //       - run()  is passthrough, run_output() is captured
 //       - exec() is captured,    exec_interactive() is passthrough

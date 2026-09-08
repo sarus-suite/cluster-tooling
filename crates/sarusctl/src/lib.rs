@@ -185,6 +185,14 @@ pub trait ContainerRuntime {
         container_ctx: &ContainerCtx,
         container_cmd: &[String],
     ) -> Result<i32, AppError>;
+    fn create_from_edf(
+        &self,
+        edf: &EDF,
+        run_ctx: &PodmanCtx,
+        container_ctx: &ContainerCtx,
+        container_cmd: &[String],
+    ) -> Result<i32, AppError>;
+    fn start(&self, container: &str, run_ctx: &PodmanCtx) -> Result<i32, AppError>;
     fn exec_interactive(
         &self,
         container_name: &str,
@@ -330,6 +338,33 @@ impl ContainerRuntime for RealContainerRuntime {
         container_cmd: &[String],
     ) -> Result<i32, AppError> {
         pmd::run_from_edf(edf, Some(run_ctx), container_ctx, container_cmd)
+            .map_err(|e| AppError::Runtime(e.to_string()))?
+            .code()
+            .ok_or_else(|| {
+                AppError::Runtime(String::from("Container process terminated by signal"))
+            })
+    }
+
+    #[instrument]
+    fn create_from_edf(
+        &self,
+        edf: &EDF,
+        run_ctx: &PodmanCtx,
+        container_ctx: &ContainerCtx,
+        container_cmd: &[String],
+    ) -> Result<i32, AppError> {
+        pmd::create_from_edf(edf, Some(run_ctx), container_ctx, container_cmd)
+            .map_err(|e| AppError::Runtime(e.to_string()))?
+            .code()
+            .ok_or_else(|| {
+                AppError::Runtime(String::from("Container creation terminated by signal"))
+            })
+    }
+
+    #[instrument]
+    fn start(&self, container: &str, run_ctx: &PodmanCtx) -> Result<i32, AppError> {
+        let attach = true;
+        pmd::start(container, Some(run_ctx), attach)
             .map_err(|e| AppError::Runtime(e.to_string()))?
             .code()
             .ok_or_else(|| {
@@ -913,7 +948,7 @@ fn run_edf_command(
 
     let container_name = format!("sarusctl-{}", &run_id.simple().to_string()[..12]);
     let c_ctx = ContainerCtx {
-        name: container_name,
+        name: container_name.clone(),
         interactive: io::stdin().is_terminal(),
         tty: io::stdin().is_terminal() && io::stdout().is_terminal(),
         detach: false,
@@ -923,9 +958,10 @@ fn run_edf_command(
         user: Some(user.uid.to_string()),
     };
 
-    let run_result = deps
-        .runtime
-        .run_from_edf(edf, &run_ctx, &c_ctx, container_cmd);
+    deps.runtime
+        .create_from_edf(edf, &run_ctx, &c_ctx, container_cmd)?;
+
+    let run_result = deps.runtime.start(&container_name, &run_ctx);
     let container_cleanup_result = deps.runtime.cleanup_container(&c_ctx.name, &run_ctx);
     let cleanup_warning = finalize_podman_cleanup(&roots_base, &container_cleanup_result);
 
