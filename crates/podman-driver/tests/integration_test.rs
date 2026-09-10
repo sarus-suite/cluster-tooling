@@ -30,9 +30,7 @@ fn test_run_from_edf_output() {
         user: None,
     };
 
-    let edf_path = std::env::current_dir()
-        .unwrap()
-        .join("tests/edf/alpine.toml");
+    let edf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/edf/alpine.toml");
     let edf =
         raster::render(edf_path.to_string_lossy().into_owned()).expect("Failed to render EDF");
     let out = pmd::run_from_edf_output(&edf, None, &ctx, ["grep", "PRETTY", "/etc/os-release"])
@@ -57,9 +55,7 @@ fn test_run_from_edf_detached_output() -> Result<(), Box<dyn Error>> {
         user: None,
     };
 
-    let edf_path = std::env::current_dir()
-        .unwrap()
-        .join("tests/edf/alpine.toml");
+    let edf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/edf/alpine.toml");
     let edf =
         raster::render(edf_path.to_string_lossy().into_owned()).expect("Failed rendering EDF");
     let out = pmd::run_from_edf_output(&edf, None, &ctx, ["sleep", "3"])?;
@@ -151,9 +147,7 @@ fn test_get_container_pid_from_pidfile() -> Result<(), Box<dyn Error>> {
         user: None,
     };
 
-    let edf_path = std::env::current_dir()
-        .unwrap()
-        .join("tests/edf/alpine.toml");
+    let edf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/edf/alpine.toml");
     let edf =
         raster::render(edf_path.to_string_lossy().into_owned()).expect("Failed rendering EDF");
     let run = pmd::run_from_edf_output(&edf, None, &ctx, ["sleep", "5"])?;

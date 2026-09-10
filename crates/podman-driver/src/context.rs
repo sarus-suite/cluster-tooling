@@ -34,6 +34,7 @@ pub struct ContainerCtx {
     pub name: String,
     pub interactive: bool,
     pub tty: bool,
+    /// Detach the container when using `podman run`; ignored by `podman create`.
     pub detach: bool,
     /// Remove the container automatically when its process exits.
     pub auto_remove: bool,
