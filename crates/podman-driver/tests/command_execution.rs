@@ -3,7 +3,7 @@
 use raster::EDF;
 use sarus_suite_podman_driver::{
     ContainerCtx, DriverError, PodmanCtx, create, create_from_edf, create_from_edf_output,
-    create_output, start, start_output,
+    create_output, init, init_output, start, start_output,
 };
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -171,6 +171,91 @@ fn raw_create_wrappers_use_the_expected_execution_policy() {
     assert!(output.status.success());
     assert_eq!(output.stdout, b"stdout\xff");
     assert_eq!(output.stderr, b"stderr\xfe");
+}
+
+#[test]
+fn init_passthrough_preserves_success_and_failure_statuses() {
+    let successful = FakePodman::new();
+    let status = init("execution-test", Some(&successful.context))
+        .expect("successful passthrough init should execute");
+    assert!(status.success());
+    assert_eq!(successful.invocation_count(), 1);
+    assert_eq!(successful.recorded_environment(), b"podman-only");
+    assert_eq!(
+        successful.arguments()[10..],
+        [b"init".to_vec(), b"--".to_vec(), b"execution-test".to_vec()]
+    );
+
+    let mut failed = FakePodman::new();
+    configure_exit(&mut failed, 7);
+    let status = init("execution-test", Some(&failed.context))
+        .expect("failed passthrough init should preserve status");
+    assert_eq!(status.code(), Some(7));
+    assert_eq!(failed.invocation_count(), 1);
+}
+
+#[test]
+fn init_output_captures_successful_output() {
+    let successful = FakePodman::new();
+    let output = init_output("execution-test", Some(&successful.context))
+        .expect("successful captured init should execute");
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"stdout\xff");
+    assert_eq!(output.stderr, b"stderr\xfe");
+    assert_eq!(successful.invocation_count(), 1);
+    assert_eq!(successful.recorded_environment(), b"podman-only");
+    assert_eq!(
+        successful.arguments()[10..],
+        [b"init".to_vec(), b"--".to_vec(), b"execution-test".to_vec()]
+    );
+}
+
+#[test]
+fn init_output_reports_failure_with_diagnostics() {
+    let mut failed = FakePodman::new();
+    configure_exit(&mut failed, 7);
+    let error = init_output("execution-test", Some(&failed.context))
+        .expect_err("failed captured init should be rejected");
+    assert!(matches!(error, DriverError::CommandFailed { .. }));
+    assert_eq!(
+        error.exit_status().and_then(std::process::ExitStatus::code),
+        Some(7)
+    );
+    assert!(
+        error
+            .command()
+            .is_some_and(|command| command.contains(" init -- execution-test"))
+    );
+    assert_eq!(error.stdout(), Some("stdout�"));
+    assert_eq!(error.stderr(), Some("stderr�"));
+    assert_eq!(failed.invocation_count(), 1);
+}
+
+#[test]
+fn init_wrappers_report_missing_executable() {
+    let context = PodmanCtx {
+        podman_path: PathBuf::from("/definitely/not/a/podman-executable"),
+        module: None,
+        graphroot: None,
+        runroot: None,
+        parallax_mount_program: None,
+        ro_store: None,
+        podman_env: None,
+    };
+
+    let error = init("missing", Some(&context)).expect_err("passthrough spawn must fail");
+    assert!(matches!(error, DriverError::Spawn { .. }));
+    assert_eq!(
+        error.command(),
+        Some("/definitely/not/a/podman-executable init -- missing")
+    );
+
+    let error = init_output("missing", Some(&context)).expect_err("captured spawn must fail");
+    assert!(matches!(error, DriverError::Spawn { .. }));
+    assert_eq!(
+        error.command(),
+        Some("/definitely/not/a/podman-executable init -- missing")
+    );
 }
 
 #[test]

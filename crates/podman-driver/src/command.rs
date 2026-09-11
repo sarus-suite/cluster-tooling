@@ -78,6 +78,12 @@ where
     )
 }
 
+pub(crate) fn init(container: &str, podman_ctx: Option<&PodmanCtx>) -> Command {
+    let mut command = base_with_hpc_options(podman_ctx);
+    command.arg("init").arg("--").arg(container);
+    command
+}
+
 pub(crate) fn start(container: &str, podman_ctx: Option<&PodmanCtx>, attach: bool) -> Command {
     let mut command = base_with_hpc_options(podman_ctx);
     command.arg("start");
@@ -716,6 +722,53 @@ mod tests {
     }
 
     #[test]
+    fn init_cli_syntax_propagates_hpc_context_and_delimits_target() {
+        let mut p_ctx = podman_context();
+        p_ctx.podman_env = Some(HashMap::from([(
+            OsString::from("PODMAN_ONLY"),
+            OsString::from("init-value"),
+        )]));
+
+        let command = init("--looks-like-an-option", Some(&p_ctx));
+        assert_eq!(command.get_program(), OsStr::new("/usr/bin/podman"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![
+                OsStr::new("--root"),
+                OsStr::new("/dev/shm/sarus-test/graphroot"),
+                OsStr::new("--runroot"),
+                OsStr::new("/dev/shm/sarus-test/runroot"),
+                OsStr::new("--module"),
+                OsStr::new("hpc"),
+                OsStr::new("--storage-opt"),
+                OsStr::new("additionalimagestore=/scratch/user/parallax/store"),
+                OsStr::new("--storage-opt"),
+                OsStr::new("mount_program=/usr/local/sarus-test/parallax_mount_program"),
+                OsStr::new("init"),
+                OsStr::new("--"),
+                OsStr::new("--looks-like-an-option"),
+            ]
+        );
+        assert!(command.get_envs().any(|(key, value)| {
+            key == OsStr::new("PODMAN_ONLY") && value == Some(OsStr::new("init-value"))
+        }));
+    }
+
+    #[test]
+    fn init_without_context_preserves_one_target_argument() {
+        let command = init("container with spaces", None);
+        assert_eq!(command.get_program(), OsStr::new("podman"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![
+                OsStr::new("init"),
+                OsStr::new("--"),
+                OsStr::new("container with spaces"),
+            ]
+        );
+    }
+
+    #[test]
     fn partial_context_only_adds_values_that_are_present() {
         let context = PodmanCtx {
             podman_path: PathBuf::from("/usr/bin/podman"),
@@ -751,6 +804,18 @@ mod tests {
                 OsStr::new("--root"),
                 OsStr::new("/tmp/graphroot"),
                 OsStr::new("start"),
+                OsStr::new("--"),
+                OsStr::new("container")
+            ]
+        );
+        assert_eq!(
+            init("container", Some(&context))
+                .get_args()
+                .collect::<Vec<_>>(),
+            vec![
+                OsStr::new("--root"),
+                OsStr::new("/tmp/graphroot"),
+                OsStr::new("init"),
                 OsStr::new("--"),
                 OsStr::new("container")
             ]

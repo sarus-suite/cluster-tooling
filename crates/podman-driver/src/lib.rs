@@ -147,6 +147,26 @@ where
     ))
 }
 
+/// Initializes one existing container identified by name or ID without starting its workload.
+///
+/// The Podman client inherits the caller's process streams and returns its client status. A
+/// nonzero status is returned as `Ok(ExitStatus)`; a failure to spawn Podman is returned as an
+/// error. Passing `None` uses the default `podman` executable and context behavior.
+pub fn init(container: &str, podman_ctx: Option<&PodmanCtx>) -> Result<ExitStatus> {
+    execute::execute_passthrough(command::init(container, podman_ctx))
+}
+
+/// Initializes one existing container identified by name or ID without starting its workload,
+/// capturing Podman's output unparsed.
+///
+/// The captured output contains the original stdout and stderr bytes and the child receives no
+/// caller-provided stdin. A nonzero Podman status becomes [`DriverError::CommandFailed`], while a
+/// failure to spawn Podman is returned as an error. Passing `None` uses the default `podman`
+/// executable and context behavior. See [`init`] for the inherited-stream variant.
+pub fn init_output(container: &str, podman_ctx: Option<&PodmanCtx>) -> Result<Output> {
+    execute::execute_checked(command::init(container, podman_ctx))
+}
+
 /// Starts a previously created container and inherits the caller's process streams.
 ///
 /// With `attach = true`, Podman attaches using the interactive and TTY settings saved at create
