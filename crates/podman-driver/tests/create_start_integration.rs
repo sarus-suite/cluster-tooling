@@ -7,9 +7,9 @@ use sarus_suite_podman_driver::{
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::tempdir;
