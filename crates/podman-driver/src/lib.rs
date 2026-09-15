@@ -33,6 +33,38 @@ where
     execute::execute_captured(command)
 }
 
+/// Executes `podman create` with caller-supplied arguments and inherited streams.
+///
+/// The returned status is the status of the Podman client. A nonzero status is returned as
+/// `Ok(ExitStatus)` so callers can decide how to handle it, matching [`run`]. The create command
+/// prepares a container but does not start it; Podman normally writes the new container
+/// ID to stdout.
+pub fn create<I, S>(args: I, podman_ctx: Option<&PodmanCtx>) -> Result<ExitStatus>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut command = command::create(podman_ctx);
+    command.args(args);
+    execute::execute_passthrough(command)
+}
+
+/// Executes `podman create` with caller-supplied arguments and captured output.
+///
+/// The returned [`Output`] contains Podman's stdout and stderr, including the container ID on
+/// normal create commands. Because this uses [`std::process::Command::output`], the child receives
+/// no caller-provided stdin. Podman can omit the ID line for some logging configurations, and this
+/// API does not parse it. A nonzero Podman status is still returned as `Ok(Output)`.
+pub fn create_output<I, S>(args: I, podman_ctx: Option<&PodmanCtx>) -> Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut command = command::create(podman_ctx);
+    command.args(args);
+    execute::execute_captured(command)
+}
+
 pub fn run_from_edf<I, S>(
     edf: &EDF,
     podman_ctx: Option<&PodmanCtx>,
@@ -67,6 +99,94 @@ where
         container_ctx,
         container_command,
     ))
+}
+
+/// Creates a container from an EDF and inherits the caller's process streams.
+///
+/// Creation sets the EDF's command, mounts, environment, and interactive/TTY configuration but
+/// does not start the container. The returned status is the Podman client status and is not checked
+/// for success; use [`create_from_edf_output`] when a failed create should become [`DriverError`].
+pub fn create_from_edf<I, S>(
+    edf: &EDF,
+    podman_ctx: Option<&PodmanCtx>,
+    container_ctx: &ContainerCtx,
+    container_command: I,
+) -> Result<ExitStatus>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    execute::execute_passthrough(command::create_from_edf(
+        edf,
+        podman_ctx,
+        container_ctx,
+        container_command,
+    ))
+}
+
+/// Creates a container from an EDF while capturing Podman's output and checking its status.
+///
+/// This function does not provide caller stdin. The captured stdout normally contains the created
+/// container ID, although Podman logging configuration can suppress that line. The caller owns the
+/// subsequent [`start`] and cleanup operations.
+pub fn create_from_edf_output<I, S>(
+    edf: &EDF,
+    podman_ctx: Option<&PodmanCtx>,
+    container_ctx: &ContainerCtx,
+    container_command: I,
+) -> Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    execute::execute_checked(command::create_from_edf(
+        edf,
+        podman_ctx,
+        container_ctx,
+        container_command,
+    ))
+}
+
+/// Initializes one existing container identified by name or ID without starting its workload.
+///
+/// The Podman client inherits the caller's process streams and returns its client status. A
+/// nonzero status is returned as `Ok(ExitStatus)`; a failure to spawn Podman is returned as an
+/// error. Passing `None` uses the default `podman` executable and context behavior.
+pub fn init(container: &str, podman_ctx: Option<&PodmanCtx>) -> Result<ExitStatus> {
+    execute::execute_passthrough(command::init(container, podman_ctx))
+}
+
+/// Initializes one existing container identified by name or ID without starting its workload,
+/// capturing Podman's output unparsed.
+///
+/// The captured output contains the original stdout and stderr bytes and the child receives no
+/// caller-provided stdin. A nonzero Podman status becomes [`DriverError::CommandFailed`], while a
+/// failure to spawn Podman is returned as an error. Passing `None` uses the default `podman`
+/// executable and context behavior. See [`init`] for the inherited-stream variant.
+pub fn init_output(container: &str, podman_ctx: Option<&PodmanCtx>) -> Result<Output> {
+    execute::execute_checked(command::init(container, podman_ctx))
+}
+
+/// Starts a previously created container and inherits the caller's process streams.
+///
+/// With `attach = true`, Podman attaches using the interactive and TTY settings saved at create
+/// time and waits for the container, so the returned status represents the container's exit status.
+/// With `attach = false`, the command returns after requesting startup and its status does not
+/// represent the eventual container exit status. A nonzero status is still returned as `Ok`, while
+/// spawn failures are returned as `Err`.
+pub fn start(container: &str, podman_ctx: Option<&PodmanCtx>, attach: bool) -> Result<ExitStatus> {
+    execute::execute_passthrough(command::start(container, podman_ctx, attach))
+}
+
+/// Starts a previously created container while capturing output and checking the client status.
+///
+/// The `attach` behavior is the same as [`start`]. Captured execution provides no caller stdin.
+pub fn start_output(
+    container: &str,
+    podman_ctx: Option<&PodmanCtx>,
+    attach: bool,
+) -> Result<Output> {
+    execute::execute_checked(command::start(container, podman_ctx, attach))
 }
 
 // TODO: naming inconsistency with run_* functions above:

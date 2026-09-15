@@ -1,7 +1,8 @@
-# README
+# sarus-suite-podman-driver
 
-A tiny Rust driver that turns a single declarative file (EDF) into the specific `podman run` you needed to deploy it successfully.
-The crate composes all the moving pieces (image, mounts, devices, env, annotations, workdir, read-only mode) into one reliable command.
+A small Rust driver that turns an EDF (execution description file) into Podman commands. It
+composes the image, mounts, devices, environment, annotations, workdir, read-only mode, and
+container stream settings into one command without invoking a shell.
 
 ## Quick start
 To use this library, add it to your project Cargo.toml:

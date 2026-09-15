@@ -8,6 +8,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 use std::str;
 use std::time::{Duration, Instant};
 use tracing::instrument;
@@ -66,6 +67,16 @@ pub enum CommandSpec {
     Rmi {
         image: String,
     },
+    /// Run an EDF or YAML workload.
+    ///
+    /// For an EDF, `sarusctl` creates and initializes the named container,
+    /// then starts it attached only after both preparation operations exit
+    /// with status zero. Successful create/init stdout is suppressed.
+    /// Successful create/init stderr and both failed-operation streams remain
+    /// visible. Attached startup inherits the caller's streams. Cleanup
+    /// warnings are reported alongside the primary status and do not replace
+    /// it; if workload cleanup fails, the reported runtime root directory is
+    /// retained for diagnosis.
     Run {
         filepath: String,
         container_cmd: Vec<String>,
@@ -178,6 +189,9 @@ pub trait ContainerRuntime {
         image: &str,
         verbose: bool,
     ) -> Result<(), AppError>;
+    /// Legacy one-step EDF execution retained for trait compatibility.
+    /// EDF execution intentionally uses [`Self::create_from_edf`], [`Self::init`],
+    /// and [`Self::start`] instead.
     fn run_from_edf(
         &self,
         edf: &EDF,
@@ -185,6 +199,22 @@ pub trait ContainerRuntime {
         container_ctx: &ContainerCtx,
         container_cmd: &[String],
     ) -> Result<i32, AppError>;
+    /// Create an EDF container and return Podman's numeric exit status.
+    /// The real runtime suppresses successful create stdout, forwards
+    /// successful stderr, and forwards both streams when creation fails.
+    fn create_from_edf(
+        &self,
+        edf: &EDF,
+        run_ctx: &PodmanCtx,
+        container_ctx: &ContainerCtx,
+        container_cmd: &[String],
+    ) -> Result<i32, AppError>;
+    /// Initialize a previously created container without starting its workload.
+    /// Suppress successful stdout, forward successful stderr, and forward
+    /// both streams on failure. Return Podman's numeric exit status.
+    fn init(&self, container: &str, run_ctx: &PodmanCtx) -> Result<i32, AppError>;
+    /// Start a previously created container attached to the caller's streams.
+    fn start(&self, container: &str, run_ctx: &PodmanCtx) -> Result<i32, AppError>;
     fn exec_interactive(
         &self,
         container_name: &str,
@@ -235,6 +265,38 @@ impl RasterOps for RealRasterOps {
 
 #[derive(Debug)]
 pub struct RealContainerRuntime;
+
+fn forward_captured_stream(writer: &mut impl Write, output: &[u8]) {
+    if output.is_empty() {
+        return;
+    }
+
+    let _ = writer.write_all(output);
+    if !output.ends_with(b"\n") {
+        let _ = writer.write_all(b"\n");
+    }
+    let _ = writer.flush();
+}
+
+fn route_captured_preparation_output(
+    status: &ExitStatus,
+    captured_stdout: &[u8],
+    captured_stderr: &[u8],
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+    signal_message: &str,
+) -> Result<i32, AppError> {
+    if status.success() {
+        forward_captured_stream(stderr, captured_stderr);
+    } else {
+        forward_captured_stream(stdout, captured_stdout);
+        forward_captured_stream(stderr, captured_stderr);
+    }
+
+    status
+        .code()
+        .ok_or_else(|| AppError::Runtime(signal_message.to_owned()))
+}
 
 impl ContainerRuntime for RealContainerRuntime {
     fn default_graphroot(&self, ctx: &PodmanCtx) -> Result<PathBuf, AppError> {
@@ -330,6 +392,81 @@ impl ContainerRuntime for RealContainerRuntime {
         container_cmd: &[String],
     ) -> Result<i32, AppError> {
         pmd::run_from_edf(edf, Some(run_ctx), container_ctx, container_cmd)
+            .map_err(|e| AppError::Runtime(e.to_string()))?
+            .code()
+            .ok_or_else(|| {
+                AppError::Runtime(String::from("Container process terminated by signal"))
+            })
+    }
+
+    #[instrument]
+    fn create_from_edf(
+        &self,
+        edf: &EDF,
+        run_ctx: &PodmanCtx,
+        container_ctx: &ContainerCtx,
+        container_cmd: &[String],
+    ) -> Result<i32, AppError> {
+        let result = pmd::create_from_edf_output(edf, Some(run_ctx), container_ctx, container_cmd);
+        let mut stdout = io::stdout().lock();
+        let mut stderr = io::stderr().lock();
+
+        match result {
+            Ok(output) => route_captured_preparation_output(
+                &output.status,
+                &output.stdout,
+                &output.stderr,
+                &mut stdout,
+                &mut stderr,
+                "Container creation terminated by signal",
+            ),
+            Err(error) => match error.exit_status() {
+                Some(status) => route_captured_preparation_output(
+                    status,
+                    error.stdout().unwrap_or("").as_bytes(),
+                    error.stderr().unwrap_or("").as_bytes(),
+                    &mut stdout,
+                    &mut stderr,
+                    "Container creation terminated by signal",
+                ),
+                None => Err(AppError::Runtime(error.to_string())),
+            },
+        }
+    }
+
+    #[instrument]
+    fn init(&self, container: &str, run_ctx: &PodmanCtx) -> Result<i32, AppError> {
+        let result = pmd::init_output(container, Some(run_ctx));
+        let mut stdout = io::stdout().lock();
+        let mut stderr = io::stderr().lock();
+
+        match result {
+            Ok(output) => route_captured_preparation_output(
+                &output.status,
+                &output.stdout,
+                &output.stderr,
+                &mut stdout,
+                &mut stderr,
+                "Container initialization terminated by signal",
+            ),
+            Err(error) => match error.exit_status() {
+                Some(status) => route_captured_preparation_output(
+                    status,
+                    error.stdout().unwrap_or("").as_bytes(),
+                    error.stderr().unwrap_or("").as_bytes(),
+                    &mut stdout,
+                    &mut stderr,
+                    "Container initialization terminated by signal",
+                ),
+                None => Err(AppError::Runtime(error.to_string())),
+            },
+        }
+    }
+
+    #[instrument]
+    fn start(&self, container: &str, run_ctx: &PodmanCtx) -> Result<i32, AppError> {
+        let attach = true;
+        pmd::start(container, Some(run_ctx), attach)
             .map_err(|e| AppError::Runtime(e.to_string()))?
             .code()
             .ok_or_else(|| {
@@ -913,7 +1050,7 @@ fn run_edf_command(
 
     let container_name = format!("sarusctl-{}", &run_id.simple().to_string()[..12]);
     let c_ctx = ContainerCtx {
-        name: container_name,
+        name: container_name.clone(),
         interactive: io::stdin().is_terminal(),
         tty: io::stdin().is_terminal() && io::stdout().is_terminal(),
         detach: false,
@@ -923,14 +1060,27 @@ fn run_edf_command(
         user: Some(user.uid.to_string()),
     };
 
-    let run_result = deps
+    // Creation, initialization, and startup are intentionally separate
+    // operations for visibility and debugging. Failures at any lifecycle
+    // stage still flow through the common cleanup block below.
+    let execution_result = match deps
         .runtime
-        .run_from_edf(edf, &run_ctx, &c_ctx, container_cmd);
+        .create_from_edf(edf, &run_ctx, &c_ctx, container_cmd)
+    {
+        Ok(0) => match deps.runtime.init(&c_ctx.name, &run_ctx) {
+            Ok(0) => deps.runtime.start(&c_ctx.name, &run_ctx),
+            Ok(code) => Ok(code),
+            Err(error) => Err(error),
+        },
+        Ok(code) => Ok(code),
+        Err(error) => Err(error),
+    };
+
     let container_cleanup_result = deps.runtime.cleanup_container(&c_ctx.name, &run_ctx);
     let cleanup_warning = finalize_podman_cleanup(&roots_base, &container_cleanup_result);
 
-    // Append warning to error in case of run failure
-    output.return_code = match run_result {
+    // Append warning to error in case of failure during creation, initialization, or startup.
+    output.return_code = match execution_result {
         Ok(return_code) => return_code,
         Err(err) => {
             return Err(match cleanup_warning {
@@ -1059,7 +1209,8 @@ fn finalize_podman_cleanup(
     match podman_cleanup_result {
         Ok(()) => cleanup_podman_rootdirs(roots_base),
         Err(err) => Some(format!(
-            "Warning: Podman rootdirs retained because workload cleanup failed: {err}"
+            "Warning: Podman rootdirs retained at {} because workload cleanup failed: {err}",
+            roots_base.display()
         )),
     }
 }
@@ -1148,8 +1299,9 @@ mod tests {
     use serial_test::serial;
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
-    use std::ffi::OsStr;
+    use std::ffi::{OsStr, OsString};
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt;
     use tempfile::tempdir;
 
     fn sample_config() -> Config {
@@ -1180,6 +1332,349 @@ mod tests {
             workdir: String::new(),
             writable: true,
         }
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "test writer failure",
+            ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "test writer failure",
+            ))
+        }
+    }
+
+    #[test]
+    fn captured_create_success_discards_id_and_forwards_stderr() {
+        let status = ExitStatus::from_raw(0);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let result = route_captured_preparation_output(
+            &status,
+            b"container-id\n",
+            b"create warning",
+            &mut stdout,
+            &mut stderr,
+            "Container creation terminated by signal",
+        );
+
+        assert_eq!(result, Ok(0));
+        assert!(stdout.is_empty());
+        assert_eq!(stderr, b"create warning\n");
+    }
+
+    #[test]
+    fn captured_create_success_with_empty_stderr_emits_nothing() {
+        let status = ExitStatus::from_raw(0);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let result = route_captured_preparation_output(
+            &status,
+            b"container-id\n",
+            b"",
+            &mut stdout,
+            &mut stderr,
+            "Container creation terminated by signal",
+        );
+
+        assert_eq!(result, Ok(0));
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn captured_create_failure_forwards_diagnostics_and_preserves_status() {
+        let status = ExitStatus::from_raw(125 << 8);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let result = route_captured_preparation_output(
+            &status,
+            b"partial stdout",
+            b"create failed\n",
+            &mut stdout,
+            &mut stderr,
+            "Container creation terminated by signal",
+        );
+
+        assert_eq!(result, Ok(125));
+        assert_eq!(stdout, b"partial stdout\n");
+        assert_eq!(stderr, b"create failed\n");
+    }
+
+    #[test]
+    fn captured_create_signal_forwards_diagnostics_and_returns_error() {
+        let status = ExitStatus::from_raw(15);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let result = route_captured_preparation_output(
+            &status,
+            b"partial stdout",
+            b"terminated",
+            &mut stdout,
+            &mut stderr,
+            "Container creation terminated by signal",
+        );
+
+        assert_eq!(
+            result,
+            Err(AppError::Runtime(String::from(
+                "Container creation terminated by signal",
+            )))
+        );
+        assert_eq!(stdout, b"partial stdout\n");
+        assert_eq!(stderr, b"terminated\n");
+    }
+
+    #[test]
+    fn captured_create_ignores_output_writer_failures() {
+        let success = ExitStatus::from_raw(0);
+        let failure = ExitStatus::from_raw(125 << 8);
+        let signal = ExitStatus::from_raw(15);
+
+        assert_eq!(
+            route_captured_preparation_output(
+                &success,
+                b"container-id",
+                b"warning",
+                &mut FailingWriter,
+                &mut FailingWriter,
+                "Container creation terminated by signal",
+            ),
+            Ok(0)
+        );
+        assert_eq!(
+            route_captured_preparation_output(
+                &failure,
+                b"partial stdout",
+                b"failed",
+                &mut FailingWriter,
+                &mut FailingWriter,
+                "Container creation terminated by signal",
+            ),
+            Ok(125)
+        );
+        assert_eq!(
+            route_captured_preparation_output(
+                &signal,
+                b"partial stdout",
+                b"terminated",
+                &mut FailingWriter,
+                &mut FailingWriter,
+                "Container creation terminated by signal",
+            ),
+            Err(AppError::Runtime(String::from(
+                "Container creation terminated by signal",
+            )))
+        );
+    }
+
+    #[test]
+    fn captured_initialization_routes_streams_and_preserves_status() {
+        let success = ExitStatus::from_raw(0);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            route_captured_preparation_output(
+                &success,
+                b"init output",
+                b"init warning",
+                &mut stdout,
+                &mut stderr,
+                "Container initialization terminated by signal",
+            ),
+            Ok(0)
+        );
+        assert!(stdout.is_empty());
+        assert_eq!(stderr, b"init warning\n");
+
+        stdout.clear();
+        stderr.clear();
+        assert_eq!(
+            route_captured_preparation_output(
+                &success,
+                b"init output",
+                b"",
+                &mut stdout,
+                &mut stderr,
+                "Container initialization terminated by signal",
+            ),
+            Ok(0)
+        );
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+
+        let failure = ExitStatus::from_raw(125 << 8);
+        assert_eq!(
+            route_captured_preparation_output(
+                &failure,
+                b"partial stdout",
+                b"init failed",
+                &mut stdout,
+                &mut stderr,
+                "Container initialization terminated by signal",
+            ),
+            Ok(125)
+        );
+        assert_eq!(stdout, b"partial stdout\n");
+        assert_eq!(stderr, b"init failed\n");
+
+        let signal = ExitStatus::from_raw(15);
+        stdout.clear();
+        stderr.clear();
+        assert_eq!(
+            route_captured_preparation_output(
+                &signal,
+                b"signal stdout",
+                b"signal stderr",
+                &mut stdout,
+                &mut stderr,
+                "Container initialization terminated by signal",
+            ),
+            Err(AppError::Runtime(String::from(
+                "Container initialization terminated by signal",
+            )))
+        );
+        assert_eq!(stdout, b"signal stdout\n");
+        assert_eq!(stderr, b"signal stderr\n");
+    }
+
+    #[test]
+    fn captured_initialization_ignores_output_writer_failures() {
+        let failure = ExitStatus::from_raw(125 << 8);
+        let signal = ExitStatus::from_raw(15);
+        let message = "Container initialization terminated by signal";
+
+        assert_eq!(
+            route_captured_preparation_output(
+                &failure,
+                b"partial stdout",
+                b"failed",
+                &mut FailingWriter,
+                &mut FailingWriter,
+                message,
+            ),
+            Ok(125)
+        );
+        assert_eq!(
+            route_captured_preparation_output(
+                &signal,
+                b"partial stdout",
+                b"terminated",
+                &mut FailingWriter,
+                &mut FailingWriter,
+                message,
+            ),
+            Err(AppError::Runtime(message.to_owned()))
+        );
+    }
+
+    fn fake_init_podman_context(directory: &Path, exit_code: &str, signal: &str) -> PodmanCtx {
+        let script_path = directory.join("fake-podman");
+        fs::write(
+            &script_path,
+            r#"#!/bin/sh
+printf x >> "$SARUSCTL_INIT_COUNT"
+: > "$SARUSCTL_INIT_ARGS"
+for arg do
+    printf '%s\0' "$arg" >> "$SARUSCTL_INIT_ARGS"
+done
+if [ "${SARUSCTL_INIT_SIGNAL-}" = "TERM" ]; then
+    kill -TERM $$
+fi
+exit "${SARUSCTL_INIT_EXIT-0}"
+"#,
+        )
+        .expect("write fake Podman script");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("stat fake Podman script")
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&script_path, permissions).expect("make fake Podman executable");
+
+        PodmanCtx {
+            podman_path: script_path,
+            module: None,
+            graphroot: None,
+            runroot: None,
+            parallax_mount_program: None,
+            ro_store: None,
+            podman_env: None,
+        }
+        .with_env(
+            "SARUSCTL_INIT_COUNT",
+            directory.join("init-count").into_os_string(),
+        )
+        .with_env(
+            "SARUSCTL_INIT_ARGS",
+            directory.join("init-args").into_os_string(),
+        )
+        .with_env("SARUSCTL_INIT_EXIT", exit_code)
+        .with_env("SARUSCTL_INIT_SIGNAL", signal)
+    }
+
+    fn fake_init_arguments(directory: &Path) -> Vec<Vec<u8>> {
+        fs::read(directory.join("init-args"))
+            .expect("fake Podman did not record arguments")
+            .split(|byte| *byte == 0)
+            .filter(|argument| !argument.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn real_runtime_init_invokes_driver_once_and_translates_results() {
+        let target = "target with spaces";
+        for (exit_code, signal, expected) in [
+            ("0", "", Ok(0)),
+            ("125", "", Ok(125)),
+            (
+                "0",
+                "TERM",
+                Err(AppError::Runtime(String::from(
+                    "Container initialization terminated by signal",
+                ))),
+            ),
+        ] {
+            let directory = tempdir().expect("create fake Podman fixture");
+            let context = fake_init_podman_context(directory.path(), exit_code, signal);
+            assert_eq!(RealContainerRuntime.init(target, &context), expected);
+            assert_eq!(fs::read(directory.path().join("init-count")).unwrap(), b"x");
+            assert_eq!(
+                fake_init_arguments(directory.path()),
+                [b"init".to_vec(), b"--".to_vec(), target.as_bytes().to_vec()]
+            );
+        }
+    }
+
+    #[test]
+    fn real_runtime_init_reports_missing_executable() {
+        let directory = tempdir().expect("create missing executable fixture");
+        let context = PodmanCtx {
+            podman_path: directory.path().join("missing-podman"),
+            module: None,
+            graphroot: None,
+            runroot: None,
+            parallax_mount_program: None,
+            ro_store: None,
+            podman_env: None,
+        };
+
+        let error = RealContainerRuntime
+            .init("missing", &context)
+            .expect_err("missing executable should fail");
+        assert!(matches!(error, AppError::Runtime(_)));
     }
 
     struct FakeRasterOps {
@@ -1276,10 +1771,93 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct PodmanContextSnapshot {
+        podman_path: PathBuf,
+        module: Option<String>,
+        graphroot: Option<PathBuf>,
+        runroot: Option<PathBuf>,
+        parallax_mount_program: Option<PathBuf>,
+        ro_store: Option<PathBuf>,
+        podman_env: Option<HashMap<OsString, OsString>>,
+    }
+
+    impl From<&PodmanCtx> for PodmanContextSnapshot {
+        fn from(ctx: &PodmanCtx) -> Self {
+            Self {
+                podman_path: ctx.podman_path.clone(),
+                module: ctx.module.clone(),
+                graphroot: ctx.graphroot.clone(),
+                runroot: ctx.runroot.clone(),
+                parallax_mount_program: ctx.parallax_mount_program.clone(),
+                ro_store: ctx.ro_store.clone(),
+                podman_env: ctx.podman_env.clone(),
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct ContainerContextSnapshot {
+        name: String,
+        user: Option<String>,
+        interactive: bool,
+        tty: bool,
+        detach: bool,
+        auto_remove: bool,
+        set_env: bool,
+        pidfile: Option<PathBuf>,
+    }
+
+    impl From<&ContainerCtx> for ContainerContextSnapshot {
+        fn from(ctx: &ContainerCtx) -> Self {
+            Self {
+                name: ctx.name.clone(),
+                user: ctx.user.clone(),
+                interactive: ctx.interactive,
+                tty: ctx.tty,
+                detach: ctx.detach,
+                auto_remove: ctx.auto_remove,
+                set_env: ctx.set_env,
+                pidfile: ctx.pidfile.clone(),
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct CreateSnapshot {
+        podman: PodmanContextSnapshot,
+        container: ContainerContextSnapshot,
+        image: String,
+        command: Vec<String>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct StartSnapshot {
+        container: String,
+        podman: PodmanContextSnapshot,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct InitSnapshot {
+        container: String,
+        podman: PodmanContextSnapshot,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct CleanupSnapshot {
+        container: String,
+        podman: PodmanContextSnapshot,
+    }
+
     struct FakeContainerRuntime {
         calls: RefCell<Vec<String>>,
         create_run_rootdirs: bool,
         created_run_rootdirs: RefCell<Vec<PathBuf>>,
+        created_context_roots: RefCell<Vec<PathBuf>>,
+        create_snapshots: RefCell<Vec<CreateSnapshot>>,
+        init_snapshots: RefCell<Vec<InitSnapshot>>,
+        start_snapshots: RefCell<Vec<StartSnapshot>>,
+        cleanup_snapshots: RefCell<Vec<CleanupSnapshot>>,
         pull_verbose: RefCell<Vec<bool>>,
         migrate_verbose: RefCell<Vec<bool>>,
         rmi_verbose: RefCell<Vec<bool>>,
@@ -1290,6 +1868,9 @@ mod tests {
         pull_results: RefCell<HashMap<String, Result<(), AppError>>>,
         migrate_results: RefCell<HashMap<String, Result<(), AppError>>>,
         rmi_results: RefCell<HashMap<String, Result<(), AppError>>>,
+        create_result: Result<i32, AppError>,
+        init_result: Result<i32, AppError>,
+        start_result: Result<i32, AppError>,
         run_result: Result<i32, AppError>,
         kube_play_result: Result<(), AppError>,
         kube_down_result: Result<(), AppError>,
@@ -1302,6 +1883,11 @@ mod tests {
                 calls: RefCell::new(Vec::new()),
                 create_run_rootdirs: false,
                 created_run_rootdirs: RefCell::new(Vec::new()),
+                created_context_roots: RefCell::new(Vec::new()),
+                create_snapshots: RefCell::new(Vec::new()),
+                init_snapshots: RefCell::new(Vec::new()),
+                start_snapshots: RefCell::new(Vec::new()),
+                cleanup_snapshots: RefCell::new(Vec::new()),
                 pull_verbose: RefCell::new(Vec::new()),
                 migrate_verbose: RefCell::new(Vec::new()),
                 rmi_verbose: RefCell::new(Vec::new()),
@@ -1312,6 +1898,9 @@ mod tests {
                 migrate_results: RefCell::new(HashMap::new()),
                 rmi_results: RefCell::new(HashMap::new()),
                 parallax_exist: RefCell::new(HashMap::new()),
+                create_result: Ok(0),
+                init_result: Ok(0),
+                start_result: Ok(0),
                 run_result: Ok(0),
                 kube_play_result: Ok(()),
                 kube_down_result: Ok(()),
@@ -1341,8 +1930,36 @@ mod tests {
                 .push(roots_base.to_path_buf());
         }
 
+        fn record_context_root(&self, run_ctx: &PodmanCtx) {
+            let graphroot = run_ctx.graphroot.as_ref().expect("missing graphroot");
+            let roots_base = graphroot.parent().expect("graphroot has no parent");
+            self.created_context_roots
+                .borrow_mut()
+                .push(roots_base.to_path_buf());
+        }
+
         fn created_run_rootdirs(&self) -> Vec<PathBuf> {
             self.created_run_rootdirs.borrow().clone()
+        }
+
+        fn created_context_roots(&self) -> Vec<PathBuf> {
+            self.created_context_roots.borrow().clone()
+        }
+
+        fn create_snapshots(&self) -> Vec<CreateSnapshot> {
+            self.create_snapshots.borrow().clone()
+        }
+
+        fn init_snapshots(&self) -> Vec<InitSnapshot> {
+            self.init_snapshots.borrow().clone()
+        }
+
+        fn start_snapshots(&self) -> Vec<StartSnapshot> {
+            self.start_snapshots.borrow().clone()
+        }
+
+        fn cleanup_snapshots(&self) -> Vec<CleanupSnapshot> {
+            self.cleanup_snapshots.borrow().clone()
         }
 
         fn push_image_exists(&self, image: &str, values: Vec<bool>) {
@@ -1461,6 +2078,21 @@ mod tests {
             container_cmd: &[String],
         ) -> Result<i32, AppError> {
             self.create_and_record_run_rootdirs(run_ctx);
+            self.calls
+                .borrow_mut()
+                .push(format!("run:{}:{container_cmd:?}", edf.image));
+            self.run_result.clone()
+        }
+
+        fn create_from_edf(
+            &self,
+            edf: &EDF,
+            run_ctx: &PodmanCtx,
+            container_ctx: &ContainerCtx,
+            container_cmd: &[String],
+        ) -> Result<i32, AppError> {
+            self.create_and_record_run_rootdirs(run_ctx);
+            self.record_context_root(run_ctx);
             self.run_logfiles.borrow_mut().push(
                 run_ctx
                     .podman_env
@@ -1468,10 +2100,34 @@ mod tests {
                     .and_then(|env| env.get(OsStr::new("PARALLAX_MP_LOGFILE")))
                     .map(|path| path.to_string_lossy().into_owned()),
             );
+            self.create_snapshots.borrow_mut().push(CreateSnapshot {
+                podman: PodmanContextSnapshot::from(run_ctx),
+                container: ContainerContextSnapshot::from(container_ctx),
+                image: edf.image.clone(),
+                command: container_cmd.to_vec(),
+            });
             self.calls
                 .borrow_mut()
-                .push(format!("run:{}:{container_cmd:?}", edf.image));
-            self.run_result.clone()
+                .push(format!("create:{}:{container_cmd:?}", edf.image));
+            self.create_result.clone()
+        }
+
+        fn init(&self, container: &str, run_ctx: &PodmanCtx) -> Result<i32, AppError> {
+            self.init_snapshots.borrow_mut().push(InitSnapshot {
+                container: container.to_string(),
+                podman: PodmanContextSnapshot::from(run_ctx),
+            });
+            self.calls.borrow_mut().push(format!("init:{container}"));
+            self.init_result.clone()
+        }
+
+        fn start(&self, container: &str, run_ctx: &PodmanCtx) -> Result<i32, AppError> {
+            self.start_snapshots.borrow_mut().push(StartSnapshot {
+                container: container.to_string(),
+                podman: PodmanContextSnapshot::from(run_ctx),
+            });
+            self.calls.borrow_mut().push(format!("start:{container}"));
+            self.start_result.clone()
         }
 
         fn exec_interactive(
@@ -1508,9 +2164,13 @@ mod tests {
 
         fn cleanup_container(
             &self,
-            _container_name: &str,
-            _run_ctx: &PodmanCtx,
+            container_name: &str,
+            run_ctx: &PodmanCtx,
         ) -> Result<(), AppError> {
+            self.cleanup_snapshots.borrow_mut().push(CleanupSnapshot {
+                container: container_name.to_string(),
+                podman: PodmanContextSnapshot::from(run_ctx),
+            });
             self.calls
                 .borrow_mut()
                 .push(String::from("cleanup_container"));
@@ -2170,14 +2830,13 @@ spec:
         .unwrap();
 
         assert_eq!(output.return_code, 0);
-        assert_eq!(
-            runtime.calls(),
-            vec![
-                String::from("parallax_exist:alpine:3.22"),
-                String::from("run:alpine:3.22:[\"sh\"]"),
-                String::from("cleanup_container")
-            ]
-        );
+        let calls = runtime.calls();
+        assert_eq!(calls.len(), 5);
+        assert_eq!(calls[0], "parallax_exist:alpine:3.22");
+        assert_eq!(calls[1], "create:alpine:3.22:[\"sh\"]");
+        assert!(calls[2].starts_with("init:sarusctl-"));
+        assert!(calls[3].starts_with("start:sarusctl-"));
+        assert_eq!(calls[4], "cleanup_container");
     }
 
     #[test]
@@ -2241,19 +2900,23 @@ spec:
         assert_eq!(output, AppOutput::success(""));
         assert_eq!(runtime.pull_verbose(), vec![false]);
         assert_eq!(runtime.migrate_verbose(), vec![false]);
+        let calls = runtime.calls();
+        assert_eq!(calls.len(), 10);
         assert_eq!(
-            runtime.calls(),
-            vec![
+            &calls[..7],
+            &[
                 String::from("parallax_exist:alpine:3.22"),
                 String::from("pull:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
                 String::from("default_graphroot"),
                 String::from("migrate:alpine:3.22"),
                 String::from("parallax_exist:alpine:3.22"),
-                String::from("run:alpine:3.22:[\"sh\"]"),
-                String::from("cleanup_container")
+                String::from("create:alpine:3.22:[\"sh\"]"),
             ]
         );
+        assert!(calls[7].starts_with("init:sarusctl-"));
+        assert!(calls[8].starts_with("start:sarusctl-"));
+        assert_eq!(calls[9], "cleanup_container");
     }
 
     fn unique_test_user() -> CurrentUser {
@@ -2261,6 +2924,56 @@ spec:
             uid: Uuid::new_v4().as_u128() as u32,
             gid: 1,
         }
+    }
+
+    fn execute_sample_edf(
+        runtime: &FakeContainerRuntime,
+        edf: EDF,
+        container_cmd: Vec<String>,
+        user: CurrentUser,
+    ) -> Result<AppOutput, AppError> {
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster
+            .render_results
+            .insert(String::from("job.edf"), Ok(edf.clone()));
+        runtime.push_parallax_exist(&edf.image, vec![true]);
+        execute_command(
+            CommandSpec::Run {
+                filepath: String::from("job.edf"),
+                container_cmd,
+            },
+            &mock_deps(&raster, runtime, &FakeUserContext { user }),
+        )
+    }
+
+    fn assert_edf_lifecycle_calls(
+        runtime: &FakeContainerRuntime,
+        image: &str,
+        command: &[String],
+        expect_init: bool,
+        expect_start: bool,
+    ) {
+        let calls = runtime.calls();
+        let container = runtime
+            .create_snapshots()
+            .first()
+            .expect("missing create snapshot")
+            .container
+            .name
+            .clone();
+        let mut expected = vec![
+            format!("parallax_exist:{image}"),
+            format!("create:{image}:{command:?}"),
+        ];
+        if expect_init {
+            expected.push(format!("init:{container}"));
+        }
+        if expect_start {
+            expected.push(format!("start:{container}"));
+        }
+        expected.push(String::from("cleanup_container"));
+        assert_eq!(calls, expected);
+        assert!(calls.iter().all(|call| !call.starts_with("run:")));
     }
 
     fn assert_rootdirs_removed(roots_base: &Path) {
@@ -2306,7 +3019,7 @@ spec:
             .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
         let mut runtime = FakeContainerRuntime::new();
         runtime.push_parallax_exist("alpine:3.22", vec![true]);
-        runtime.run_result = Ok(127);
+        runtime.start_result = Ok(127);
 
         let output = execute_command(
             CommandSpec::Run {
@@ -2364,7 +3077,510 @@ spec:
         let rootdirs = runtime.created_run_rootdirs();
         assert_eq!(rootdirs.len(), 1);
         assert!(rootdirs[0].exists());
+        assert!(output.stderr.contains(&rootdirs[0].display().to_string()));
         fs::remove_dir_all(&rootdirs[0]).unwrap();
+    }
+
+    #[test]
+    fn run_edf_lifecycle_outcome_matrix_preserves_primary_result() {
+        struct Case {
+            label: &'static str,
+            create: Result<i32, AppError>,
+            init: Result<i32, AppError>,
+            start: Result<i32, AppError>,
+            expected_code: Option<i32>,
+            expected_error: Option<&'static str>,
+            expect_init: bool,
+            expect_start: bool,
+        }
+
+        let cases = [
+            Case {
+                label: "create-init-start-success",
+                create: Ok(0),
+                init: Ok(0),
+                start: Ok(0),
+                expected_code: Some(0),
+                expected_error: None,
+                expect_init: true,
+                expect_start: true,
+            },
+            Case {
+                label: "attached-start-nonzero",
+                create: Ok(0),
+                init: Ok(0),
+                start: Ok(7),
+                expected_code: Some(7),
+                expected_error: None,
+                expect_init: true,
+                expect_start: true,
+            },
+            Case {
+                label: "attached-start-command-not-found",
+                create: Ok(0),
+                init: Ok(0),
+                start: Ok(127),
+                expected_code: Some(127),
+                expected_error: None,
+                expect_init: true,
+                expect_start: true,
+            },
+            Case {
+                label: "creation-nonzero",
+                create: Ok(125),
+                init: Err(AppError::Runtime(String::from("unused init stage"))),
+                start: Err(AppError::Runtime(String::from("unused start stage"))),
+                expected_code: Some(125),
+                expected_error: None,
+                expect_init: false,
+                expect_start: false,
+            },
+            Case {
+                label: "creation-error",
+                create: Err(AppError::Runtime(String::from("creation failed"))),
+                init: Err(AppError::Runtime(String::from("unused init stage"))),
+                start: Err(AppError::Runtime(String::from("unused start stage"))),
+                expected_code: None,
+                expected_error: Some("creation failed"),
+                expect_init: false,
+                expect_start: false,
+            },
+            Case {
+                label: "initialization-nonzero",
+                create: Ok(0),
+                init: Ok(125),
+                start: Err(AppError::Runtime(String::from("unused start stage"))),
+                expected_code: Some(125),
+                expected_error: None,
+                expect_init: true,
+                expect_start: false,
+            },
+            Case {
+                label: "initialization-error",
+                create: Ok(0),
+                init: Err(AppError::Runtime(String::from("initialization failed"))),
+                start: Err(AppError::Runtime(String::from("unused start stage"))),
+                expected_code: None,
+                expected_error: Some("initialization failed"),
+                expect_init: true,
+                expect_start: false,
+            },
+            Case {
+                label: "startup-error",
+                create: Ok(0),
+                init: Ok(0),
+                start: Err(AppError::Runtime(String::from("startup failed"))),
+                expected_code: None,
+                expected_error: Some("startup failed"),
+                expect_init: true,
+                expect_start: true,
+            },
+        ];
+
+        for cleanup_fails in [false, true] {
+            for case in &cases {
+                let mut runtime = FakeContainerRuntime::new();
+                runtime.create_result = case.create.clone();
+                runtime.init_result = case.init.clone();
+                runtime.start_result = case.start.clone();
+                runtime.run_result = Err(AppError::Runtime(String::from(
+                    "legacy run must not be called",
+                )));
+                if cleanup_fails {
+                    runtime.cleanup_container_result =
+                        Err(AppError::Runtime(String::from("cleanup failed")));
+                }
+
+                let command = vec![String::from("echo"), String::new()];
+                let result = execute_sample_edf(
+                    &runtime,
+                    sample_edf("alpine:3.22"),
+                    command.clone(),
+                    unique_test_user(),
+                );
+
+                assert_edf_lifecycle_calls(
+                    &runtime,
+                    "alpine:3.22",
+                    &command,
+                    case.expect_init,
+                    case.expect_start,
+                );
+                assert_eq!(
+                    runtime.create_snapshots().len(),
+                    1,
+                    "{}: create count",
+                    case.label
+                );
+                assert_eq!(
+                    runtime.init_snapshots().len(),
+                    usize::from(case.expect_init),
+                    "{}: init count",
+                    case.label
+                );
+                assert_eq!(
+                    runtime.start_snapshots().len(),
+                    usize::from(case.expect_start),
+                    "{}: start count",
+                    case.label
+                );
+                assert_eq!(
+                    runtime.cleanup_snapshots().len(),
+                    1,
+                    "{}: cleanup count",
+                    case.label
+                );
+                let roots = runtime.created_context_roots();
+                assert_eq!(roots.len(), 1, "{}: missing allocated root", case.label);
+                let roots_base = &roots[0];
+
+                match (case.expected_code, case.expected_error) {
+                    (Some(code), None) => {
+                        let output = result.unwrap();
+                        assert_eq!(output.return_code, code, "{}", case.label);
+                        assert!(
+                            output.stdout.is_empty(),
+                            "{}: unexpected stdout",
+                            case.label
+                        );
+                        assert_eq!(
+                            output.stderr.contains("cleanup failed"),
+                            cleanup_fails,
+                            "{}: cleanup warning mismatch",
+                            case.label
+                        );
+                        if cleanup_fails {
+                            assert!(output.stderr.contains(&roots_base.display().to_string()));
+                        } else {
+                            assert!(output.stderr.is_empty(), "{}: {output:?}", case.label);
+                        }
+                    }
+                    (None, Some(error)) => {
+                        let err = result.unwrap_err();
+                        assert!(err.to_string().starts_with(error), "{}: {err}", case.label);
+                        if cleanup_fails {
+                            let diagnostic = err.to_string();
+                            assert!(
+                                diagnostic.contains("cleanup failed"),
+                                "{}: {diagnostic}",
+                                case.label
+                            );
+                            assert!(diagnostic.contains(&roots_base.display().to_string()));
+                            assert!(
+                                diagnostic.find(error).unwrap()
+                                    < diagnostic.find("Warning:").unwrap()
+                            );
+                        }
+                    }
+                    _ => panic!("invalid lifecycle test case {}", case.label),
+                }
+
+                if cleanup_fails {
+                    assert!(
+                        roots_base.exists(),
+                        "{}: cleanup failure removed roots",
+                        case.label
+                    );
+                    fs::remove_dir_all(roots_base).unwrap();
+                } else {
+                    assert!(
+                        !roots_base.exists(),
+                        "{}: cleanup success retained roots",
+                        case.label
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn run_edf_creation_error_finalizes_empty_allocated_instance() {
+        let mut runtime = FakeContainerRuntime::new();
+        runtime.create_result = Err(AppError::Runtime(String::from("spawn failed")));
+
+        let result = execute_sample_edf(
+            &runtime,
+            sample_edf("alpine:3.22"),
+            vec![String::from("payload")],
+            unique_test_user(),
+        );
+
+        assert_eq!(result, Err(AppError::Runtime(String::from("spawn failed"))));
+        assert_edf_lifecycle_calls(
+            &runtime,
+            "alpine:3.22",
+            &[String::from("payload")],
+            false,
+            false,
+        );
+        let roots = runtime.created_context_roots();
+        assert_eq!(roots.len(), 1);
+        assert!(!roots[0].exists(), "empty instance was not finalized");
+    }
+
+    #[test]
+    fn run_edf_creation_error_removes_storage_only_after_workload_cleanup() {
+        for cleanup_fails in [false, true] {
+            let mut runtime = FakeContainerRuntime::new().with_run_rootdir_creation();
+            runtime.create_result = Err(AppError::Runtime(String::from("create failed")));
+            if cleanup_fails {
+                runtime.cleanup_container_result =
+                    Err(AppError::Runtime(String::from("container is active")));
+            }
+
+            let result = execute_sample_edf(
+                &runtime,
+                sample_edf("alpine:3.22"),
+                vec![String::from("payload")],
+                unique_test_user(),
+            );
+            let roots = runtime.created_run_rootdirs();
+            assert_eq!(roots.len(), 1);
+            if cleanup_fails {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("create failed"));
+                assert!(error.to_string().contains("container is active"));
+                assert!(error.to_string().contains(&roots[0].display().to_string()));
+                assert!(roots[0].exists());
+                fs::remove_dir_all(&roots[0]).unwrap();
+            } else {
+                assert_eq!(
+                    result,
+                    Err(AppError::Runtime(String::from("create failed")))
+                );
+                assert!(!roots[0].exists());
+            }
+        }
+    }
+
+    #[test]
+    fn run_edf_initialization_error_removes_storage_only_after_workload_cleanup() {
+        for cleanup_fails in [false, true] {
+            let mut runtime = FakeContainerRuntime::new().with_run_rootdir_creation();
+            runtime.init_result = Err(AppError::Runtime(String::from("init failed")));
+            if cleanup_fails {
+                runtime.cleanup_container_result =
+                    Err(AppError::Runtime(String::from("container is active")));
+            }
+
+            let result = execute_sample_edf(
+                &runtime,
+                sample_edf("alpine:3.22"),
+                vec![String::from("payload")],
+                unique_test_user(),
+            );
+            assert_edf_lifecycle_calls(
+                &runtime,
+                "alpine:3.22",
+                &[String::from("payload")],
+                true,
+                false,
+            );
+            assert_eq!(runtime.init_snapshots().len(), 1);
+            assert!(runtime.start_snapshots().is_empty());
+            assert_eq!(runtime.cleanup_snapshots().len(), 1);
+            let roots = runtime.created_run_rootdirs();
+            assert_eq!(roots.len(), 1);
+            if cleanup_fails {
+                let error = result.unwrap_err();
+                assert!(error.to_string().starts_with("init failed"));
+                assert!(error.to_string().contains("container is active"));
+                assert!(error.to_string().contains(&roots[0].display().to_string()));
+                assert!(roots[0].exists());
+                fs::remove_dir_all(&roots[0]).unwrap();
+            } else {
+                assert_eq!(result, Err(AppError::Runtime(String::from("init failed"))));
+                assert!(!roots[0].exists());
+            }
+        }
+    }
+
+    #[test]
+    fn run_edf_preserves_signal_errors_at_creation_initialization_and_startup() {
+        let mut runtime = FakeContainerRuntime::new();
+        runtime.create_result = Err(AppError::Runtime(String::from(
+            "Container creation terminated by signal",
+        )));
+        let result = execute_sample_edf(
+            &runtime,
+            sample_edf("alpine:3.22"),
+            vec![String::from("payload")],
+            unique_test_user(),
+        );
+        assert_eq!(
+            result,
+            Err(AppError::Runtime(String::from(
+                "Container creation terminated by signal",
+            )))
+        );
+        assert_eq!(runtime.start_snapshots().len(), 0);
+        assert!(runtime.init_snapshots().is_empty());
+        assert_eq!(runtime.cleanup_snapshots().len(), 1);
+        let roots = runtime.created_context_roots();
+        assert!(!roots[0].exists());
+
+        let mut runtime = FakeContainerRuntime::new();
+        runtime.init_result = Err(AppError::Runtime(String::from(
+            "Container initialization terminated by signal",
+        )));
+        let result = execute_sample_edf(
+            &runtime,
+            sample_edf("alpine:3.22"),
+            vec![String::from("payload")],
+            unique_test_user(),
+        );
+        assert_eq!(
+            result,
+            Err(AppError::Runtime(String::from(
+                "Container initialization terminated by signal",
+            )))
+        );
+        assert_eq!(runtime.init_snapshots().len(), 1);
+        assert!(runtime.start_snapshots().is_empty());
+        assert_eq!(runtime.cleanup_snapshots().len(), 1);
+        assert_edf_lifecycle_calls(
+            &runtime,
+            "alpine:3.22",
+            &[String::from("payload")],
+            true,
+            false,
+        );
+        let roots = runtime.created_context_roots();
+        assert!(!roots[0].exists());
+
+        let mut runtime = FakeContainerRuntime::new();
+        runtime.start_result = Err(AppError::Runtime(String::from(
+            "Container process terminated by signal",
+        )));
+        let result = execute_sample_edf(
+            &runtime,
+            sample_edf("alpine:3.22"),
+            vec![String::from("payload")],
+            unique_test_user(),
+        );
+        assert_eq!(
+            result,
+            Err(AppError::Runtime(String::from(
+                "Container process terminated by signal",
+            )))
+        );
+        assert_eq!(runtime.init_snapshots().len(), 1);
+        assert_eq!(runtime.start_snapshots().len(), 1);
+        assert_eq!(runtime.cleanup_snapshots().len(), 1);
+        let roots = runtime.created_context_roots();
+        assert!(!roots[0].exists());
+    }
+
+    #[test]
+    fn run_edf_passes_identical_context_to_create_init_start_and_cleanup() {
+        let logfile = String::from("/tmp/annotation-log");
+        let mut edf = sample_edf("alpine:3.22");
+        edf.annotations.insert(
+            String::from("com.sarus.parallax_mp_logfile"),
+            logfile.clone(),
+        );
+        edf.annotations.insert(
+            String::from("com.sarus.parallax_mp_squashfuse_path"),
+            String::from("/custom/squashfuse_ll"),
+        );
+        let command = vec![String::from("arg with spaces"), String::new()];
+        let runtime = FakeContainerRuntime::new();
+        let user = unique_test_user();
+
+        let result = execute_sample_edf(&runtime, edf, command.clone(), user.clone());
+        assert_eq!(result, Ok(AppOutput::success("")));
+
+        let creates = runtime.create_snapshots();
+        let inits = runtime.init_snapshots();
+        let starts = runtime.start_snapshots();
+        let cleanups = runtime.cleanup_snapshots();
+        assert_eq!(creates.len(), 1);
+        assert_eq!(inits.len(), 1);
+        assert_eq!(starts.len(), 1);
+        assert_eq!(cleanups.len(), 1);
+        let create = &creates[0];
+        assert_eq!(create.image, "alpine:3.22");
+        assert_eq!(create.command, command);
+        assert_eq!(create.container.name, inits[0].container);
+        assert_eq!(create.container.name, starts[0].container);
+        assert_eq!(create.container.name, cleanups[0].container);
+        assert_eq!(create.podman, inits[0].podman);
+        assert_eq!(create.podman, starts[0].podman);
+        assert_eq!(create.podman, cleanups[0].podman);
+        assert_eq!(create.container.user, Some(user.uid.to_string()));
+        assert_eq!(create.container.interactive, io::stdin().is_terminal());
+        assert_eq!(
+            create.container.tty,
+            io::stdin().is_terminal() && io::stdout().is_terminal()
+        );
+        assert!(!create.container.detach);
+        assert!(!create.container.auto_remove);
+        assert!(create.container.set_env);
+        assert_eq!(create.container.pidfile, None);
+        assert_eq!(create.podman.module, Some(String::from("hpc")));
+        assert_eq!(
+            create.podman.parallax_mount_program,
+            Some(PathBuf::from("/usr/local/bin/parallax_mount_program"))
+        );
+        assert_eq!(
+            create.podman.ro_store,
+            Some(std::env::temp_dir().join("sarusctl-test-parallax-store"),)
+        );
+        let env = create.podman.podman_env.as_ref().unwrap();
+        assert_eq!(
+            env.get(OsStr::new("PARALLAX_MP_LOGFILE")),
+            Some(&OsString::from(logfile))
+        );
+        assert_eq!(
+            env.get(OsStr::new("PARALLAX_MP_SQUASHFUSE_CMD")),
+            Some(&OsString::from("/custom/squashfuse_ll"))
+        );
+        assert_eq!(
+            runtime.run_logfiles(),
+            vec![Some(String::from("/tmp/annotation-log"))]
+        );
+    }
+
+    #[test]
+    fn run_edf_image_preparation_failure_does_not_attempt_lifecycle_operations() {
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster
+            .render_results
+            .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
+        let runtime = FakeContainerRuntime::new();
+        runtime.push_parallax_exist("alpine:3.22", vec![false]);
+        runtime.pull_results.borrow_mut().insert(
+            String::from("alpine:3.22"),
+            Err(AppError::Runtime(String::from("registry offline"))),
+        );
+        let result = execute_command(
+            CommandSpec::Run {
+                filepath: String::from("job.edf"),
+                container_cmd: vec![String::from("payload")],
+            },
+            &mock_deps(
+                &raster,
+                &runtime,
+                &FakeUserContext {
+                    user: unique_test_user(),
+                },
+            ),
+        );
+
+        assert_eq!(
+            result,
+            Err(AppError::Runtime(String::from("registry offline")))
+        );
+        assert!(runtime.create_snapshots().is_empty());
+        assert!(runtime.init_snapshots().is_empty());
+        assert!(runtime.start_snapshots().is_empty());
+        assert!(runtime.cleanup_snapshots().is_empty());
+        assert!(runtime.calls().iter().all(|call| {
+            !call.starts_with("create:")
+                && !call.starts_with("init:")
+                && !call.starts_with("start:")
+                && call != "cleanup_container"
+        }));
     }
 
     #[test]
@@ -2616,6 +3832,7 @@ spec:
         let rootdirs = runtime.created_run_rootdirs();
         assert_eq!(rootdirs.len(), 1);
         assert!(rootdirs[0].exists());
+        assert!(err.to_string().contains(&rootdirs[0].display().to_string()));
         fs::remove_dir_all(&rootdirs[0]).unwrap();
     }
 
