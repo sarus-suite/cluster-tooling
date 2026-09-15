@@ -1289,7 +1289,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "raster"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "derivative",
  "is_executable",
@@ -1464,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "sarus-suite-podman-driver"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "bstr",
  "raster",
