@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.5.48", features = ["derive"] }
+nu-ansi-term = "0.50.3"
 raster = { git = "https://github.com/sarus-suite/raster" }
 sarus-suite-podman-driver = { git = "https://github.com/sarus-suite/podman-driver" }
 serde = { version = "1.0.228", features = ["derive"] }

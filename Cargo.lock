@@ -1477,6 +1477,7 @@ version = "0.6.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "nu-ansi-term",
  "predicates",
  "pretty_assertions",
  "raster",
