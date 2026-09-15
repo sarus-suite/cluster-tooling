@@ -6,7 +6,7 @@ use crate::error::{SarusError, SarusResult};
 
 pub type SarusMounts = Vec<SarusMount>;
 
-#[derive(Deserialize, Clone, PartialEq)]
+#[derive(Deserialize, Clone, PartialEq, Debug)]
 pub struct SarusMount {
     source: String,
     target: String,
@@ -23,7 +23,6 @@ impl Serialize for SarusMount {
 }
 
 impl SarusMount {
-
     pub fn to_volume_string(&self) -> String {
         if self.flags.is_empty() {
             format!("{}:{}", self.source, self.target)
@@ -36,7 +35,6 @@ impl SarusMount {
         input: String,
         uenv: &Option<HashMap<String, String>>,
     ) -> SarusResult<SarusMount> {
-
         let mut m = Self::from_string(input)?;
         m.render(uenv)?;
         m.validate()?;
@@ -75,11 +73,7 @@ impl SarusMount {
         Ok(m)
     }
 
-    fn render(
-        &mut self,
-        uenv: &Option<HashMap<String, String>>,
-    ) -> SarusResult<()> {
-
+    fn render(&mut self, uenv: &Option<HashMap<String, String>>) -> SarusResult<()> {
         let mut i = self.clone();
         i.translate_to_absolute()?;
 
@@ -98,7 +92,6 @@ impl SarusMount {
     }
 
     fn translate_to_absolute(&mut self) -> SarusResult<()> {
-
         let mut i = self.clone();
 
         if i.flags == "sqsh" {
@@ -130,13 +123,10 @@ impl SarusMount {
         }
         *self = i;
 
-        return Ok(())
+        return Ok(());
     }
 
-    fn render_flags(
-        &mut self,
-    ) -> SarusResult<()> {
-
+    fn render_flags(&mut self) -> SarusResult<()> {
         let mut i = self.clone();
 
         if i.flags == "sqsh" {
@@ -146,7 +136,10 @@ impl SarusMount {
                     return Err(SarusError {
                         code: 14,
                         file_path: None,
-                        msg: format!("could not stat source of squashfs mount ({}): {}", i.source, e),
+                        msg: format!(
+                            "could not stat source of squashfs mount ({}): {}",
+                            i.source, e
+                        ),
                     });
                 }
             };
@@ -154,14 +147,15 @@ impl SarusMount {
                 return Err(SarusError {
                     code: 16,
                     file_path: None,
-                    msg: format!("source of squashfs mount ({}) must be a regular file", i.source),
+                    msg: format!(
+                        "source of squashfs mount ({}) must be a regular file",
+                        i.source
+                    ),
                 });
             }
 
             i.flags = String::from("");
-
         } else {
-
             // Remove duplicate flags
             let parts: Vec<_> = i.flags.split(',').collect();
             let parts_set: HashSet<_> = parts.into_iter().collect();
@@ -175,13 +169,13 @@ impl SarusMount {
     }
 
     fn validate(&self) -> SarusResult<()> {
-
         if ![".", "/"].iter().any(|s| self.source.starts_with(*s)) {
             return Err(SarusError {
                 code: 12,
                 file_path: None,
                 msg: format!(
-                    "mount source {:#?} must be one among a relative path starting with . , an absolute path starting with / , \"tmpfs\" or \"umount\"", self.source
+                    "mount source {:#?} must be one among a relative path starting with . , an absolute path starting with / , \"tmpfs\" or \"umount\"",
+                    self.source
                 ),
             });
         }
@@ -191,7 +185,8 @@ impl SarusMount {
                 code: 13,
                 file_path: None,
                 msg: format!(
-                    "mount target {:#?} must be one among a relative path starting with . or an absolute path starting with /", self.target
+                    "mount target {:#?} must be one among a relative path starting with . or an absolute path starting with /",
+                    self.target
                 ),
             });
         }

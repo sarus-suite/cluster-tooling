@@ -10,6 +10,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::str;
 use std::time::{Duration, Instant};
+use tracing::instrument;
 use uuid::Uuid;
 
 // TODO review pub status in this file, restrict pub only to entities needed in main.rs and tests
@@ -195,6 +196,7 @@ pub trait ContainerRuntime {
     fn cleanup_container(&self, container_name: &str, run_ctx: &PodmanCtx) -> Result<(), AppError>;
 }
 
+// TODO: implement fmt::Debug or [derive(Debug)] annotation
 pub struct AppDeps<'a> {
     pub raster: &'a dyn RasterOps,
     pub runtime: &'a dyn ContainerRuntime,
@@ -205,8 +207,7 @@ pub struct RealRasterOps;
 
 impl RasterOps for RealRasterOps {
     fn load_config(&self) -> Result<Config, AppError> {
-        raster::load_config()
-            .map_err(|e| AppError::ConfigLoad(e.to_string()))
+        raster::load_config().map_err(|e| AppError::ConfigLoad(e.to_string()))
     }
 
     fn load_config_xdg(&self) -> Result<Config, AppError> {
@@ -232,6 +233,7 @@ impl RasterOps for RealRasterOps {
     }
 }
 
+#[derive(Debug)]
 pub struct RealContainerRuntime;
 
 impl ContainerRuntime for RealContainerRuntime {
@@ -245,11 +247,13 @@ impl ContainerRuntime for RealContainerRuntime {
         Ok(PathBuf::from(graphroot))
     }
 
+    #[instrument(level = "debug")]
     fn images(&self, ctx: &PodmanCtx) -> Result<(), AppError> {
         let _ = pmd::images(Some(ctx));
         Ok(())
     }
 
+    #[instrument(level = "debug")]
     fn pull(&self, image: &str, ctx: &PodmanCtx, verbose: bool) -> Result<(), AppError> {
         if verbose {
             pmd::pull_streaming(image, Some(ctx))
@@ -260,11 +264,13 @@ impl ContainerRuntime for RealContainerRuntime {
         }
     }
 
+    #[instrument(level = "debug")]
     fn image_exists(&self, image: &str, ctx: &PodmanCtx) -> Result<bool, AppError> {
         //TODO revise with logging:println!("Checking if image {image} exists in Podman...");
         pmd::image_exists(image, Some(ctx)).map_err(|e| AppError::Runtime(e.to_string()))
     }
 
+    #[instrument(level = "debug")]
     fn parallax_exist(
         &self,
         parallax_path: &Path,
@@ -275,6 +281,7 @@ impl ContainerRuntime for RealContainerRuntime {
             .map_err(|e| AppError::Runtime(e.to_string()))
     }
 
+    #[instrument(level = "debug")]
     fn parallax_migrate(
         &self,
         parallax_path: &Path,
@@ -291,6 +298,7 @@ impl ContainerRuntime for RealContainerRuntime {
         }
     }
 
+    #[instrument(level = "debug")]
     fn parallax_rmi(
         &self,
         parallax_path: &Path,
@@ -313,6 +321,7 @@ impl ContainerRuntime for RealContainerRuntime {
         }
     }
 
+    #[instrument(level = "debug")]
     fn run_from_edf(
         &self,
         edf: &EDF,
@@ -342,16 +351,19 @@ impl ContainerRuntime for RealContainerRuntime {
             })
     }
 
+    #[instrument(level = "debug")]
     fn kube_play(&self, filepath: &str, run_ctx: &PodmanCtx) -> Result<(), AppError> {
         pmd::kube_play(filepath, Some(run_ctx))
             .map_err(|e| AppError::Runtime(format!("Podman kube play failed: {e}")))
     }
 
+    #[instrument(level = "debug")]
     fn kube_down(&self, filepath: &str, force: bool, run_ctx: &PodmanCtx) -> Result<(), AppError> {
         pmd::kube_down(filepath, force, Some(run_ctx))
             .map_err(|e| AppError::Runtime(format!("Podman kube down failed: {e}")))
     }
 
+    #[instrument(level = "debug")]
     fn cleanup_container(&self, container_name: &str, run_ctx: &PodmanCtx) -> Result<(), AppError> {
         let exists = pmd::container_exists(container_name, Some(run_ctx))
             .map_err(|e| AppError::Runtime(e.to_string()))?;
@@ -450,11 +462,7 @@ pub fn build_run_ctx(
 }
 
 fn create_runtime_instance(uid: u32, run_id: &Uuid) -> Result<PathBuf, AppError> {
-    let instance_name = format!(
-        "sarusctl-{}-{}",
-        uid,
-        &run_id.simple().to_string()[..12]
-    );
+    let instance_name = format!("sarusctl-{}-{}", uid, &run_id.simple().to_string()[..12]);
 
     let mut bases = Vec::new();
     if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
@@ -474,10 +482,7 @@ fn create_runtime_instance(uid: u32, run_id: &Uuid) -> Result<PathBuf, AppError>
         }
 
         let instance = base.join(&instance_name);
-        match fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&instance)
-        {
+        match fs::DirBuilder::new().mode(0o700).create(&instance) {
             Ok(()) => return Ok(instance),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 return Err(AppError::Runtime(format!(
@@ -496,7 +501,11 @@ fn create_runtime_instance(uid: u32, run_id: &Uuid) -> Result<PathBuf, AppError>
 }
 
 fn create_private_directory(path: &Path) -> io::Result<()> {
-    match fs::DirBuilder::new().recursive(true).mode(0o700).create(path) {
+    match fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+    {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             let metadata = fs::symlink_metadata(path)?;
@@ -693,6 +702,7 @@ pub fn execute_command(command: CommandSpec, deps: &AppDeps<'_>) -> Result<AppOu
     execute_command_with_options(command, deps, ExecOptions::default())
 }
 
+#[instrument(level = "debug", skip(deps))]
 pub fn execute_command_with_options(
     command: CommandSpec,
     deps: &AppDeps<'_>,
@@ -727,6 +737,7 @@ pub fn execute_command_with_options(
     }
 }
 
+#[instrument(level = "debug", skip(raster))]
 fn load_config_with_options(
     raster: &dyn RasterOps,
     options: &ExecOptions,
@@ -843,6 +854,7 @@ fn rmi_command(
     Ok(AppOutput::success(""))
 }
 
+#[instrument(level = "debug", skip(deps))]
 fn run_command(
     filepath: &str,
     container_cmd: &[String],
@@ -1052,6 +1064,7 @@ fn finalize_podman_cleanup(
     }
 }
 
+#[instrument(level = "debug")]
 fn setup_imagestore(config: &Config) -> Result<(), AppError> {
     let imagestore = &config.parallax_imagestore;
     let imagestore_pb = PathBuf::from(&imagestore);
@@ -1132,11 +1145,11 @@ fn log_hook_ec(ec: ExecutedCommand, prefix: &str) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use serial_test::serial;
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
     use std::ffi::OsStr;
     use std::os::unix::fs::PermissionsExt;
-    use serial_test::serial;
     use tempfile::tempdir;
 
     fn sample_config() -> Config {
@@ -1190,7 +1203,7 @@ mod tests {
             self.config.clone()
         }
 
-        fn load_config_path(&self, path: &Path) -> Result<Config, AppError> {
+        fn load_config_path(&self, _path: &Path) -> Result<Config, AppError> {
             self.config.clone()
         }
 
@@ -1803,12 +1816,17 @@ spec:
         assert_eq!(run.module, Some(String::from("hpc")));
         assert_eq!(run.graphroot, Some(roots_base.join("graphroot")));
         assert_eq!(run.runroot, Some(roots_base.join("runroot")));
-        assert!(roots_base
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with("sarusctl-1234-a1a2a3a4b1b2"));
-        assert_eq!(fs::metadata(&roots_base).unwrap().permissions().mode() & 0o777, 0o700);
+        assert!(
+            roots_base
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("sarusctl-1234-a1a2a3a4b1b2")
+        );
+        assert_eq!(
+            fs::metadata(&roots_base).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         fs::remove_dir_all(roots_base).unwrap();
         assert_eq!(seed.ro_store, Some(parallax_imagestore));
         let env = run.podman_env.expect("missing env");
@@ -1831,7 +1849,10 @@ spec:
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir) };
 
         let config = sample_config();
-        let user = CurrentUser { uid: 1234, gid: 4321 };
+        let user = CurrentUser {
+            uid: 1234,
+            gid: 4321,
+        };
         let first_id = Uuid::new_v4();
         let second_id = Uuid::new_v4();
         let (first, first_base) = build_run_ctx(&config, &user, &first_id).unwrap();
@@ -1868,7 +1889,10 @@ spec:
 
         let result = build_run_ctx(
             &sample_config(),
-            &CurrentUser { uid: 1234, gid: 4321 },
+            &CurrentUser {
+                uid: 1234,
+                gid: 4321,
+            },
             &Uuid::new_v4(),
         );
 
@@ -1879,11 +1903,13 @@ spec:
 
         let (_, roots_base) = result.unwrap();
         assert!(!roots_base.starts_with(temp.path()));
-        assert!(roots_base
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with("sarusctl-1234-"));
+        assert!(
+            roots_base
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("sarusctl-1234-")
+        );
         cleanup_podman_rootdirs(&roots_base);
     }
 
@@ -2168,7 +2194,9 @@ spec:
         );
 
         let mut raster = FakeRasterOps::new(sample_config());
-        raster.render_results.insert(String::from("job.edf"), Ok(edf));
+        raster
+            .render_results
+            .insert(String::from("job.edf"), Ok(edf));
         let runtime = FakeContainerRuntime::new();
         runtime.push_parallax_exist("alpine:3.22", vec![true]);
         let user = FakeUserContext {

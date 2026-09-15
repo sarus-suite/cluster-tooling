@@ -1,8 +1,14 @@
-use clap::{Parser, Subcommand};
+mod logging;
+
+use clap::{ArgAction, Parser, Subcommand};
 use sarusctl::{
     AppDeps, CommandSpec, ExecOptions, FormatOutput, RealContainerRuntime, RealRasterOps,
     RealUserContext, execute_command_with_options, format_output,
 };
+use std::process::ExitCode;
+use tracing::{self, Level, span};
+
+use crate::logging::init_tracing;
 
 const SARUSCTL_VERSION: &str = match option_env!("SARUSCTL_VERSION") {
     Some(version) => version,
@@ -13,12 +19,17 @@ const SARUSCTL_VERSION: &str = match option_env!("SARUSCTL_VERSION") {
 #[derive(Parser)]
 #[command(version = SARUSCTL_VERSION, about)]
 struct Args {
-    #[arg(long, short)]
-    verbose: bool,
-
     /// Override the Parallax imagestore path from the configuration
     #[arg(long, value_name = "PATH")]
     parallax_imagestore: Option<String>,
+
+    /// Report elapsed times for instrumented operations
+    #[arg(long)]
+    profile: bool,
+
+    /// Increase logging verbosity (-v, -vv, -vvv)
+    #[arg(short, long, action = ArgAction::Count)]
+    verbose: u8,
 
     #[command(subcommand)]
     command: Command,
@@ -73,8 +84,12 @@ impl From<Command> for CommandSpec {
     }
 }
 
-fn main() {
+fn main() -> ExitCode {
     let args = Args::parse();
+    init_tracing(args.verbose, args.profile);
+    let _main_span = span!(Level::DEBUG, "main").entered();
+
+    let _init_span = span!(Level::DEBUG, "init").entered();
     let command: CommandSpec = args.command.into();
 
     let raster = RealRasterOps;
@@ -86,10 +101,12 @@ fn main() {
         user: &user,
     };
     let options = ExecOptions {
-        verbose: args.verbose,
+        verbose: args.verbose > 0,
         parallax_imagestore: args.parallax_imagestore,
     };
+    drop(_init_span);
 
+    // TODO: Evaluate if it's more elegant to return a Result
     match execute_command_with_options(command.clone(), &deps, options) {
         Ok(output) => {
             let formatted = format_output(command.output_format(), &output);
@@ -99,11 +116,11 @@ fn main() {
             if !formatted.stderr.is_empty() {
                 eprintln!("{}", formatted.stderr);
             }
-            std::process::exit(output.return_code);
+            ExitCode::from(output.return_code as u8)
         }
         Err(err) => {
             eprintln!("{err}");
-            std::process::exit(1);
+            ExitCode::from(1)
         }
     }
 }
