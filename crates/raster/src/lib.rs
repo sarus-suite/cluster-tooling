@@ -585,7 +585,7 @@ pub fn render_from_search_paths(
     Ok(e)
 }
 
-#[instrument]
+#[instrument(level = "debug")]
 pub fn render(path: String) -> SarusResult<EDF> {
     let sp = get_search_paths();
     render_from_search_paths(path, sp, &None)

@@ -621,7 +621,7 @@ fn load_raw_config_from_dir(
     Ok(rcfg)
 }
 
-#[instrument]
+#[instrument(level = "debug")]
 pub fn update_config_by_user(config: &mut Config, edf: EDF) -> SarusResult<()> {
     let parallax_imagestore_create = edf
         .annotations

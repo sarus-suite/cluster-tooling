@@ -10,7 +10,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::str;
 use std::time::{Duration, Instant};
-use tracing::{self, instrument};
+use tracing::instrument;
 use uuid::Uuid;
 
 // TODO review pub status in this file, restrict pub only to entities needed in main.rs and tests
@@ -247,13 +247,13 @@ impl ContainerRuntime for RealContainerRuntime {
         Ok(PathBuf::from(graphroot))
     }
 
-    #[instrument]
+    #[instrument(level = "debug")]
     fn images(&self, ctx: &PodmanCtx) -> Result<(), AppError> {
         let _ = pmd::images(Some(ctx));
         Ok(())
     }
 
-    #[instrument]
+    #[instrument(level = "debug")]
     fn pull(&self, image: &str, ctx: &PodmanCtx, verbose: bool) -> Result<(), AppError> {
         if verbose {
             pmd::pull_streaming(image, Some(ctx))
@@ -264,13 +264,13 @@ impl ContainerRuntime for RealContainerRuntime {
         }
     }
 
-    #[instrument]
+    #[instrument(level = "debug")]
     fn image_exists(&self, image: &str, ctx: &PodmanCtx) -> Result<bool, AppError> {
         //TODO revise with logging:println!("Checking if image {image} exists in Podman...");
         pmd::image_exists(image, Some(ctx)).map_err(|e| AppError::Runtime(e.to_string()))
     }
 
-    #[instrument]
+    #[instrument(level = "debug")]
     fn parallax_exist(
         &self,
         parallax_path: &Path,
@@ -281,7 +281,7 @@ impl ContainerRuntime for RealContainerRuntime {
             .map_err(|e| AppError::Runtime(e.to_string()))
     }
 
-    #[instrument]
+    #[instrument(level = "debug")]
     fn parallax_migrate(
         &self,
         parallax_path: &Path,
@@ -298,7 +298,7 @@ impl ContainerRuntime for RealContainerRuntime {
         }
     }
 
-    #[instrument]
+    #[instrument(level = "debug")]
     fn parallax_rmi(
         &self,
         parallax_path: &Path,
@@ -321,7 +321,7 @@ impl ContainerRuntime for RealContainerRuntime {
         }
     }
 
-    #[instrument]
+    #[instrument(level = "debug")]
     fn run_from_edf(
         &self,
         edf: &EDF,
@@ -351,7 +351,7 @@ impl ContainerRuntime for RealContainerRuntime {
             })
     }
 
-    #[instrument]
+    #[instrument(level = "debug")]
     fn kube_play(&self, filepath: &str, run_ctx: &PodmanCtx) -> Result<(), AppError> {
         pmd::kube_play(filepath, Some(run_ctx))
             .map_err(|e| AppError::Runtime(format!("Podman kube play failed: {e}")))
@@ -363,7 +363,7 @@ impl ContainerRuntime for RealContainerRuntime {
             .map_err(|e| AppError::Runtime(format!("Podman kube down failed: {e}")))
     }
 
-    #[instrument]
+    #[instrument(level = "debug")]
     fn cleanup_container(&self, container_name: &str, run_ctx: &PodmanCtx) -> Result<(), AppError> {
         let exists = pmd::container_exists(container_name, Some(run_ctx))
             .map_err(|e| AppError::Runtime(e.to_string()))?;
@@ -702,7 +702,7 @@ pub fn execute_command(command: CommandSpec, deps: &AppDeps<'_>) -> Result<AppOu
     execute_command_with_options(command, deps, ExecOptions::default())
 }
 
-#[instrument(skip(deps))]
+#[instrument(level = "debug", skip(deps))]
 pub fn execute_command_with_options(
     command: CommandSpec,
     deps: &AppDeps<'_>,
@@ -737,7 +737,7 @@ pub fn execute_command_with_options(
     }
 }
 
-#[instrument(skip(raster))]
+#[instrument(level = "debug", skip(raster))]
 fn load_config_with_options(
     raster: &dyn RasterOps,
     options: &ExecOptions,
@@ -854,7 +854,7 @@ fn rmi_command(
     Ok(AppOutput::success(""))
 }
 
-#[instrument(skip(deps))]
+#[instrument(level = "debug", skip(deps))]
 fn run_command(
     filepath: &str,
     container_cmd: &[String],
@@ -1064,7 +1064,7 @@ fn finalize_podman_cleanup(
     }
 }
 
-#[instrument]
+#[instrument(level = "debug")]
 fn setup_imagestore(config: &Config) -> Result<(), AppError> {
     let imagestore = &config.parallax_imagestore;
     let imagestore_pb = PathBuf::from(&imagestore);
@@ -1203,7 +1203,7 @@ mod tests {
             self.config.clone()
         }
 
-        fn load_config_path(&self, path: &Path) -> Result<Config, AppError> {
+        fn load_config_path(&self, _path: &Path) -> Result<Config, AppError> {
             self.config.clone()
         }
 

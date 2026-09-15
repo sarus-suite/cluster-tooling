@@ -87,9 +87,9 @@ impl From<Command> for CommandSpec {
 fn main() -> ExitCode {
     let args = Args::parse();
     init_tracing(args.verbose, args.profile);
-    let _main_span = span!(Level::INFO, "main").entered();
+    let _main_span = span!(Level::DEBUG, "main").entered();
 
-    let _init_span = span!(Level::INFO, "init").entered();
+    let _init_span = span!(Level::DEBUG, "init").entered();
     let command: CommandSpec = args.command.into();
 
     let raster = RealRasterOps;
