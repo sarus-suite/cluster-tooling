@@ -1,0 +1,15 @@
+{
+  "name": "Sarus Suite Skybox build for glibc 2.36 and Slurm ${localEnv:SLURM_VERSION}",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "..",
+    "args": {
+      "SLURM_VERSION": "${localEnv:SLURM_VERSION}"
+    }
+  },
+  "remoteEnv": {
+    "CARGO_TARGET_DIR": "${localEnv:CARGO_TARGET_DIR}"
+  },
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "postCreateCommand": "sh .devcontainer/skybox/post-create.sh"
+}
