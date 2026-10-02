@@ -27,6 +27,16 @@ impl PodmanCtx {
             .insert(key.into(), value.into());
         self
     }
+
+    pub fn with_env_hashmap(mut self, map: HashMap<impl Into<OsString> + std::convert::AsRef<std::ffi::OsStr>, impl Into<OsString> + std::convert::AsRef<std::ffi::OsStr>>) -> Self {
+        self.podman_env
+            .get_or_insert_with(HashMap::new);
+
+        for (key, value) in map.iter() {
+            self.podman_env.as_mut().unwrap().insert(key.into(), value.into());
+        }
+        self
+    }
 }
 
 #[derive(Debug)]

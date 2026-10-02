@@ -8,7 +8,7 @@ use slurm_spank::{SpankHandle, spank_log_user};
 use sarus_suite_podman_driver::{self as pmd, ContainerCtx, PodmanCtx};
 
 use crate::config::setup_imagestore;
-use crate::{SpankSkyBox, plugin_err, skybox_log_debug, skybox_log_error};
+use crate::{SpankSkyBox, get_job_env, plugin_err, skybox_log_debug, skybox_log_error};
 
 pub(crate) const PODMAN_PIDFILE_NAME: &str = "pidfile";
 
@@ -135,7 +135,7 @@ pub(crate) fn podman_pull(
 
 pub(crate) fn podman_start(
     ssb: &mut SpankSkyBox,
-    _spank: &mut SpankHandle,
+    spank: &mut SpankHandle,
 ) -> Result<(), Box<dyn Error>> {
     let edf = match &ssb.edf {
         Some(o) => o,
@@ -193,7 +193,8 @@ pub(crate) fn podman_start(
         "PARALLAX_MP_SQUASHFUSE_CMD",
         config.parallax_mp_squashfuse_path.clone(),
     )
-    .with_env("PARALLAX_MP_LOGFILE", config.parallax_mp_logfile.clone());
+    .with_env("PARALLAX_MP_LOGFILE", config.parallax_mp_logfile.clone())
+    .with_env_hashmap(get_job_env(spank));
 
     skybox_log_debug!(
         "mount env: PARALLAX_MP_UID={} PARALLAX_MP_GID={}",
