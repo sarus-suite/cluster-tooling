@@ -59,6 +59,9 @@ enum Command {
     Rmi { image: String },
     /// Run container from EDF file
     Run {
+        /// Confine the fresh EDF container to the caller thread's current CPU affinity
+        #[arg(long)]
+        preserve_cpu_affinity: bool,
         filepath: String,
         container_cmd: Vec<String>,
     },
@@ -74,9 +77,11 @@ impl From<Command> for CommandSpec {
             Command::Migrate { image } => CommandSpec::Migrate { image },
             Command::Rmi { image } => CommandSpec::Rmi { image },
             Command::Run {
+                preserve_cpu_affinity,
                 filepath,
                 container_cmd,
             } => CommandSpec::Run {
+                preserve_cpu_affinity,
                 filepath,
                 container_cmd,
             },
@@ -124,3 +129,5 @@ fn main() -> ExitCode {
         }
     }
 }
+
+// TODO: add unit tests for CLI args parsing and command generation. Tip: use `Args::try_parse_from` to simulate CLI args.

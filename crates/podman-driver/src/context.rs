@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use crate::CpuSet;
+
 #[derive(Debug)]
 pub struct PodmanCtx {
     pub podman_path: PathBuf,
@@ -40,4 +42,6 @@ pub struct ContainerCtx {
     pub set_env: bool,
     pub pidfile: Option<PathBuf>,
     pub user: Option<String>,
+    /// Restrict the container to these CPUs when set.
+    pub cpuset_cpus: Option<CpuSet>,
 }

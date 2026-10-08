@@ -28,6 +28,7 @@ fn test_run_from_edf_output() {
         set_env: true,
         pidfile: None,
         user: None,
+        cpuset_cpus: None,
     };
 
     let edf_path = std::env::current_dir()
@@ -55,6 +56,7 @@ fn test_run_from_edf_detached_output() -> Result<(), Box<dyn Error>> {
         set_env: true,
         pidfile: Some(PathBuf::from("/tmp/sarus-edf-test-pidfile")),
         user: None,
+        cpuset_cpus: None,
     };
 
     let edf_path = std::env::current_dir()
@@ -149,6 +151,7 @@ fn test_get_container_pid_from_pidfile() -> Result<(), Box<dyn Error>> {
         set_env: true,
         pidfile: Some(PathBuf::from("/tmp/sarus-edf-test-pidfile")),
         user: None,
+        cpuset_cpus: None,
     };
 
     let edf_path = std::env::current_dir()

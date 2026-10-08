@@ -69,6 +69,7 @@ pub enum CommandSpec {
     Run {
         filepath: String,
         container_cmd: Vec<String>,
+        preserve_cpu_affinity: bool,
     },
 }
 
@@ -733,7 +734,14 @@ pub fn execute_command_with_options(
             // Run is the only command that loads the config on its own to facilitate testing of invalid EDF files without needing a valid config present
             filepath,
             container_cmd,
-        } => run_command(&filepath, &container_cmd, deps, &options),
+            preserve_cpu_affinity,
+        } => run_command(
+            &filepath,
+            &container_cmd,
+            preserve_cpu_affinity,
+            deps,
+            &options,
+        ),
     }
 }
 
@@ -858,9 +866,30 @@ fn rmi_command(
 fn run_command(
     filepath: &str,
     container_cmd: &[String],
+    preserve_cpu_affinity: bool,
     deps: &AppDeps<'_>,
     options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
+    let cpuset_cpus = if preserve_cpu_affinity {
+        Some(
+            pmd::CpuSet::from_current_thread()
+                .map_err(|error| AppError::Runtime(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+
+    run_command_with_captured_cpuset(filepath, container_cmd, deps, options, Ok(cpuset_cpus))
+}
+
+fn run_command_with_captured_cpuset(
+    filepath: &str,
+    container_cmd: &[String],
+    deps: &AppDeps<'_>,
+    options: &ExecOptions,
+    cpuset_cpus: Result<Option<pmd::CpuSet>, AppError>,
+) -> Result<AppOutput, AppError> {
+    let cpuset_cpus = cpuset_cpus?;
     match deps.raster.render(filepath) {
         Ok(edf) => {
             // Loading config in each branch is a small duplication,
@@ -869,7 +898,14 @@ fn run_command(
             raster::update_config_by_user(&mut config, edf.clone())
                 .map_err(|e| AppError::ConfigLoad(e.to_string()))?;
             setup_imagestore(&config)?;
-            run_edf_command(&edf, container_cmd, &config, deps, options)
+            run_edf_command(
+                &edf,
+                container_cmd,
+                &config,
+                deps,
+                options,
+                cpuset_cpus.as_ref(),
+            )
         }
         Err(_) => {
             let contents = fs::read_to_string(filepath)
@@ -877,6 +913,12 @@ fn run_command(
             yaml_serde::from_str::<yaml_serde::Value>(&contents).map_err(|_| {
                 AppError::UnsupportedInput(format!("{filepath} is not valid EDF nor YAML"))
             })?;
+
+            if cpuset_cpus.is_some() {
+                return Err(AppError::UnsupportedInput(String::from(
+                    "--preserve-cpu-affinity supports fresh EDF launches only",
+                )));
+            }
 
             let config = load_config_with_options(deps.raster, options)?;
             setup_imagestore(&config)?;
@@ -891,6 +933,7 @@ fn run_edf_command(
     config: &Config,
     deps: &AppDeps<'_>,
     options: &ExecOptions,
+    cpuset_cpus: Option<&pmd::CpuSet>,
 ) -> Result<AppOutput, AppError> {
     let run_id = Uuid::new_v4();
     let user = deps.user.current_user()?;
@@ -921,6 +964,7 @@ fn run_edf_command(
         set_env: true,
         pidfile: None,
         user: Some(user.uid.to_string()),
+        cpuset_cpus: cpuset_cpus.cloned(),
     };
 
     let run_result = deps
@@ -1284,6 +1328,7 @@ mod tests {
         migrate_verbose: RefCell<Vec<bool>>,
         rmi_verbose: RefCell<Vec<bool>>,
         run_logfiles: RefCell<Vec<Option<String>>>,
+        run_cpusets: RefCell<Vec<Option<String>>>,
         graphroot: Result<PathBuf, AppError>,
         image_exists: RefCell<HashMap<String, VecDeque<bool>>>,
         parallax_exist: RefCell<HashMap<String, VecDeque<bool>>>,
@@ -1306,6 +1351,7 @@ mod tests {
                 migrate_verbose: RefCell::new(Vec::new()),
                 rmi_verbose: RefCell::new(Vec::new()),
                 run_logfiles: RefCell::new(Vec::new()),
+                run_cpusets: RefCell::new(Vec::new()),
                 graphroot: Ok(PathBuf::from("/graphroot")),
                 image_exists: RefCell::new(HashMap::new()),
                 pull_results: RefCell::new(HashMap::new()),
@@ -1375,6 +1421,10 @@ mod tests {
 
         fn run_logfiles(&self) -> Vec<Option<String>> {
             self.run_logfiles.borrow().clone()
+        }
+
+        fn run_cpusets(&self) -> Vec<Option<String>> {
+            self.run_cpusets.borrow().clone()
         }
     }
 
@@ -1457,7 +1507,7 @@ mod tests {
             &self,
             edf: &EDF,
             run_ctx: &PodmanCtx,
-            _container_ctx: &ContainerCtx,
+            container_ctx: &ContainerCtx,
             container_cmd: &[String],
         ) -> Result<i32, AppError> {
             self.create_and_record_run_rootdirs(run_ctx);
@@ -1471,6 +1521,12 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(format!("run:{}:{container_cmd:?}", edf.image));
+            self.run_cpusets.borrow_mut().push(
+                container_ctx
+                    .cpuset_cpus
+                    .as_ref()
+                    .map(|cpus| cpus.as_str().to_owned()),
+            );
             self.run_result.clone()
         }
 
@@ -2164,6 +2220,7 @@ spec:
             CommandSpec::Run {
                 filepath: String::from("job.edf"),
                 container_cmd: vec![String::from("sh")],
+                preserve_cpu_affinity: false,
             },
             &mock_deps(&raster, &runtime, &user),
         )
@@ -2176,6 +2233,126 @@ spec:
                 String::from("parallax_exist:alpine:3.22"),
                 String::from("run:alpine:3.22:[\"sh\"]"),
                 String::from("cleanup_container")
+            ]
+        );
+        assert_eq!(runtime.run_cpusets(), vec![None]);
+    }
+
+    #[test]
+    fn run_edf_passes_captured_cpuset_to_runtime() {
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster
+            .render_results
+            .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
+        let runtime = FakeContainerRuntime::new();
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
+        let user = FakeUserContext {
+            user: CurrentUser { uid: 1, gid: 1 },
+        };
+        let deps = mock_deps(&raster, &runtime, &user);
+        let cpuset = pmd::CpuSet::from_linux_list("0,64").unwrap();
+
+        let output = run_command_with_captured_cpuset(
+            "job.edf",
+            &[String::from("sh")],
+            &deps,
+            &ExecOptions::default(),
+            Ok(Some(cpuset)),
+        )
+        .unwrap();
+
+        assert_eq!(output.return_code, 0);
+        assert_eq!(runtime.run_cpusets(), vec![Some(String::from("0,64"))]);
+    }
+
+    #[test]
+    fn run_returns_affinity_capture_error_before_other_operations() {
+        let raster = FakeRasterOps::new(sample_config());
+        let runtime = FakeContainerRuntime::new();
+        let user = FakeUserContext {
+            user: CurrentUser { uid: 1, gid: 1 },
+        };
+
+        let error = run_command_with_captured_cpuset(
+            "job.edf",
+            &[],
+            &mock_deps(&raster, &runtime, &user),
+            &ExecOptions::default(),
+            Err(AppError::Runtime(String::from(
+                "synthetic affinity read failure",
+            ))),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            AppError::Runtime(String::from("synthetic affinity read failure"))
+        );
+        assert!(runtime.calls().is_empty());
+    }
+
+    #[test]
+    fn run_rejects_affinity_flag_for_valid_yaml_before_runtime_operations() {
+        let raster = FakeRasterOps::new(sample_config());
+        let runtime = FakeContainerRuntime::new();
+        let user = FakeUserContext {
+            user: CurrentUser { uid: 1, gid: 1 },
+        };
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pod-single.yaml");
+        let cpuset = pmd::CpuSet::from_linux_list("0,64").unwrap();
+
+        let error = run_command_with_captured_cpuset(
+            manifest.to_str().unwrap(),
+            &[],
+            &mock_deps(&raster, &runtime, &user),
+            &ExecOptions::default(),
+            Ok(Some(cpuset)),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            AppError::UnsupportedInput(String::from(
+                "--preserve-cpu-affinity supports fresh EDF launches only"
+            ))
+        );
+        assert!(runtime.calls().is_empty());
+    }
+
+    #[test]
+    fn run_does_not_retry_backend_failure_without_cpuset() {
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster
+            .render_results
+            .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
+        let mut runtime = FakeContainerRuntime::new();
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
+        runtime.run_result = Err(AppError::Runtime(String::from("backend rejected cpuset")));
+        let user = FakeUserContext {
+            user: CurrentUser { uid: 1, gid: 1 },
+        };
+        let cpuset = pmd::CpuSet::from_linux_list("0,64").unwrap();
+
+        let error = run_command_with_captured_cpuset(
+            "job.edf",
+            &[String::from("sh")],
+            &mock_deps(&raster, &runtime, &user),
+            &ExecOptions::default(),
+            Ok(Some(cpuset)),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            AppError::Runtime(String::from("backend rejected cpuset"))
+        );
+        assert_eq!(runtime.run_cpusets(), vec![Some(String::from("0,64"))]);
+        assert_eq!(
+            runtime.calls(),
+            vec![
+                String::from("parallax_exist:alpine:3.22"),
+                String::from("run:alpine:3.22:[\"sh\"]"),
+                String::from("cleanup_container"),
             ]
         );
     }
@@ -2207,6 +2384,7 @@ spec:
             CommandSpec::Run {
                 filepath: String::from("job.edf"),
                 container_cmd: vec![String::from("true")],
+                preserve_cpu_affinity: false,
             },
             &mock_deps(&raster, &runtime, &user),
         )
@@ -2233,6 +2411,7 @@ spec:
             CommandSpec::Run {
                 filepath: String::from("job.edf"),
                 container_cmd: vec![String::from("sh")],
+                preserve_cpu_affinity: false,
             },
             &mock_deps(&raster, &runtime, &user),
         )
@@ -2287,6 +2466,7 @@ spec:
             CommandSpec::Run {
                 filepath: String::from("job.edf"),
                 container_cmd: vec![String::from("sh")],
+                preserve_cpu_affinity: false,
             },
             &mock_deps(&raster, &runtime, &FakeUserContext { user: user.clone() }),
         )
@@ -2312,6 +2492,7 @@ spec:
             CommandSpec::Run {
                 filepath: String::from("job.edf"),
                 container_cmd: vec![String::from("missing-command")],
+                preserve_cpu_affinity: false,
             },
             &mock_deps(
                 &raster,
@@ -2346,6 +2527,7 @@ spec:
             CommandSpec::Run {
                 filepath: String::from("job.edf"),
                 container_cmd: vec![String::from("true")],
+                preserve_cpu_affinity: false,
             },
             &mock_deps(
                 &raster,
@@ -2387,6 +2569,7 @@ spec:
             CommandSpec::Run {
                 filepath: String::from("job.edf"),
                 container_cmd: vec![String::from("sh")],
+                preserve_cpu_affinity: false,
             },
             &mock_deps(&raster, &runtime, &user),
         )
@@ -2442,6 +2625,7 @@ spec:
             CommandSpec::Run {
                 filepath: manifest.to_string_lossy().into_owned(),
                 container_cmd: vec![],
+                preserve_cpu_affinity: false,
             },
             &mock_deps(&raster, &runtime, &user),
         )
@@ -2506,6 +2690,7 @@ spec:
             CommandSpec::Run {
                 filepath: manifest.to_string_lossy().into_owned(),
                 container_cmd: vec![],
+                preserve_cpu_affinity: false,
             },
             &mock_deps(&raster, &runtime, &user),
         )
@@ -2556,6 +2741,7 @@ spec:
             CommandSpec::Run {
                 filepath: manifest.to_string_lossy().into_owned(),
                 container_cmd: vec![],
+                preserve_cpu_affinity: false,
             },
             &mock_deps(&raster, &runtime, &FakeUserContext { user: user.clone() }),
         )
@@ -2599,6 +2785,7 @@ spec:
             CommandSpec::Run {
                 filepath: manifest.to_string_lossy().into_owned(),
                 container_cmd: vec![],
+                preserve_cpu_affinity: false,
             },
             &mock_deps(
                 &raster,
@@ -2651,6 +2838,7 @@ spec:
             CommandSpec::Run {
                 filepath: manifest.to_string_lossy().into_owned(),
                 container_cmd: vec![],
+                preserve_cpu_affinity: false,
             },
             &mock_deps(
                 &raster,
@@ -2717,6 +2905,7 @@ spec:
             CommandSpec::Run {
                 filepath: manifest.to_string_lossy().into_owned(),
                 container_cmd: vec![],
+                preserve_cpu_affinity: false,
             },
             &mock_deps(&raster, &runtime, &user),
         )
@@ -2807,6 +2996,7 @@ spec:
             CommandSpec::Run {
                 filepath: String::from("job.edf"),
                 container_cmd: vec![String::from("sh")],
+                preserve_cpu_affinity: false,
             },
             &mock_deps(&raster, &runtime, &user),
             ExecOptions {
@@ -2841,6 +3031,7 @@ spec:
             CommandSpec::Run {
                 filepath: input.to_string_lossy().into_owned(),
                 container_cmd: vec![],
+                preserve_cpu_affinity: false,
             },
             &mock_deps(&raster, &runtime, &user),
         )

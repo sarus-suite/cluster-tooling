@@ -112,6 +112,9 @@ where
             OsStr::new(value),
         );
     }
+    if let Some(cpus) = container_ctx.cpuset_cpus.as_ref() {
+        command.arg("--cpuset-cpus").arg(cpus.as_str());
+    }
     command.arg(&edf.image).args(container_command);
     command
 }
@@ -337,6 +340,7 @@ fn os_string_key_value(key: &OsStr, value: &OsStr) -> OsString {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CpuSet;
 
     fn podman_context() -> PodmanCtx {
         PodmanCtx {
@@ -365,6 +369,7 @@ mod tests {
             set_env: true,
             pidfile: Some(PathBuf::from("/tmp/test/pidfile")),
             user: Some(String::from("1234:4321")),
+            cpuset_cpus: None,
         };
 
         let edf_path = std::env::current_dir()
@@ -456,6 +461,52 @@ mod tests {
     }
 
     #[test]
+    fn run_from_edf_adds_cpuset_before_image() {
+        let edf_path = std::env::current_dir()
+            .unwrap()
+            .join("tests/edf/run_from_edf_test.toml");
+        let edf =
+            raster::render(edf_path.to_string_lossy().into_owned()).expect("Failed rendering EDF");
+        let container_ctx = ContainerCtx {
+            name: String::from("edf_test"),
+            interactive: false,
+            tty: false,
+            detach: false,
+            auto_remove: false,
+            set_env: false,
+            pidfile: None,
+            user: None,
+            cpuset_cpus: Some(CpuSet::from_linux_list("0,64").unwrap()),
+        };
+
+        let command = run_from_edf(&edf, None, &container_ctx, ["sh", "-c", "echo ok"]);
+        let args: Vec<&OsStr> = command.get_args().collect();
+        let cpuset_args: Vec<usize> = args
+            .windows(2)
+            .enumerate()
+            .filter_map(|(index, pair)| {
+                (pair == [OsStr::new("--cpuset-cpus"), OsStr::new("0,64")]).then_some(index)
+            })
+            .collect();
+
+        assert_eq!(cpuset_args.len(), 1);
+        let image_index = args
+            .iter()
+            .position(|arg| *arg == OsStr::new("ubuntu:24.04"))
+            .unwrap();
+        assert!(cpuset_args[0] + 2 <= image_index);
+        assert_eq!(
+            &args[args.len() - 4..],
+            [
+                OsStr::new("ubuntu:24.04"),
+                OsStr::new("sh"),
+                OsStr::new("-c"),
+                OsStr::new("echo ok")
+            ]
+        );
+    }
+
+    #[test]
     fn run_from_edf_handles_interactive_and_tty_independently() {
         let edf_path = std::env::current_dir()
             .unwrap()
@@ -473,6 +524,7 @@ mod tests {
                 set_env: false,
                 pidfile: None,
                 user: None,
+                cpuset_cpus: None,
             };
 
             let command = run_from_edf(&edf, None, &container_ctx, std::iter::empty::<&str>());
@@ -495,6 +547,7 @@ mod tests {
             set_env: false,
             pidfile: None,
             user: None,
+            cpuset_cpus: None,
         };
         let command = run_from_edf(
             &edf,

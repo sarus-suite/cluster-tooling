@@ -1,3 +1,4 @@
+mod affinity;
 mod command;
 mod context;
 mod error;
@@ -10,6 +11,7 @@ use std::path::PathBuf;
 use std::process::{ExitStatus, Output};
 use std::str;
 
+pub use affinity::CpuSet;
 pub use context::{ContainerCtx, PodmanCtx};
 pub use error::{DriverError, Result};
 
@@ -362,5 +364,104 @@ mod tests {
             error,
             DriverError::File { ref path, .. } if path == &expected
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_edf_launch_variants_pass_cpuset_to_the_podman_process() {
+        use std::collections::HashMap;
+        use std::ffi::OsString;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = TempDir(std::env::temp_dir().join(format!(
+            "podman-driver-cpuset-{}-{unique}",
+            std::process::id()
+        )));
+        fs::create_dir(&temp_dir.0).unwrap();
+        let fake_podman = temp_dir.0.join("podman");
+        let recorded_args = temp_dir.0.join("args.txt");
+        fs::write(
+            &fake_podman,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARG_RECORD\"\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_podman).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&fake_podman, permissions).unwrap();
+
+        let podman_ctx = PodmanCtx {
+            podman_path: fake_podman,
+            module: None,
+            graphroot: None,
+            runroot: None,
+            parallax_mount_program: None,
+            ro_store: None,
+            podman_env: Some(HashMap::from([(
+                OsString::from("ARG_RECORD"),
+                recorded_args.as_os_str().to_os_string(),
+            )])),
+        };
+        let edf = EDF {
+            annotations: HashMap::new(),
+            devices: Vec::new(),
+            entrypoint: true,
+            env: HashMap::new(),
+            image: String::from("alpine:3.22"),
+            mounts: Vec::new(),
+            workdir: String::new(),
+            writable: true,
+        };
+        let container_ctx = ContainerCtx {
+            name: String::from("cpuset-test"),
+            interactive: false,
+            tty: false,
+            detach: false,
+            auto_remove: false,
+            set_env: false,
+            pidfile: None,
+            user: None,
+            cpuset_cpus: Some(CpuSet::from_linux_list("0,64").unwrap()),
+        };
+
+        fn assert_recorded_cpuset(path: &std::path::Path) {
+            let args: Vec<String> = fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            let cpuset_indices: Vec<usize> = args
+                .iter()
+                .enumerate()
+                .filter_map(|(index, arg)| (arg == "--cpuset-cpus").then_some(index))
+                .collect();
+            assert_eq!(cpuset_indices.len(), 1);
+            let cpuset_index = cpuset_indices[0];
+            assert_eq!(args[cpuset_index + 1], "0,64");
+            let image_index = args.iter().position(|arg| arg == "alpine:3.22").unwrap();
+            assert!(cpuset_index + 1 < image_index);
+            assert_eq!(args.last().map(String::as_str), Some("entrypoint"));
+        }
+
+        let status = run_from_edf(&edf, Some(&podman_ctx), &container_ctx, ["entrypoint"]).unwrap();
+        assert!(status.success());
+        assert_recorded_cpuset(&recorded_args);
+
+        let output =
+            run_from_edf_output(&edf, Some(&podman_ctx), &container_ctx, ["entrypoint"]).unwrap();
+        assert!(output.status.success());
+        assert_recorded_cpuset(&recorded_args);
     }
 }

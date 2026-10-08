@@ -176,6 +176,7 @@ pub(crate) fn podman_start(
         set_env: false,
         pidfile: Some(PathBuf::from(pidfile.clone())),
         user: Some(job.uid.to_string()),
+        cpuset_cpus: None,
     };
 
     let run_ctx = PodmanCtx {
