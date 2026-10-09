@@ -11,7 +11,7 @@ use tracing::instrument;
 
 use crate::common::{expand_vars_hashmap, expand_vars_vec};
 use crate::error::{SarusError, SarusResult};
-use crate::mount::{SarusMounts, sarus_mounts_from_strings};
+use crate::mount::{SarusMounts, sarus_mounts_from_strings, sarus_extra_mounts_from_strings};
 
 pub mod common;
 pub mod config;
@@ -211,7 +211,7 @@ fn get_default_writable() -> bool {
 }
 
 fn edf_from_raw(r: RawEDF, uenv: &Option<HashMap<String, String>>) -> SarusResult<EDF> {
-    Ok(EDF {
+    let mut edf = EDF {
         annotations: match r.annotations {
             Some(s) => annotations_as_hashmap(s),
             None => get_default_annotations(),
@@ -239,7 +239,7 @@ fn edf_from_raw(r: RawEDF, uenv: &Option<HashMap<String, String>>) -> SarusResul
             }
         },
         mounts: match r.mounts {
-            Some(s) => sarus_mounts_from_strings(s, uenv)?,
+            Some(ref s) => sarus_mounts_from_strings(s.to_vec(), uenv)?,
             None => get_default_mounts(),
         },
         workdir: match r.workdir {
@@ -250,7 +250,27 @@ fn edf_from_raw(r: RawEDF, uenv: &Option<HashMap<String, String>>) -> SarusResul
             Some(s) => s,
             None => get_default_writable(),
         },
-    })
+    };
+
+    if r.mounts.is_some() {
+        let mount_string = r.mounts.unwrap();
+        let extra_mounts = sarus_extra_mounts_from_strings(mount_string, uenv)?;
+        if !extra_mounts.is_empty() {
+            let mut ems = String::from("");
+            for em in extra_mounts {
+                let mount = em.to_string();
+                if ems.is_empty() {
+                    ems = format!("\"{mount}\"");
+                } else {
+                    ems = format!("{ems},\"{mount}\"");
+                }
+            }
+            ems = format!("[{ems}]");
+            edf.annotations.insert(String::from("com.sarus.extra_mounts"), ems);
+        }
+    }
+
+    Ok(edf)
 }
 
 fn load(file_path: &str) -> Result<String, Box<dyn Error>> {

@@ -77,6 +77,7 @@ fn spank_remote_get_edf(spank: &mut SpankHandle) -> Result<raster::EDF, Box<dyn 
     let key = "SLURM_EDF_EXPANDED";
     let value = spank_getenv(spank, key);
     let edf = raster::get_edf_from_string(value)?;
+    skybox_log_debug!("spank_remote_get_edf={:?}", edf);
     Ok(edf)
 }
 
