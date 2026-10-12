@@ -1,5 +1,5 @@
-use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize, Serializer};
+use std::collections::{HashMap, HashSet};
 
 use crate::common::expand_vars_string;
 use crate::error::{SarusError, SarusResult};
