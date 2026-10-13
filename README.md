@@ -25,7 +25,7 @@ Instead of consuming `raster` and `podman-driver` directly from git, this worksp
 
 | Crate                         | Purpose                                                           |
 | ----------------------------- | ----------------------------------------------------------------- |
-| **hpc-image-store**           | [Filesystem OCI image store foundations](crates/hpc-image-store/README.md), stage 1 |
+| **hpc-image-store**           | [Filesystem OCI image store](crates/hpc-image-store/README.md), stages 1–2 foundations and internal publication |
 | **skybox**                    | Slurm SPANK plugin implemented in Rust, built as a shared library |
 | **sarusctl**                  | CLI for testing raster + podman integration                       |
 | **sarus-suite-podman-driver** | Library for constructing Podman invocations from EDF              |

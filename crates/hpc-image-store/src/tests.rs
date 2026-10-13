@@ -193,6 +193,7 @@ fn handle_and_reads_do_not_initialize() {
 #[test]
 fn initialization_is_repeatable_and_preserves_permissions_and_lock_identity() {
     let temporary = tempfile::tempdir().unwrap();
+    fs::create_dir(temporary.path().join("parents")).unwrap();
     let path = temporary.path().join("parents/store");
     initialize(&path);
     for directory in DIRECTORIES {
@@ -361,18 +362,23 @@ fn lock_worker() {
         wait_for_instruction();
         return;
     }
-    if action == "bootstrap" {
-        // Pause at a real recoverable bootstrap state under the actual lock.
-        crate::initialization::create_directory(handle.config().root()).unwrap();
-        crate::initialization::create_directory(&handle.config().root().join("locks")).unwrap();
-        let _guard = crate::locks::initialization_lock(&handle.layout).unwrap();
-        for directory in DIRECTORIES {
-            crate::initialization::create_directory(&handle.config().root().join(directory))
-                .unwrap();
-        }
-        fs::write(handle.config().root().join(INIT_TEMP), b"partial marker").unwrap();
+    if action == "permissions" {
+        permission_cases();
         worker_ready();
         wait_for_instruction();
+        return;
+    }
+    let pause = match action.as_str() {
+        "bootstrap" => Some("initialization.scaffolding"),
+        "pause-root" => Some("initialization.root-created"),
+        "pause-lock" => Some("initialization.lock-created"),
+        "pause-parent" => Some("initialization.parent-synced"),
+        "pause-marker" => Some("initialization.marker-renamed"),
+        _ => None,
+    };
+    if let Some(point) = pause {
+        crate::fsutil::pause_once(point);
+        drop(handle.prepare(Operation::Import).unwrap());
         return;
     }
     let operation = match action.as_str() {
@@ -429,6 +435,10 @@ impl Worker {
             .stdout(Stdio::piped());
         if let Some(reference) = reference {
             command.env("HPC_STORE_TEST_REF", reference);
+        }
+        if operation == "permissions" && unsafe { libc::geteuid() } == 0 {
+            use std::os::unix::process::CommandExt;
+            command.gid(65534).uid(65534);
         }
         let mut child = command.spawn().unwrap();
         let output = child.stdout.take().unwrap();
@@ -563,7 +573,7 @@ fn killed_bootstrap_can_be_resumed_without_replacing_its_lock() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("store");
     let mut bootstrap = Worker::start(&root, "bootstrap", None);
-    bootstrap.wait_for("WORKER_READY");
+    bootstrap.wait_for("PUBLICATION_PAUSED");
     let lock = root.join("locks/store.lock");
     let inode = fs::metadata(&lock).unwrap().ino();
     let mut initializer = Worker::start(&root, "initialize", None);
@@ -575,4 +585,229 @@ fn killed_bootstrap_can_be_resumed_without_replacing_its_lock() {
     assert_eq!(fs::metadata(lock).unwrap().ino(), inode);
     assert!(root.join("store.json").is_file());
     assert!(!root.join(INIT_TEMP).exists());
+}
+
+#[test]
+fn missing_parent_is_rejected_without_creating_ancestors() {
+    let temporary = tempfile::tempdir().unwrap();
+    let parent = temporary.path().join("missing/deeper");
+    assert!(
+        store(&parent.join("store"))
+            .prepare(Operation::Import)
+            .is_err()
+    );
+    assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn obsolete_setup_artifacts_are_rejected_without_changes() {
+    for name in [
+        ".store-bootstrap.json",
+        ".store-bootstrap-abcdefghijkl",
+        ".store-chain-abcdefghijkl",
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join(name);
+        fs::write(&path, b"obsolete data").unwrap();
+        assert!(matches!(
+            store(temporary.path()).prepare(Operation::Import),
+            Err(Error::InvalidStore { .. })
+        ));
+        assert_eq!(fs::read(path).unwrap(), b"obsolete data");
+        assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn initialization_syncs_only_the_root_and_its_immediate_parent_in_order() {
+    use crate::initialization::take_events;
+    for existing in [false, true] {
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = temporary.path().join("prepared");
+        fs::create_dir(&parent).unwrap();
+        let root = parent.join("store");
+        if existing {
+            fs::create_dir(&root).unwrap();
+        }
+        take_events();
+        initialize(&root);
+        let events = take_events();
+        let mut expected = vec![
+            ("temporary-marker-sync", root.join(INIT_TEMP)),
+            ("lock-sync", root.join("locks/store.lock")),
+        ];
+        expected.extend(
+            DIRECTORIES
+                .iter()
+                .rev()
+                .map(|name| ("directory-sync", root.join(name))),
+        );
+        expected.extend([
+            ("directory-sync", root.clone()),
+            ("directory-sync", parent),
+            ("marker-renamed", root.join("store.json")),
+            ("directory-sync", root.clone()),
+        ]);
+        assert_eq!(events, expected);
+        for name in ["blobs/sha256", "refs", "generations", "tmp", "locks/refs"] {
+            assert_eq!(fs::read_dir(root.join(name)).unwrap().count(), 0);
+        }
+        // A supported version-1 store has no private recovery record.
+        assert!(!root.join(".store-bootstrap.json").exists());
+        initialize(&root);
+        assert_eq!(
+            take_events(),
+            vec![
+                ("marker-sync", root.join("store.json")),
+                ("directory-sync", root.clone()),
+            ]
+        );
+        drop(store(&root).prepare(Operation::List).unwrap());
+        assert!(take_events().is_empty());
+    }
+}
+
+#[test]
+fn final_sync_failure_remains_a_failure_until_the_fault_clears() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("store");
+    crate::fsutil::fail_persistently("initialization.final-root-sync", libc::EIO);
+    for _ in 0..3 {
+        assert!(matches!(store(&root).prepare(Operation::Import),
+            Err(Error::InitializationDurability { path, source })
+                if path == root && source.raw_os_error() == Some(libc::EIO)));
+        assert!(root.join("store.json").is_file());
+    }
+    let inode = fs::metadata(root.join("locks/store.lock")).unwrap().ino();
+    // Reads do not run the mutation durability preparation.
+    drop(store(&root).prepare(Operation::List).unwrap());
+    crate::fsutil::clear_failure();
+    initialize(&root);
+    assert_eq!(
+        fs::metadata(root.join("locks/store.lock")).unwrap().ino(),
+        inode
+    );
+
+    crate::fsutil::fail_persistently("initialization.marker-sync", libc::EIO);
+    for _ in 0..2 {
+        assert!(matches!(store(&root).prepare(Operation::Import),
+            Err(Error::InitializationDurability { path, .. }) if path == root.join("store.json")));
+    }
+    crate::fsutil::clear_failure();
+    initialize(&root);
+}
+
+#[test]
+fn parent_sync_failure_preserves_retryable_setup_and_never_publishes_a_marker() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("store");
+    crate::fsutil::fail_persistently("initialization.parent-sync", libc::EIO);
+    for _ in 0..2 {
+        assert!(
+            matches!(store(&root).prepare(Operation::Import), Err(Error::Io { path, .. }) if path == temporary.path())
+        );
+        assert!(!root.join("store.json").exists());
+        assert!(root.join(INIT_TEMP).is_file());
+    }
+    let root_inode = fs::metadata(&root).unwrap().ino();
+    let lock_inode = fs::metadata(root.join("locks/store.lock")).unwrap().ino();
+    crate::fsutil::clear_failure();
+    crate::initialization::take_events();
+    initialize(&root);
+    let events = crate::initialization::take_events();
+    let parent_sync = events
+        .iter()
+        .position(|(event, path)| *event == "directory-sync" && path == temporary.path())
+        .unwrap();
+    let publication = events
+        .iter()
+        .position(|(event, _)| *event == "marker-renamed")
+        .unwrap();
+    assert!(parent_sync < publication);
+    assert_eq!(fs::metadata(&root).unwrap().ino(), root_inode);
+    assert_eq!(
+        fs::metadata(root.join("locks/store.lock")).unwrap().ino(),
+        lock_inode
+    );
+}
+
+#[test]
+fn interrupted_initialization_preserves_root_and_lock_identities() {
+    for action in [
+        "pause-root",
+        "pause-lock",
+        "bootstrap",
+        "pause-parent",
+        "pause-marker",
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("store");
+        let mut interrupted = Worker::start(&root, action, None);
+        interrupted.wait_for("PUBLICATION_PAUSED");
+        let root_inode = fs::metadata(&root).unwrap().ino();
+        let lock = root.join("locks/store.lock");
+        let lock_inode = fs::metadata(&lock).ok().map(|metadata| metadata.ino());
+        interrupted.child.kill().unwrap();
+        interrupted.child.wait().unwrap();
+        crate::initialization::take_events();
+        initialize(&root);
+        let events = crate::initialization::take_events();
+        if action == "pause-marker" {
+            assert_eq!(
+                events,
+                vec![
+                    ("marker-sync", root.join("store.json")),
+                    ("directory-sync", root.clone())
+                ]
+            );
+        } else {
+            assert!(
+                events
+                    .iter()
+                    .any(|(event, path)| *event == "directory-sync" && path == temporary.path())
+            );
+        }
+        assert_eq!(fs::metadata(&root).unwrap().ino(), root_inode);
+        if let Some(inode) = lock_inode {
+            assert_eq!(fs::metadata(&lock).unwrap().ino(), inode);
+        }
+        assert!(root.join("store.json").is_file());
+    }
+}
+
+#[test]
+fn initialization_permission_contract_is_verified_without_root_privileges() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut worker = Worker::start(temporary.path(), "permissions", None);
+    worker.wait_for("WORKER_READY");
+    worker.release();
+}
+
+fn permission_cases() {
+    assert_ne!(
+        unsafe { libc::geteuid() },
+        0,
+        "permission checks require an unprivileged process"
+    );
+    let temporary = tempfile::tempdir().unwrap();
+    let parent = temporary.path().join("parent");
+    fs::create_dir(&parent).unwrap();
+    let marked = parent.join("marked");
+    initialize(&marked);
+    let unmarked = parent.join("unmarked");
+    fs::create_dir(&unmarked).unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o100)).unwrap();
+    initialize(&marked);
+    initialize(&marked);
+    assert!(matches!(store(&unmarked).prepare(Operation::Import),
+        Err(Error::Io { path, source, .. }) if path == parent && source.kind() == std::io::ErrorKind::PermissionDenied));
+    assert!(!unmarked.join("store.json").exists());
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+    initialize(&unmarked);
+    let prepared = parent.join("prepared");
+    fs::create_dir(&prepared).unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o100)).unwrap();
+    initialize(&prepared.join("store"));
+    initialize(&prepared.join("store"));
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
 }
