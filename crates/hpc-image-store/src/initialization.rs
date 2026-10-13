@@ -1,8 +1,9 @@
 use crate::{
     Error, Result, StoreMetadata,
     error::io_error,
+    fsutil,
     layout::{DIRECTORIES, INIT_TEMP, Layout},
-    locks::initialization_lock,
+    locks::{Operation, StoreGuard, initialization_lock},
 };
 use std::{
     fs::{self, DirBuilder, File, OpenOptions},
@@ -138,40 +139,45 @@ fn validate_scaffolding(layout: &Layout) -> Result<()> {
 }
 
 pub(crate) fn initialize(layout: &Layout) -> Result<()> {
-    // Preflight prevents adding bootstrap entries to a foreign or unsupported store.
+    // Reject unsupported markers before adding setup files.
     match fs::symlink_metadata(layout.root()) {
         Ok(_) => {
             require_directory(layout.root())?;
             if marker_exists(layout)? {
-                return validate_initialized(layout);
-            } else if let Err(error) = validate_scaffolding(layout) {
-                // A concurrent initializer may have committed during enumeration.
-                if marker_exists(layout)? {
-                    validate_initialized(layout)?;
-                } else {
-                    return Err(error);
-                }
+                return sync_initialized(layout);
             }
         }
         Err(source) if source.kind() == io::ErrorKind::NotFound => {
-            DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(layout.root())
-                .map_err(|source| io_error("create store root", layout.root(), source))?;
-            require_directory(layout.root())?;
+            // Creating the root is the only change allowed outside the store.
+            // A missing parent is an error; no ancestors are created.
+            create_directory(layout.root())?;
+            fsutil::checkpoint("initialization.root-created", layout.root())?;
         }
         Err(source) => return Err(io_error("inspect store root", layout.root(), source)),
+    }
+    // A completed concurrent initializer may already have published image data.
+    if marker_exists(layout)? {
+        return sync_initialized(layout);
+    }
+    if let Err(error) = validate_scaffolding(layout) {
+        if marker_exists(layout)? {
+            return sync_initialized(layout);
+        }
+        return Err(error);
     }
     create_directory(&layout.root().join("locks"))?;
     let _guard = initialization_lock(layout)?;
     if marker_exists(layout)? {
-        return validate_initialized(layout);
+        // Release exclusive initialization locking before the initialized-store path.
+        drop(_guard);
+        return sync_initialized(layout);
     }
     validate_scaffolding(layout)?;
+    fsutil::checkpoint("initialization.lock-created", layout.root())?;
     for directory in DIRECTORIES {
         create_directory(&layout.root().join(directory))?;
     }
+    fsutil::checkpoint("initialization.scaffolding", layout.root())?;
     let temporary = layout.root().join(INIT_TEMP);
     // An interrupted initializer may have left this exact private file. No other
     // temporary files are recognized, and no lock file is ever replaced.
@@ -194,9 +200,11 @@ pub(crate) fn initialize(layout: &Layout) -> Result<()> {
         })?;
     file.write_all(&bytes)
         .map_err(|source| io_error("write store marker", &temporary, source))?;
+    trace("temporary-marker-sync", &temporary);
     file.sync_all()
         .map_err(|source| io_error("sync temporary marker", &temporary, source))?;
     // Persist the lock identity and scaffolding before the marker makes them live.
+    trace("lock-sync", &layout.store_lock());
     open_regular(&layout.store_lock())?
         .sync_all()
         .map_err(|source| io_error("sync store lock", &layout.store_lock(), source))?;
@@ -204,18 +212,34 @@ pub(crate) fn initialize(layout: &Layout) -> Result<()> {
         sync_directory(&layout.root().join(directory), false)?;
     }
     sync_directory(layout.root(), false)?;
+    let parent = layout
+        .root()
+        .parent()
+        .ok_or_else(|| invalid(layout.root(), "store root has no parent"))?;
+    fsutil::checkpoint("initialization.parent-sync", parent)?;
+    sync_directory(parent, false)?;
+    fsutil::checkpoint("initialization.parent-synced", parent)?;
     fs::rename(&temporary, layout.marker())
         .map_err(|source| io_error("publish store marker", &layout.marker(), source))?;
+    trace("marker-renamed", &layout.marker());
+    fsutil::fault("initialization.marker-renamed").map_err(|source| {
+        Error::InitializationDurability {
+            path: layout.root().to_owned(),
+            source,
+        }
+    })?;
     sync_directory(layout.root(), true)?;
-    // Also persist a newly created root and any newly created parent directories.
-    for parent in layout.root().ancestors().skip(1) {
-        sync_directory(parent, true)?;
-    }
     Ok(())
 }
 
-fn sync_directory(path: &Path, published: bool) -> Result<()> {
-    let result = File::open(path).and_then(|file| file.sync_all());
+pub(crate) fn sync_directory(path: &Path, published: bool) -> Result<()> {
+    trace("directory-sync", path);
+    let result = if published {
+        fsutil::fault("initialization.final-root-sync")
+    } else {
+        Ok(())
+    }
+    .and_then(|()| File::open(path).and_then(|file| file.sync_all()));
     result.map_err(|source| {
         if published {
             Error::InitializationDurability {
@@ -226,4 +250,35 @@ fn sync_directory(path: &Path, published: bool) -> Result<()> {
             io_error("sync directory", path, source)
         }
     })
+}
+
+// Marked stores need no ancestry access: that work precedes marker publication.
+fn sync_initialized(layout: &Layout) -> Result<()> {
+    validate_initialized(layout)?;
+    let _guard = StoreGuard::acquire(layout, Operation::Import)?;
+    validate_initialized(layout)?;
+    trace("marker-sync", &layout.marker());
+    let marker = open_regular(&layout.marker())?;
+    fsutil::fault("initialization.marker-sync")
+        .and_then(|()| marker.sync_all())
+        .map_err(|source| Error::InitializationDurability {
+            path: layout.marker(),
+            source,
+        })?;
+    sync_directory(layout.root(), true)
+}
+
+// Only tests record events; production has no tracing configuration.
+fn trace(_event: &'static str, _path: &Path) {
+    #[cfg(test)]
+    EVENTS.with(|events| events.borrow_mut().push((_event, _path.to_owned())));
+}
+
+#[cfg(test)]
+thread_local! {
+    static EVENTS: std::cell::RefCell<Vec<(&'static str, std::path::PathBuf)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+#[cfg(test)]
+pub(crate) fn take_events() -> Vec<(&'static str, std::path::PathBuf)> {
+    EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
 }

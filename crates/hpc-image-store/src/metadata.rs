@@ -22,7 +22,7 @@ impl StoreMetadata {
     }
 }
 
-/// Stage-1 envelope, not yet the metadata schema for published images.
+/// Minimal stage-1/2 envelope; acquisition metadata is added in later stages.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RefMetadata {
     version: u64,

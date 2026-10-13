@@ -2,9 +2,45 @@ use std::{io, path::PathBuf, time::Duration};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// A namespace mutation that may already be visible when durability fails.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NamespaceChange {
+    BlobInserted,
+    RefPublished,
+    RefRemoved,
+}
+
+impl std::fmt::Display for NamespaceChange {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::BlobInserted => "blob insertion",
+            Self::RefPublished => "reference publication",
+            Self::RefRemoved => "reference removal",
+        })
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("reference already exists: {0}")]
+    RefExists(crate::LocalRef),
+    #[error("reference does not exist: {0}")]
+    RefMissing(crate::LocalRef),
+    #[error("invalid object {path}: {reason}")]
+    InvalidObject { path: PathBuf, reason: String },
+    #[error("invalid committed pointer {path}: {reason}")]
+    InvalidPointer { path: PathBuf, reason: &'static str },
+    #[error("invalid lock use: {0}")]
+    Coordination(&'static str),
+    #[error("{change} at {path} may already be visible; failed to sync {sync_path}: {source}")]
+    Durability {
+        change: NamespaceChange,
+        path: PathBuf,
+        sync_path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("invalid local reference {value:?}: {reason}")]
     InvalidRef { value: String, reason: &'static str },
     #[error("invalid SHA-256 digest {0:?}")]

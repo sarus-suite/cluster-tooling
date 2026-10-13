@@ -210,6 +210,8 @@ impl<'a> StoreGuard<'a> {
         Ok(RefGuard {
             _lock: FileLock::acquire(&self.layout.ref_lock(reference), mode, true)?,
             _store: self,
+            reference: reference.clone(),
+            mode,
         })
     }
 }
@@ -217,6 +219,40 @@ impl<'a> StoreGuard<'a> {
 pub(crate) struct RefGuard<'a> {
     _lock: FileLock,
     _store: &'a StoreGuard<'a>,
+    reference: LocalRef,
+    mode: Mode,
+}
+
+impl StoreGuard<'_> {
+    pub(crate) fn layout(&self) -> &Layout {
+        self.layout
+    }
+    pub(crate) fn require_shared(&self) -> Result<()> {
+        if self.operation.store_mode() != Mode::Shared {
+            return Err(Error::Coordination(
+                "this operation requires a shared store lock",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl RefGuard<'_> {
+    pub(crate) fn reference(&self) -> &LocalRef {
+        &self.reference
+    }
+    pub(crate) fn layout(&self) -> &Layout {
+        self._store.layout
+    }
+    pub(crate) fn require_exclusive(&self) -> Result<()> {
+        self._store.require_shared()?;
+        if self.mode != Mode::Exclusive {
+            return Err(Error::Coordination(
+                "ref mutation requires an exclusive ref lock",
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn initialization_lock(layout: &Layout) -> Result<FileLock> {
