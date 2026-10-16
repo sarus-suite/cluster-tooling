@@ -6,6 +6,7 @@
   "privileged": true,
   "remoteUser": "vscode",
   "updateRemoteUserUID": true,
+  "postStartCommand": "bash .devcontainer/integration/check.sh",
   "customizations": {
     "vscode": {
       "extensions": [

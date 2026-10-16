@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/devcontainers/base:bookworm
+FROM mcr.microsoft.com/devcontainers/base:debian13
 
 ARG SLURM_VERSION=26.5.4
 
@@ -52,7 +52,6 @@ RUN printf 'vscode:1001:64536\n' > /etc/subuid \
 ENV CARGO_HOME=/home/vscode/.cargo \
     RUSTUP_HOME=/home/vscode/.rustup \
     CARGO_TARGET_DIR=/home/vscode/.cache/cargo-target \
-    INTEGRATION_OVERLAY_MODE=native \
     PATH=/home/vscode/.cargo/bin:${PATH}
 
 USER vscode
