@@ -57,12 +57,12 @@ pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
-        .map_err(|source| io_error("create generation file", path, source))?;
+        .map_err(|source| io_error("create raw-image file", path, source))?;
     file.write_all(bytes)
-        .map_err(|source| io_error("write generation file", path, source))?;
-    checkpoint("generation.file-sync", path)?;
+        .map_err(|source| io_error("write raw-image file", path, source))?;
+    checkpoint("raw_image.file-sync", path)?;
     file.sync_all()
-        .map_err(|source| io_error("sync generation file", path, source))
+        .map_err(|source| io_error("sync raw-image file", path, source))
 }
 
 pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {

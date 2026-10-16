@@ -246,7 +246,7 @@ fn foreign_unsupported_and_incompatible_stores_are_rejected() {
     for entry in [
         "refs/image",
         "blobs/sha256/object",
-        "generations/data",
+        "raw_images/data",
         "tmp/acquisition",
         "locks/refs/ref.lock",
     ] {
@@ -297,9 +297,9 @@ fn reads_reject_missing_markers_and_symlinked_locks() {
 fn initialized_stores_are_not_repaired_and_ref_lock_paths_reject_symlinks() {
     let temporary = tempfile::tempdir().unwrap();
     initialize(temporary.path());
-    fs::remove_dir(temporary.path().join("generations")).unwrap();
+    fs::remove_dir(temporary.path().join("raw_images")).unwrap();
     assert!(store(temporary.path()).prepare(Operation::Import).is_err());
-    assert!(!temporary.path().join("generations").exists());
+    assert!(!temporary.path().join("raw_images").exists());
 
     let temporary = tempfile::tempdir().unwrap();
     initialize(temporary.path());
@@ -649,7 +649,7 @@ fn initialization_syncs_only_the_root_and_its_immediate_parent_in_order() {
             ("directory-sync", root.clone()),
         ]);
         assert_eq!(events, expected);
-        for name in ["blobs/sha256", "refs", "generations", "tmp", "locks/refs"] {
+        for name in ["blobs/sha256", "refs", "raw_images", "tmp", "locks/refs"] {
             assert_eq!(fs::read_dir(root.join(name)).unwrap().count(), 0);
         }
         // A supported version-1 store has no private recovery record.

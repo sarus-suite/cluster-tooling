@@ -3,7 +3,7 @@ use crate::{
     error::io_error,
     fsutil,
     initialization::{create_directory, require_directory},
-    layout::valid_generation_id,
+    layout::valid_raw_image_id,
     locks::RefGuard,
     oci::{self, Descriptor},
     staging::CompletedStage,
@@ -58,7 +58,7 @@ fn replaceable(path: &Path, metadata: &fs::Metadata) -> Result<()> {
     Ok(())
 }
 
-/// Publish only after content and a matching generation are durable. The ref's
+/// Publish only after content and a matching raw image are durable. The ref's
 /// exclusive guard serializes the destination policy and namespace change.
 pub(crate) fn publish(stage: CompletedStage<'_>, replace: bool) -> Result<PathBuf> {
     let guard = stage.guard();
@@ -73,18 +73,18 @@ pub(crate) fn publish(stage: CompletedStage<'_>, replace: bool) -> Result<PathBu
     for blob in stage.blobs() {
         cas::insert(guard, blob)?;
     }
-    fsutil::checkpoint("generation.prepare", &guard.layout().generations())?;
-    let generation = fsutil::unique_directory(&guard.layout().generations(), "generation-")?;
-    create_directory(&generation.join("blobs"))?;
-    oci::write_layout(&generation, stage.root())?;
+    fsutil::checkpoint("raw_image.prepare", &guard.layout().raw_images())?;
+    let raw_image = fsutil::unique_directory(&guard.layout().raw_images(), "raw-")?;
+    create_directory(&raw_image.join("blobs"))?;
+    oci::write_layout(&raw_image, stage.root())?;
     let metadata = serde_json::to_vec(stage.metadata()).map_err(|source| Error::Metadata {
         kind: "ref",
         source,
     })?;
-    fsutil::write_new(&generation.join("metadata.json"), &metadata)?;
-    fsutil::sync_before_commit(&generation.join("blobs"), "generation.blobs-sync")?;
-    fsutil::sync_before_commit(&generation, "generation.directory-sync")?;
-    fsutil::sync_before_commit(&guard.layout().generations(), "generation.parent-sync")?;
+    fsutil::write_new(&raw_image.join("metadata.json"), &metadata)?;
+    fsutil::sync_before_commit(&raw_image.join("blobs"), "raw_image.blobs-sync")?;
+    fsutil::sync_before_commit(&raw_image, "raw_image.directory-sync")?;
+    fsutil::sync_before_commit(&guard.layout().raw_images(), "raw_image.parent-sync")?;
 
     // Different refs can share these namespace parents. Each publisher syncs
     // its entire path; directories are never pruned by this stage.
@@ -98,8 +98,8 @@ pub(crate) fn publish(stage: CompletedStage<'_>, replace: bool) -> Result<PathBu
     for directory in parents.iter().rev() {
         fsutil::sync_before_commit(directory, "ref.namespace-sync")?;
     }
-    let id = generation.file_name().unwrap().to_str().unwrap();
-    let target = guard.layout().generation_target(guard.reference(), id);
+    let id = raw_image.file_name().unwrap().to_str().unwrap();
+    let target = guard.layout().raw_image_target(guard.reference(), id);
     let temporary = stage.directory().join("ref-pointer");
     symlink(target, &temporary)
         .map_err(|source| io_error("prepare committed pointer", &temporary, source))?;
@@ -108,7 +108,7 @@ pub(crate) fn publish(stage: CompletedStage<'_>, replace: bool) -> Result<PathBu
     fs::rename(&temporary, &destination)
         .map_err(|source| io_error("publish committed pointer", &destination, source))?;
     // From here onward an error must say that the new ref may be visible. Do
-    // not roll back: readers may already have observed the complete generation.
+    // not roll back: readers may already have observed the complete raw image.
     fsutil::sync_after_commit(
         &parent,
         "ref.destination-sync",
@@ -121,7 +121,7 @@ pub(crate) fn publish(stage: CompletedStage<'_>, replace: bool) -> Result<PathBu
         NamespaceChange::RefPublished,
         &destination,
     )?;
-    Ok(generation)
+    Ok(raw_image)
 }
 
 pub(crate) fn remove(guard: &RefGuard<'_>) -> Result<()> {
@@ -141,7 +141,7 @@ pub(crate) fn remove(guard: &RefGuard<'_>) -> Result<()> {
 }
 
 /// Validate the exact relative pointer shape before touching its target.
-pub(crate) fn generation_path(guard: &RefGuard<'_>) -> Result<PathBuf> {
+pub(crate) fn raw_image_path(guard: &RefGuard<'_>) -> Result<PathBuf> {
     let path = guard.layout().ref_entry(guard.reference());
     let metadata =
         namespace_entry(guard)?.ok_or_else(|| Error::RefMissing(guard.reference().clone()))?;
@@ -153,45 +153,45 @@ pub(crate) fn generation_path(guard: &RefGuard<'_>) -> Result<PathBuf> {
     let id = target
         .file_name()
         .and_then(|name| name.to_str())
-        .filter(|name| valid_generation_id(name))
-        .ok_or_else(|| invalid(&path, "unrecognized generation identity"))?;
-    let expected = guard.layout().generation_target(guard.reference(), id);
+        .filter(|name| valid_raw_image_id(name))
+        .ok_or_else(|| invalid(&path, "unrecognized raw-image identity"))?;
+    let expected = guard.layout().raw_image_target(guard.reference(), id);
     if target.as_os_str() != expected.as_os_str() {
         return Err(invalid(
             &path,
-            "pointer must be the canonical relative path into generations",
+            "pointer must be the canonical relative path into raw_images",
         ));
     }
-    let generation = guard.layout().generation(id);
-    require_directory(&generation)?;
-    Ok(generation)
+    let raw_image = guard.layout().raw_image(id);
+    require_directory(&raw_image)?;
+    Ok(raw_image)
 }
 
-/// The borrowed guard keeps the selected generation protected from prune for
+/// The borrowed guard keeps the selected raw image protected from prune for
 /// the whole time the caller reads or uses it.
 pub(crate) struct ResolvedRef<'a> {
     _guard: &'a RefGuard<'a>,
-    pub generation: PathBuf,
+    pub raw_image: PathBuf,
     pub root: Descriptor,
     pub metadata: RefMetadata,
 }
 
 pub(crate) fn read<'a>(guard: &'a RefGuard<'a>) -> Result<ResolvedRef<'a>> {
-    let generation = generation_path(guard)?;
-    require_directory(&generation.join("blobs"))?;
-    let root = oci::single_root(&generation)?;
+    let raw_image = raw_image_path(guard)?;
+    require_directory(&raw_image.join("blobs"))?;
+    let root = oci::single_root(&raw_image)?;
     let metadata =
-        RefMetadata::from_json(&fsutil::read_regular(&generation.join("metadata.json"))?)?;
+        RefMetadata::from_json(&fsutil::read_regular(&raw_image.join("metadata.json"))?)?;
     if &metadata.local_ref != guard.reference() || metadata.stored_root != root.digest {
         return Err(Error::InvalidObject {
-            path: generation.join("metadata.json"),
+            path: raw_image.join("metadata.json"),
             reason: "metadata disagrees with logical ref or layout root".into(),
         });
     }
     fsutil::sized_object(&guard.layout().blob(&root.digest), root.size)?;
     Ok(ResolvedRef {
         _guard: guard,
-        generation,
+        raw_image,
         root,
         metadata,
     })

@@ -5,7 +5,7 @@ pub(crate) const DIRECTORIES: &[&str] = &[
     "blobs",
     "blobs/sha256",
     "refs",
-    "generations",
+    "raw_images",
     "tmp",
     "locks",
     "locks/refs",
@@ -47,30 +47,30 @@ impl Layout {
     pub fn blob(&self, digest: &Sha256Digest) -> PathBuf {
         self.blobs().join(digest.hex())
     }
-    pub fn generations(&self) -> PathBuf {
-        self.root.join("generations")
+    pub fn raw_images(&self) -> PathBuf {
+        self.root.join("raw_images")
     }
-    pub fn generation(&self, id: &str) -> PathBuf {
-        self.generations().join(id)
+    pub fn raw_image(&self, id: &str) -> PathBuf {
+        self.raw_images().join(id)
     }
     pub fn staging(&self) -> PathBuf {
         self.root.join("tmp")
     }
 
-    pub fn generation_target(&self, reference: &LocalRef, id: &str) -> PathBuf {
+    pub fn raw_image_target(&self, reference: &LocalRef, id: &str) -> PathBuf {
         let mut target = PathBuf::new();
         // From refs/<key components>/ back to the store root.
         for _ in 0..=reference.encoded_path().components().count() {
             target.push("..");
         }
-        target.push("generations");
+        target.push("raw_images");
         target.push(id);
         target
     }
 }
 
-pub(crate) fn valid_generation_id(id: &str) -> bool {
-    id.strip_prefix("generation-").is_some_and(|suffix| {
+pub(crate) fn valid_raw_image_id(id: &str) -> bool {
+    id.strip_prefix("raw-").is_some_and(|suffix| {
         suffix.len() == 12 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
     })
 }
