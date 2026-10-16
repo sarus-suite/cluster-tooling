@@ -1,20 +1,19 @@
 {
   "name": "Workspace integration tests (rootless Podman + Skopeo)",
   "build": {
-    "dockerfile": "Dockerfile",
-    "context": "../.."
+    "dockerfile": "Dockerfile"
   },
   "privileged": true,
   "remoteUser": "vscode",
   "updateRemoteUserUID": true,
-  "workspaceFolder": "/workspaces/cluster-tooling",
-  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/cluster-tooling,type=bind",
-  "postStartCommand": "bash .devcontainer/integration/check.sh",
   "customizations": {
     "vscode": {
       "extensions": [
         "rust-lang.rust-analyzer",
-        "tamasfe.even-better-toml"
+        "tamasfe.even-better-toml",
+        "fill-labs.dependi",
+        "openai.chatgpt",
+        "anthropic.claude-code"
       ],
       "settings": {
         "rust-analyzer.check.command": "clippy",
