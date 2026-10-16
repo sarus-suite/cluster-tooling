@@ -1289,7 +1289,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "raster"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "derivative",
  "is_executable",
@@ -1473,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "sarusctl"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -1642,7 +1642,7 @@ checksum = "726c1f160d565e9cef6ecaf0305c86fb254a9c6db6cb29379680b0213aa3a7e1"
 
 [[package]]
 name = "skybox"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cfg-if",
  "eyre",
