@@ -40,15 +40,18 @@ RUN set -eu; \
     cd /; \
     rm -rf "$temporary"
 
-COPY .devcontainer/integration/containers.conf /etc/containers/containers.conf
+COPY containers.conf /etc/containers/containers.conf
 RUN printf 'unqualified-search-registries = ["docker.io"]\n' \
-        > /etc/containers/registries.conf
+        > /etc/containers/registries.conf \
+    && printf '[storage]\ndriver = "overlay"\n' > /etc/containers/storage.conf
 
-ENV XDG_RUNTIME_DIR=/tmp/cluster-tooling-runtime \
-    CARGO_HOME=/home/vscode/.cargo \
+# Allocate subordinate IDs within the outer container namespace, assuming vscode is UID 1000 and GID 1000
+RUN printf 'vscode:1001:64536\n' > /etc/subuid \
+    && printf 'vscode:1001:64536\n' > /etc/subgid
+
+ENV CARGO_HOME=/home/vscode/.cargo \
     RUSTUP_HOME=/home/vscode/.rustup \
     CARGO_TARGET_DIR=/home/vscode/.cache/cargo-target \
-    CONTAINERS_STORAGE_CONF=/home/vscode/.config/containers/integration-native.conf \
     INTEGRATION_OVERLAY_MODE=native \
     PATH=/home/vscode/.cargo/bin:${PATH}
 
