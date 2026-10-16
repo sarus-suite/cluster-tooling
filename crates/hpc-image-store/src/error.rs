@@ -23,6 +23,39 @@ impl std::fmt::Display for NamespaceChange {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("invalid OCI transfer JSON at {path}: {source}")]
+    ContentJson {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("invalid transfer argument: {0}")]
+    InvalidTransfer(String),
+    #[error("{executable} lacks required capability {capability}")]
+    ToolCapability {
+        executable: PathBuf,
+        capability: &'static str,
+    },
+    #[error("failed to {operation} using {executable}: {source}")]
+    ToolIo {
+        operation: &'static str,
+        executable: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("{operation} using {executable} failed ({status}): {stderr}")]
+    ToolFailed {
+        operation: &'static str,
+        executable: PathBuf,
+        status: std::process::ExitStatus,
+        stderr: String,
+    },
+    #[error("invalid output from {executable} during {operation}: {reason}")]
+    ToolOutput {
+        operation: &'static str,
+        executable: PathBuf,
+        reason: String,
+    },
     #[error("reference already exists: {0}")]
     RefExists(crate::LocalRef),
     #[error("reference does not exist: {0}")]

@@ -1,5 +1,5 @@
 //! Foundations for a Linux, user-owned filesystem OCI image store.
-//! Internal publication primitives are available; image operations are not yet implemented.
+//! Synchronous containers-storage import and export using private OCI staging.
 
 #![doc = include_str!("../README.md")]
 
@@ -8,7 +8,7 @@ compile_error!("hpc-image-store currently supports Linux only");
 
 mod error;
 mod identity;
-// Publication remains internal until the acquisition operations are implemented.
+// Storage primitives are internal; transfers own their locking and publication.
 #[allow(dead_code)]
 mod cas;
 #[allow(dead_code)]
@@ -21,7 +21,7 @@ mod oci;
 mod refs;
 #[allow(dead_code)]
 mod staging;
-// These internal foundations will be used by the image operations in later stages.
+// Coordination also defines the operations reserved for later stages.
 #[allow(dead_code)]
 mod initialization;
 #[allow(dead_code)]
@@ -30,11 +30,15 @@ mod layout;
 mod locks;
 mod metadata;
 mod store;
+mod subprocess;
+mod transfer;
 
 pub use error::{Error, NamespaceChange, Result};
 pub use identity::{LocalRef, Sha256Digest};
-pub use metadata::{RefMetadata, StoreMetadata};
+pub use metadata::{Acquisition, ContentMetadata, ImageId, Platform, RefMetadata, StoreMetadata};
+pub use staging::CleanupWarning;
 pub use store::{Store, StoreConfig};
+pub use transfer::{ExportReport, ImportOptions, ImportReport, TransferContext};
 
 #[cfg(test)]
 mod tests;

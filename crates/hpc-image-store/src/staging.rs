@@ -6,8 +6,59 @@ use crate::{
 };
 use std::{
     collections::BTreeMap,
+    fs,
     path::{Path, PathBuf},
 };
+
+/// The ref is durably published, but private staging could not be completely
+/// removed or its removal could not be saved. Future prune can retry remnants.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct CleanupWarning {
+    pub staging_path: PathBuf,
+    pub message: String,
+}
+
+/// Call only after successful durable publication, with the operation's guards
+/// still alive and all acquisition writers stopped. The directory is the exact
+/// private operation path retained from CompletedStage, never a discovered path.
+pub(crate) fn cleanup_published(guard: &RefGuard<'_>, directory: &Path) -> Option<CleanupWarning> {
+    let cleanup = || -> Result<()> {
+        guard.require_exclusive()?;
+        let parent = guard.layout().staging();
+        if directory.parent() != Some(parent.as_path()) {
+            return Err(Error::InvalidObject {
+                path: directory.to_owned(),
+                reason: "cleanup requires a direct private staging directory".into(),
+            });
+        }
+        require_directory(&parent)?;
+        fsutil::checkpoint("staging.cleanup-remove", directory)?;
+        // remove_dir_all unlinks symlinks rather than following their targets,
+        // including symlinks encountered within the private operation tree.
+        fs::remove_dir_all(directory).map_err(|source| {
+            crate::error::io_error("remove published staging", directory, source)
+        })?;
+        Ok(())
+    };
+    if let Err(error) = cleanup() {
+        return Some(CleanupWarning {
+            staging_path: directory.to_owned(),
+            message: format!("image is published; staging cleanup incomplete: {error}"),
+        });
+    }
+    let parent = guard.layout().staging();
+    let sync = fsutil::checkpoint("staging.cleanup-parent-sync", &parent).and_then(|()| {
+        fsutil::sync_directory(&parent).map_err(|source| {
+            crate::error::io_error("sync staging parent after cleanup", &parent, source)
+        })
+    });
+    sync.err().map(|error| CleanupWarning {
+        staging_path: directory.to_owned(),
+        message: format!(
+            "image is published; staging was removed but removal may not survive a crash: {error}"
+        ),
+    })
+}
 
 /// The acquisition producer supplies identities and sizes it has validated.
 #[derive(Clone)]

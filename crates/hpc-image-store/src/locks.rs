@@ -7,7 +7,10 @@ use crate::{
 use std::{
     fs::{File, OpenOptions},
     io::{self, Write},
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    os::{
+        fd::{AsRawFd, RawFd},
+        unix::fs::OpenOptionsExt,
+    },
     path::Path,
     thread,
     time::{Duration, Instant},
@@ -238,6 +241,14 @@ impl StoreGuard<'_> {
 }
 
 impl RefGuard<'_> {
+    /// Both descriptors share their flock open-file descriptions with a child.
+    /// The guards must stay alive while the child is spawned and waited for.
+    pub(crate) fn transfer_fds(&self) -> [RawFd; 2] {
+        [
+            self._store._lock._file.as_raw_fd(),
+            self._lock._file.as_raw_fd(),
+        ]
+    }
     pub(crate) fn reference(&self) -> &LocalRef {
         &self.reference
     }

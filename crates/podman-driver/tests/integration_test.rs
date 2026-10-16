@@ -122,8 +122,7 @@ fn test_get_container_pid() -> Result<(), Box<dyn Error>> {
     let cnt_id = str::from_utf8(&run.stdout)?;
     let cnt_id = String::from(cnt_id.trim());
 
-    let runroot = PathBuf::from("/run/user/1000/containers");
-    let file_pid = pmd::get_container_pid_from_default_file(&cnt_id, Some(&runroot))?;
+    let file_pid = pmd::get_container_pid_from_default_file(&cnt_id, None)?;
     let tend = t0.elapsed();
     println!("pid from file took: {:.3} ms", tend.as_secs_f64() * 1_000.0);
 
