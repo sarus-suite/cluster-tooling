@@ -1,14 +1,123 @@
 # HPC image store
 
-Workspace-private synchronous Rust library for a Linux, user-owned filesystem
-OCI image store. This crate implements **stage 1 foundations and stage 2 internal
-storage primitives**. It does not yet expose import, pull, export, list, remove,
-check, or prune operations.
+This crate stores container images in a user-owned directory on Linux, separate
+from Podman's local image storage. It uses the Open Container Initiative (OCI)
+image format and shares identical image content between stored images. You can
+import an image from local Podman storage and later export it back to local
+storage using Skopeo to copy the image data.
 
-The executable prints an unimplemented-command diagnostic to stderr and exits
-with status 2. It does not initialize a store. There is no `init` CLI action.
+The crate provides a synchronous Rust library and the `hpc-image-store` CLI.
+The library is private to this workspace and is not published as a package.
+The storage foundations from stages 1–2 and the import/export code from stage 3
+are implemented, but stage 3 still needs acceptance testing with real rootless
+transfers in a suitable environment. Pull, list, remove, check, and prune are
+not public operations yet, and there is no `init` CLI action.
 
-## Library surface
+The [filesystem image store design](../../hpc-image-store-design.md) describes
+the agreed behavior and guarantees. The
+[staged implementation plan](../../hpc-image-store-implementation-plan.md)
+describes the implementation order and acceptance criteria. These remain the
+primary references for the design and planned work.
+
+## Using the CLI
+
+### Tools and storage context
+
+Import requires Podman and Skopeo; export uses only Skopeo and can run when
+Podman is unavailable. Both operations use the caller's existing **local**
+containers-storage context, which is the image storage used by Podman. This
+includes the current storage driver, normal `storage.conf` discovery,
+environment, and user namespace. Remote Podman contexts are outside this
+contract.
+
+The library does not supply a storage specifier or read, copy, change, or
+reconstruct storage configuration. It also does not select another driver,
+because changing the driver changes which images are visible. There are no CLI
+flags for overriding storage roots, driver settings, or the environment.
+
+If your driver requires a rootless user namespace, enter that namespace before
+launching the CLI or a program that uses the library, using the same normal
+Podman context:
+
+```sh
+podman unshare hpc-image-store --store /scratch/me/images import localhost/tool:latest analysis/tool:release
+```
+
+The library does not launch `podman unshare` itself. Before a transfer, it checks
+that Skopeo supports the required shared-blob option, platform flags when a
+platform is selected, and digest preservation when required by image metadata.
+
+### Import and export
+
+An import copies a local image into the filesystem store and gives it a local
+reference, or **ref**, such as `analysis/tool:release`. A ref is the name and tag
+used to select an image in this store. An export copies the selected image back
+to containers-storage under the destination name.
+
+The store's immediate parent directory must already exist and have been safely
+prepared by the user or site, as explained under [Store initialization](#store-initialization).
+Import can initialize a missing or empty store; export requires an existing
+store.
+
+```sh
+hpc-image-store --store /scratch/me/images import localhost/tool:latest analysis/tool:release
+hpc-image-store --store /scratch/me/images import localhost/tool:latest analysis/tool:release --replace --notes 'updated build'
+hpc-image-store --store /scratch/me/images --json export analysis/tool:release localhost/restored:latest
+hpc-image-store --store /scratch/me/images --platform linux/arm64/v8 import localhost/tool:latest analysis/tool:arm64
+```
+
+Import fails if the destination ref already exists, including a damaged ref,
+unless `--replace` is supplied. Use `--notes` to attach optional notes to the
+import. `--skopeo PATH` and `--podman PATH` select the tool executables.
+`--platform` accepts `OS/ARCH[/VARIANT]`; without it, Skopeo uses its host
+selection. Selecting a platform does not convert the image's architecture.
+
+Source and destination arguments for containers-storage are image names or IDs.
+Unqualified names, including names without explicit tags, are passed to the
+tools unchanged, and the tools parse and resolve the full image reference.
+Names such as `docker:latest`, `oci:latest`, and `oci:path` are ordinary
+repository/tag pairs; the repository name does not select a transport. Explicit
+URLs such as `docker://example/image` and embedded storage settings are
+rejected. Names inside the persistent filesystem store still require an
+explicit tag. A persistent store path containing `:` receives an explicit
+error because Skopeo's OCI transport cannot address that path.
+
+Exit status 0 means success, 1 means an operation failed, and 2 means invalid
+usage. With `--json`, results go to stdout; errors and warnings go to stderr.
+Output from the tools is captured separately so that it does not corrupt JSON
+results. A successful import can report cleanup warnings while still returning
+status 0; see [Cleanup after import](#cleanup-after-import).
+
+### What transfers preserve and validate
+
+Import first runs one `podman image inspect --format '{{.Id}}'` lookup, then
+asks Skopeo to copy that complete image ID. If the source tag moves, the copy
+still uses the chosen ID. If the image is removed before the copy, the import
+fails without retrying by name. The stored metadata comes from the completed
+OCI manifest and configuration, rather than from Podman inspection.
+
+Skopeo writes only into a private temporary directory during import, including
+when writing shared blobs. The current transfer operations require a single
+OCI manifest as the image root and reject image indexes, which can describe
+multiple images or platforms. With OCI defaults, Skopeo compresses uncompressed
+layers and preserves supported existing compression. A content digest identifies
+the exact bytes of an object. Import can change the manifest, layer
+representation, and their digests, so it does not claim to preserve the original
+registry identity. The `pull` acquisition kind in
+metadata establishes a future policy for exports that preserve digests, but
+there is no pull operation or image-index export yet.
+
+Export validates the small files and pointer that describe the selected ref,
+then relies on Skopeo to report content or transfer failures. Neither import
+nor export hashes layers or checks the entire graph of referenced image
+objects. Export leaves the persistent ref unchanged, and any partial data at
+the destination belongs to containers-storage. Export creates no temporary
+staging directory in the filesystem store.
+
+## Using the Rust library
+
+Create a store configuration and handle, then construct the names and digests
+you need:
 
 ```rust
 use hpc_image_store::{LocalRef, Sha256Digest, Store, StoreConfig};
@@ -19,153 +128,327 @@ let digest = Sha256Digest::new(format!("sha256:{}", "a".repeat(64)))?;
 # Ok::<(), hpc_image_store::Error>(())
 ```
 
-Constructing configuration and a handle performs no filesystem mutation.
-Relative store paths are anchored to the current working directory when the
-configuration is constructed. Operation preparation and locking are internal
-until the image operations are implemented.
+Constructing the configuration and handle does not change the filesystem.
+A relative store path is resolved against the current working directory when
+the configuration is constructed. Import and export perform their own store
+preparation and locking, so callers do not need to coordinate those steps.
 
-Local refs use lowercase OCI-style repository paths and explicit, case-sensitive
-tags. Names are limited to 255 ASCII bytes and tags to 128. There is no registry
-domain parsing, implicit `latest`, or name normalization. A bare
-`sha256:<64 hex digits>` spelling is reserved for future digest selectors, even
-when the hex is uppercase. Digest values accept only lowercase SHA-256 hex.
+`TransferContext` contains only the executable paths and an optional platform
+selection. The tools inherit the caller's existing storage context as described
+in the CLI section. Use `ImportOptions` to request replacement or supply notes:
 
-`StoreMetadata` and `RefMetadata` serialize to JSON; their `from_json` methods
-check the schema version. The stage-1/2 ref envelope records only version,
-`local_ref`, and `stored_root`; it is not yet the complete schema for published
-images. Identity deserialization uses the same validation as constructors.
+```no_run
+use hpc_image_store::{ImportOptions, LocalRef, Store, StoreConfig, TransferContext};
 
-## Filesystem and initialization
+let store = Store::new(StoreConfig::new("/scratch/me/images")?);
+let reference = LocalRef::new("analysis/tool:release")?;
+let context = TransferContext::default();
+let imported = store.import("localhost/tool:latest", &reference, &context,
+                            &ImportOptions::default())?;
+let exported = store.export(&reference, "localhost/restored:latest", &context)?;
+# Ok::<(), hpc_image_store::Error>(())
+```
+
+`ImportReport` identifies the local ref, stored root digest, source `ImageId`,
+and content metadata, and includes any `cleanup_warnings`. `ExportReport`
+identifies the local ref, stored manifest digest, and destination. The CLI uses
+these reports for its JSON results.
+
+### Names, digests, and metadata
+
+Local refs use lowercase OCI-style repository paths and explicit,
+case-sensitive tags. Names are limited to 255 ASCII bytes and tags to 128.
+The library does not parse registry domains, supply an implicit `latest` tag,
+or normalize names. The bare spelling `sha256:<64 hex digits>` is reserved for
+future digest selectors, even if its hex digits are uppercase.
+`Sha256Digest` values accept only lowercase SHA-256 hex.
+
+`StoreMetadata` and `RefMetadata` serialize to JSON, and their `from_json`
+methods check the schema version. Identity values read from JSON undergo the
+same validation as values passed to constructors. Store markers use version 1,
+and ref metadata uses version 2; obsolete version-1 ref metadata is rejected
+without migration.
+
+Ref metadata records `local_ref` and `stored_root`. Its `content` fields cache
+information for display: the platform, optional OCI creation time, and unique
+content size. The size is the sum of unique manifest, configuration, and layer
+objects, excluding the small wrapper metadata files. It does not estimate how
+much space removing an image would reclaim, since other images may share its
+objects.
+
+The remaining fields describe how the image was acquired:
+`acquired_at_unix_seconds`, `acquisition`, and optional `notes`. An import
+records the requested source and a separate containers-storage `ImageId`.
+It records no original registry digests or alternate lookup keys.
+
+## How images are stored
+
+A ref connects a name such as `analysis/tool:release` to an image record under
+`raw_images/`. This record is called a **raw image** and contains a complete OCI
+layout with matching metadata. Here, “raw” describes the record below the named
+ref; it does not mean that the image is uncompressed or unpacked.
+
+The actual image objects live in a shared **content-addressed store (CAS)**
+under `blobs/sha256/`. Each object is named by the SHA-256 digest of its bytes,
+so images with identical manifests, configurations, or layers can share those
+objects without keeping separate copies for each ref. Once published, these
+objects are immutable: their bytes must never change.
+
+The main identifiers have different purposes:
+
+- A **ref key** reversibly encodes a logical `name:tag` for use in a path.
+- A **raw-image ID** is randomly generated for one publication of an image.
+  It is unrelated to Podman's image ID or the image's content digest.
+- A **content digest** identifies exact stored bytes. Two raw images can have
+  the same root digest while recording different acquisitions or notes.
+
+The directory layout is:
 
 ```text
 store/
-├── store.json                  # {"version":1}
-├── blobs/sha256/
-├── refs/<encoded-key>/ref      # relative symlink into raw_images/
-├── raw_images/raw-<id>/
-│   ├── oci-layout
-│   ├── index.json              # exactly one selected root descriptor
-│   ├── metadata.json
-│   └── blobs/                  # empty; content lives in the shared CAS
-├── tmp/operation-<id>/         # private acquisition staging
+├── store.json                     # Store format marker
+├── blobs/sha256/<digest>           # Shared immutable manifests, configs, layers
+├── refs/<encoded-key>/ref          # Relative symlink selecting a raw image
+├── raw_images/raw-<id>/            # One complete underlying image record
+│   ├── oci-layout                 # OCI layout version
+│   ├── index.json                 # Exactly one selected root descriptor
+│   ├── metadata.json              # Content display fields, acquisition, notes
+│   └── blobs/                     # Empty; objects live in the shared CAS
+├── tmp/operation-<id>/             # Private work for one acquisition
+│   ├── layout/                    # Skopeo's unpublished OCI layout
+│   └── blobs/sha256/               # Skopeo's privately transferred objects
 └── locks/
-    ├── store.lock
-    └── refs/<encoded-key>/ref.lock
+    ├── store.lock                 # Coordinates operations with future prune
+    └── refs/<encoded-key>/ref.lock # Stable lock for a logical name
 ```
 
-The tree above includes entries created by later publication. Initialization
-creates only `store.json`, the stable `locks/store.lock`, and empty internal
-directories; there are initially no refs, raw images, or operation directories.
+The `ref` entry is a relative symlink selecting a raw-image directory. Each raw
+image has an empty `blobs/` directory to satisfy the OCI layout structure, while
+export supplies Skopeo's source shared-blob option to read the actual objects
+from the CAS.
 
-The encoded key is the full logical `name:tag` converted to lowercase hex and
-split into directory components of at most 120 characters. Each nonfinal chunk
-has exactly 120 characters. The fixed terminal entries keep a key that is a
-prefix of another key from colliding with it. Decoding rejects noncanonical paths.
+### Encoding names as paths
 
-Mutation preparation initializes a missing store directory or an existing empty
-one. Its immediate parent must already exist and have been safely prepared by
-the site or user, including saving its creation and the directory names needed
-to reach it. The library assumes this preparation. It creates no missing
-ancestors and does not inspect or repair them. Stores inside other stores are
-unsupported as a setup restriction; initialization does not search ancestors to
-detect nesting.
+For example, `analysis/tool:release` is encoded as
+`616e616c797369732f746f6f6c3a72656c65617365`. This is hexadecimal text, not a hash
+or a database-assigned ID, so the library can calculate the path directly and
+recover the exact original name, including tag case. Long keys are split into
+path components of at most 120 characters, with exactly 120 in each component
+except the last. The fixed terminal entries `ref` and `ref.lock` prevent
+collisions when one encoded name is a prefix of another.
 
-Unmarked-store initialization must be able to open and sync the immediate
-parent; creating the root also requires permission to write there. A missing
-parent causes an error without creating a directory chain. An existing empty
-root still requires parent syncing. A parent that permits traversal but cannot
-be opened for syncing cannot be used to initialize an unmarked store.
+Encoding gives all logical names one filesystem-safe representation, keeping
+slashes and punctuation within the encoded name and avoiding reserved layout
+filenames. The resulting paths are less readable than
+`refs/analysis/tool/release/`. Encoding is separate from the choice to publish
+images by switching a pointer; a readable nested namespace could also point to
+raw images.
 
-Initialization checks existing contents before adding setup files, creates only
-the root and minimum lock structure, then takes the exclusive stable
-`locks/store.lock` and rechecks. It reuses only recognized empty setup directories
-and the regular `.store-init.json` temporary marker. Populated unversioned
-roots, obsolete bootstrap artifacts, unsupported versions, and incompatible
-reserved entries are rejected without deletion. Concurrent processes reuse the
-same root and lock file rather than replacing them.
+### Temporary space and layout compatibility
 
-For an unmarked store, initialization writes the temporary marker and syncs, in
-order, that file, the lock file, internal directories from children to parents,
-the root, and its immediate parent. It then atomically renames the marker to
-`store.json` and syncs the root before success. The parent sync always precedes
-marker publication, including retries and roots created by another process.
-No directory above the immediate parent is opened for syncing. Failures before
-publication leave recognized setup entries available for retry.
+The `tmp/` directory keeps Skopeo's writes private until an image is published.
+New objects are added to the CAS using hard links, so the staging path and CAS
+path then refer to the same file. If an object already exists in the CAS, the
+new staged copy remains a separate file. Removing successful staging removes
+these extra links and duplicate copies without deleting published content.
+Staging still needs enough space for an entire acquisition before publication,
+even when the final stored content is shared with other images.
 
-For a marked store, mutation preparation takes a shared store lock, validates
-the store, and syncs the marker and root again. It does not open the parent.
-A visible marker does not bypass these syncs: repeated sync failures remain
-failures until syncing succeeds. Marker/root sync errors after publication use
-`Error::InitializationDurability`, reporting potentially published state without
-removing the marker. Normal operation locking and validation follow preparation.
+This prototype layout has no migration or compatibility fallback. Recreate
+outdated developer stores and fixtures explicitly; the library does not remove
+them for you. Store metadata remains version 1 and ref metadata remains version 2.
+There is no offline qualification machinery.
 
-No private recovery record is required for a supported version-1 store. There
-is no migration or offline qualification machinery. Recreate obsolete
-development fixtures explicitly; initialization never cleans them automatically.
+## Store initialization
 
-New directories use mode 0700 and new files mode 0600, subject to the caller's
-umask. Existing permissions are preserved. Reserved directories must be actual
-directories, and markers and lock files must be regular files. Symlinks in those
-setup entries are rejected; committed ref pointers are intentionally symlinks.
+### Preparing the location
+
+An operation that changes the store can initialize a missing store directory
+or an existing empty one. Its immediate parent must already exist and have
+been safely prepared by the user or site. That preparation includes syncing
+the parent's creation and the directory entries needed to reach it so that
+they survive a crash. The library assumes this has been done; it creates no
+missing ancestors and does not inspect or repair them. Stores inside other
+stores are unsupported as a setup restriction, but initialization does not
+search ancestors to detect nesting.
+
+Initializing a store without a marker requires opening and syncing the
+immediate parent, even when the store root already exists and is empty.
+Creating a missing root also requires write permission in that parent.
+A missing parent causes an error without creating a directory chain. A parent
+that allows traversal but cannot be opened for syncing cannot be used to
+initialize a store without a marker.
+
+Directories created by the library use mode 0700 and files use mode 0600,
+subject to the caller's umask. Skopeo chooses the permissions of the blobs it
+creates, which are inside private staging and CAS directories. Existing
+permissions are preserved. Reserved setup directories must be actual
+directories, and markers and lock files must be regular files; symlinks in
+these entries are rejected. Committed ref pointers are intentionally symlinks.
 Coordination assumes cooperating processes in user-owned storage.
 
-Read preparation requires an existing lock and supported marker. It does not
-initialize or repair a store. Ref-lock creation is coordination bookkeeping and
-may occur during read operations.
+### Initialization sequence and retries
 
-## Internal publication primitives
+Initialization checks existing contents before adding setup files. It creates
+only the root and minimum lock structure, takes an exclusive lock on the stable
+`locks/store.lock` file, then checks the contents again. Concurrent processes
+reuse the same root and lock file rather than replacing them. Initialization
+can reuse recognized empty setup directories and the regular temporary marker
+`.store-init.json`. It rejects populated roots without a store version,
+obsolete bootstrap artifacts, unsupported versions, and incompatible reserved
+entries without deleting them.
 
-Acquisition staging exposes private layout and shared-blob paths under
-`tmp/operation-<id>/`. Completing a stage consumes writable acquisition access
-and binds the selected descriptor, metadata, and object list to the locked ref.
-The producer must stop all writers and close writable handles before completion.
-The acquisition layer supplies validated SHA-256 identities and expected sizes;
-these primitives do not hash objects or validate the complete image graph.
+Syncing asks the filesystem to save a file's data or a directory's entries so
+that they survive a crash. For a store without a marker, initialization writes
+the temporary marker and syncs these items in order:
 
-Publication syncs staged objects, then inserts them by same-filesystem hard link
-into `blobs/sha256/<digest>`. Existing digest paths are never overwritten: reuse
-requires a regular file of the expected size, followed by file and directory
-syncs. Modification time is preserved on reuse. A same-size corrupt object is
-not detected by these checks. Unsupported hard links fail without a copying
-fallback. Published objects must never be modified through their staging aliases.
+1. The temporary marker file.
+2. The lock file.
+3. Internal directories, working from children to parents.
+4. The store root.
+5. Its immediate parent.
 
-Each exclusively created raw image contains small OCI wrapper files, matching
-versioned metadata, and an empty real `blobs/` directory. The layout index is
-normalized to exactly one selected root descriptor, retaining its extra fields.
-The root may be an OCI manifest or image index. Content blobs are unchanged,
-including the bytes and identity of an image-index root. Future Skopeo transfers
-must supply the shared-blob option to read the common CAS.
+It then atomically renames the temporary marker to `store.json` and syncs the
+root before returning success. The parent is always synced before the marker
+is published, including on retries and when another process created the root.
+No directory above the immediate parent is opened for syncing. A failure before
+marker publication leaves recognized setup entries available for retry.
 
-Publication writes and syncs raw image files, then syncs the raw image's
-`blobs/` directory, raw-image directory, and `raw_images/` parent. It creates
-and syncs namespace parents and prepares a relative symlink in private staging.
-After syncing the staging directory, one rename switches the committed ref to
-the complete raw image. It then syncs both rename parents before success.
-The store lock and matching exclusive ref lock remain held throughout.
+Completed initialization leaves only `store.json`, the stable
+`locks/store.lock`, and empty internal directories. Ref entries, raw images,
+and operation directories appear later as images are acquired and published.
+A supported version-1 store needs no private recovery record.
 
-An existing destination fails unless replacement is explicit, including a
-dangling symlink. Replacement accepts symlinks and regular files; directory
-entries are rejected. Removal unlinks the terminal entry and syncs its parent
-without following the pointer or touching shared content, retired raw images,
-namespace directories, or lock files.
+### Preparing an existing store
 
-Before ref commit, failures preserve any previous ref. After namespace changes,
-`Error::Durability` identifies a potentially visible blob insertion, ref
-publication, or ref removal, plus the failed sync path. A committed pointer is
-never rolled back after a sync failure. Staging and unpublished or retired
-raw images remain for later conservative pruning; automatic cleanup is not
-implemented. Staging aliases left after publication are inactive and must not be
-used for later writes.
+For a store that already has a marker, preparation for a change takes a shared
+store lock, validates the store, and syncs the marker and root again without
+opening the parent. A visible marker does not allow these syncs to be skipped;
+repeated sync failures remain errors until syncing succeeds.
 
-Readers retain their ref and store guards while resolving and using a raw image.
-Pointers must use the exact relative path into the raw image area. Namespace
-parents, raw-image directories, and small files reject symlink redirection.
-Discovery reads namespace entries rather than hiding refs with broken pointers
-or malformed terminal entries. Unexpected branches and enumeration failures are
-retained as diagnostics and mark discovery incomplete. Discovery validates
-pointers; full inventory validation and presentation remain stage-4 work.
+A marker or root sync error after marker publication is reported as
+`Error::InitializationDurability`. The error reports potentially published
+state and leaves the marker in place. Normal operation locking and validation
+follow preparation, whether the store was newly initialized or already marked.
 
-## Locking
+Preparation for reading requires an existing lock and supported marker and
+does not initialize or repair the store. Reading can still create a ref lock
+file as coordination bookkeeping.
+
+## Publishing images and handling failures
+
+**Publication** makes a prepared image available through a ref. It first saves
+a complete new raw image, then atomically switches the ref symlink to that
+record. Readers therefore select either the complete old layout or the
+complete new layout, with its matching metadata. Updating `index.json` and
+`metadata.json` individually in a live directory would expose intermediate
+states, and an ordinary directory rename cannot replace an existing nonempty
+directory.
+
+The internal storage primitives described here also support behavior reserved
+for later stages. They do not make removal, discovery, or image-index transfers
+public operations.
+
+### Preparing and saving the image
+
+Acquisition staging provides private layout and shared-blob paths under
+`tmp/operation-<id>/`. Before completing a stage, the producer must stop all
+writers and close writable handles. Completing the stage gives up writable
+acquisition access and binds the selected descriptor, metadata, and object list
+to the locked ref. A descriptor identifies a referenced OCI object; the
+acquisition layer supplies validated SHA-256 identities and expected sizes.
+The publication primitives do not hash the objects or validate the complete
+image graph.
+
+Publication syncs the staged objects, then inserts them into
+`blobs/sha256/<digest>` using hard links on the same filesystem. Existing digest
+paths are never overwritten. To reuse one, the library requires a regular file
+of the expected size and syncs the file and directory, preserving the file's
+modification time. These checks cannot detect corruption that leaves the file
+at the same size. If hard links are unsupported, publication fails without
+falling back to copying. Published objects must never be modified through
+staging paths that still refer to the same files.
+
+The library exclusively creates each raw image with small OCI wrapper files,
+matching versioned metadata, and an empty real `blobs/` directory. It normalizes
+`index.json` to exactly one selected root descriptor while retaining the
+descriptor's extra fields. The internal primitives allow either an OCI manifest
+or image index as the root, although the current import/export operations
+accept only manifests. Content blobs remain unchanged, including the bytes and
+identity of an image-index root.
+
+Publication writes and syncs the raw image files, then syncs its `blobs/`
+directory, the raw-image directory, and the `raw_images/` parent. It creates
+and syncs the parent directories for the ref and prepares a relative symlink
+in private staging. After syncing the staging directory, a single rename
+switches the committed ref to the complete raw image. Both rename parents are
+then synced before success. The store lock and matching exclusive ref lock
+remain held throughout.
+
+### Replacement, removal, and durability errors
+
+An existing destination, including a dangling symlink, causes an error unless
+replacement is explicitly requested. Replacement accepts symlinks and regular
+files but rejects directory entries. Replaced raw images remain for future
+prune; an individual import does not delete them.
+
+The internal removal primitive unlinks the terminal ref entry and syncs its
+parent without following the pointer. It leaves shared content, retired raw
+images, namespace directories, and lock files in place. Removal is not yet a
+public operation.
+
+Before the ref is committed, failures preserve any previous ref. Once a
+filesystem entry has changed, a sync failure can mean that the change is
+visible but might not survive a crash. `Error::Durability` reports the
+potentially visible blob insertion, ref publication, or ref removal, together
+with the path whose sync failed. The library never rolls back a committed
+pointer after a sync failure, because doing so would introduce another change
+instead of resolving whether the committed change was saved.
+
+### Cleanup after import
+
+Once an import has durably published its ref, it removes only its own operation
+directory and syncs `tmp/`, while still holding the store and ref locks.
+Cleanup does not follow symlinks or scan other operations. Removing these
+staging files does not remove the published image.
+
+Cleanup is best effort after successful publication. On normal success,
+`ImportReport.cleanup_warnings` is empty. A removal or cleanup-sync failure
+adds a structured `CleanupWarning` containing the staging path and a contextual
+message, while the ref remains committed and usable. The CLI prints warnings
+on stderr, includes them in JSON results, and exits with status 0. A cleanup-sync
+warning means deletion may not survive a crash; a removal failure may leave
+staging only partly removed.
+
+Acquisition failures, publication failures (including durability errors), and
+process termination do not trigger cleanup, because a surviving Skopeo process
+may still be writing to its private staging. Abandoned staging, cleanup
+remnants, unpublished or retired raw images, and unreferenced objects remain
+for future conservative pruning. Any staging paths that still refer to
+published blobs must never be used for writes.
+
+### Reading refs and discovering entries
+
+Readers retain their ref and store lock guards while resolving and using a raw
+image. Pointers must use the exact relative path into the raw-image area.
+Namespace parents, raw-image directories, and small files reject redirection
+through symlinks.
+
+Internal discovery reads namespace entries rather than hiding refs with broken
+pointers or malformed terminal entries. Unexpected branches and enumeration
+failures are retained as diagnostics and mark discovery incomplete. Discovery
+validates pointers, but full inventory validation and presentation remain
+stage-4 work.
+
+## How locking works
+
+Locks belong to the store and logical ref names rather than individual raw
+images. Lock files stay in place across replacement and removal, so processes
+continue to coordinate through the same files even when a ref selects a new
+image.
+
+The operation lock policy is shown below. Import and export are public today;
+pull, remove, list, check, and prune describe the policy for planned operations.
 
 | Operation | Store lock | Ref lock |
 | --- | --- | --- |
@@ -173,51 +456,127 @@ pointers; full inventory validation and presentation remain stage-4 work.
 | export, list, check | Shared | Shared |
 | prune | Exclusive | None |
 
-Unmarked initialization has its own exclusive-lock phase; marked-store mutation
-preparation uses shared locking for its repeated syncs. Ordinary operation
-locking and revalidation follow either path. A ref guard borrows its store guard
-so the store lock outlives the ref lock. Acquisition uses nonblocking `flock` attempts with a 100 ms
-retry interval for contention and interruptions. While waiting, it prints a
-warning to stderr every 30 seconds with the lock path, mode, elapsed time, and
-timeout. Each acquisition fails with `Error::LockTimeout` after five minutes.
-The deadline begins immediately before the first lock attempt; filesystem open
-calls and operations after acquisition are outside this limit. Timing is an
-internal policy; tests supply millisecond thresholds rather than waiting for
-production intervals.
+Initialization without a marker has a separate phase with an exclusive store
+lock. Preparation for a change to a marked store uses shared locking for its
+repeated syncs. Either path is followed by normal operation locking and
+validation. A ref guard borrows its store guard, which ensures that the store
+lock outlives the ref lock.
 
-Locks release when their owning descriptors close. Lock files are never
-truncated, replaced, or removed, including on timeout.
-Descriptors are close-on-exec. Transfer-child inheritance and orphaned Skopeo
-protection will be implemented in stage 3.
+### Waiting for locks
 
-## Validation
+To acquire a lock, the library makes nonblocking `flock` attempts, retrying
+every 100 ms after contention or interruptions. While waiting, it prints a
+warning to stderr every 30 seconds containing the lock path, mode, elapsed
+time, and timeout. If a lock cannot be acquired within five minutes, the library
+returns `Error::LockTimeout`. The deadline starts immediately before
+the first lock attempt; filesystem open calls and operations after the lock is
+acquired are outside this limit. These timings are internal policy, and tests
+use millisecond thresholds instead of waiting for production intervals.
 
-Run from the workspace root:
+### Locks during subprocess execution
+
+Locks are released when their owning file descriptors close. Lock files are
+never truncated, replaced, or removed, including after a timeout.
+
+The parent's lock descriptors are marked close-on-exec, which normally prevents
+them from being retained when executing another program. Immediately before
+executing a Skopeo copy, the child clears this flag on only the two operation
+lock descriptors. The child then shares the existing locked open-file
+descriptions, so closing the parent's descriptors does not release the locks
+while the child still holds them. No explicit unlock is issued.
+
+If the wrapper terminates during the copy, it publishes no ref. A surviving
+Skopeo process can finish its private copy or fail, and its locks are released
+when it exits. Operations that need conflicting locks must therefore wait for
+the orphaned copy to release them.
+
+## Validation and remaining qualification
+
+### Local checks and test coverage
+
+Run the following commands from the workspace root. The ordinary suite needs
+Python 3 for controlled tool fixtures.
 
 ```sh
 cargo check --locked -p hpc-image-store
 cargo test --locked -p hpc-image-store
 cargo clippy --locked -p hpc-image-store --all-targets -- -D warnings
 cargo fmt -p hpc-image-store -- --check
+git diff --check
 ```
 
 Tests cover names and encoding, metadata, initialization recovery, private
-permissions, rejected stores, stable lock identities, and separate-process
-coordination, lock-wait warnings, and acquisition timeouts. Initialization tests
-also verify missing-parent rejection, exact sync ordering, persistent sync
-failures, unprivileged parent-permission behavior, and process termination after
-root creation, lock creation, scaffolding, parent sync, and marker publication.
-The ignored
-`lock_worker`, `wait_worker`, and `publication_worker` unit tests are internal
-subprocess helpers invoked by the ordinary tests; do not run them directly.
+permissions, and rejected stores. Initialization tests verify missing-parent
+rejection, exact sync ordering, persistent sync failures, unprivileged parent
+permissions, and process termination after root creation, lock creation,
+scaffolding, parent sync, and marker publication.
 
-Publication tests use complete zero-layer manifest and image-index fixtures,
-separate-process insertion races and replacement, process termination around the
-rename boundary, and test-only failure checkpoints at insertion and sync steps.
-Metadata fixtures are temporary test data rather than a production acquisition
-schema. Fault injection is thread-local and unavailable in production builds.
+Publication tests use complete zero-layer manifest and image-index fixtures.
+They exercise insertion races and replacement in separate processes,
+termination around the rename boundary, and test-only failure checkpoints at
+insertion and sync steps. Synthetic fixtures use version-2 ref metadata, but
+their placeholder acquisition fields do not represent real imports. Fault
+injection is thread-local and unavailable in production builds.
 
-Local tests do **not** qualify Lustre or VAST locking, visibility, atomic rename,
-or durability guarantees. Cross-node and site-specific filesystem validation
-remains required. Unavailable filesystem primitives cause errors; no weaker
-fallback is provided.
+Stage-3 synthetic and CLI tests exercise source-ID pinning, inherited
+environment, platform flags, clean CLI JSON, unchanged caller configuration,
+failed copies, metadata, replacement, shared-content reuse, and injected
+publication failures. They also verify that transport-like repository names
+and unqualified names reach the tools without changing transport selection.
+Cleanup tests cover successful imports and replacements, preservation of CAS
+inodes, bytes, and modification times, unrelated staging, symlink confinement,
+and removal or sync warnings after commit. An unprivileged CLI test exercises
+real removal and cleanup-sync failures, successful exit status, and separate
+stderr diagnostics in both human and JSON modes.
+
+Coordination tests cover stable lock identities, separate processes, lock-wait
+warnings, and acquisition timeouts. Process tests verify both inherited locks
+after wrapper termination using readiness handshakes and bounded waits.
+The ignored `lock_worker`, `wait_worker`, and `publication_worker` unit tests
+are internal subprocess helpers invoked by ordinary tests. Do not run these
+helpers directly or use an unfiltered `--ignored` invocation.
+
+### Tests with real tools
+
+Run the real Skopeo lock test independently; it needs no Podman storage:
+
+```sh
+cargo test --locked -p hpc-image-store actual_skopeo_retains_locks_after_parent_termination -- --ignored --nocapture
+```
+
+For real rootless acceptance, use a dedicated disposable local
+containers-storage context prepared by the test caller with its normal driver
+and configuration. Set `CONTAINERS_STORAGE_CONF` to that existing configuration
+and explicitly opt in. The test does not amend the configuration or set a
+storage driver, and all tools inherit it. Do not select your ordinary image
+store: the test retags and removes its disposable images to exercise races and
+failures. It needs Podman, Skopeo, Python 3, tar, and sha256sum; hashing is used
+only to construct test fixtures.
+
+```sh
+export CONTAINERS_STORAGE_CONF=/path/to/disposable/storage.conf
+export HPC_IMAGE_STORE_TEST_DISPOSABLE=1
+podman unshare cargo test --locked -p hpc-image-store --test real_transfers -- --ignored --nocapture
+```
+
+This opt-in test covers a layered local round trip, OCI compression,
+shared-layer reuse, explicit platform selection, replacement, tag movement
+after inspection, image removal before copying, missing-content export
+failure, and unchanged configuration. The dedicated real-Skopeo lock test and
+ordinary process tests cover termination; a containers-storage transfer under
+the deployment's actual rootless context still needs qualification.
+
+### Recorded results and outstanding acceptance
+
+Earlier local validation used Skopeo 1.14.4 and Podman 4.9.5. A real Skopeo
+OCI-to-OCI copy passed the orphaned-lock test. The rootless containers-storage
+round trip was not qualified: `podman unshare true` failed with a `newuidmap`
+permission error both in the sandbox and outside it. These are historical
+observations, rather than a statement about currently installed tools or a
+new test run. Full stage-3 acceptance remains outstanding.
+
+Local tests do not qualify Lustre or VAST locking, cross-node visibility,
+atomic rename, or durability guarantees. Those require deployment-site
+filesystem testing, and no site filesystem support is claimed here. If a
+required filesystem primitive is unavailable, the library returns an error
+without substituting a weaker fallback.
