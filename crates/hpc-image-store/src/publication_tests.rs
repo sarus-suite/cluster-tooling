@@ -149,7 +149,7 @@ fn publication_replacement_and_removal_preserve_retired_data_and_lock_identities
     let second = refs::publish(completed(&ref_guard, Image::Two), true).unwrap();
     assert_ne!(first, second);
     assert!(first.exists());
-    assert_eq!(refs::read(&ref_guard).unwrap().generation, second);
+    assert_eq!(refs::read(&ref_guard).unwrap().raw_image, second);
     refs::remove(&ref_guard).unwrap();
     assert!(matches!(refs::read(&ref_guard), Err(Error::RefMissing(_))));
     assert!(matches!(
@@ -359,8 +359,8 @@ fn layout_normalization_preserves_content_and_descriptor_extensions() {
             objects,
         )
         .unwrap();
-    let generation = refs::publish(stage, false).unwrap();
-    let descriptors = oci::roots(&generation).unwrap();
+    let raw_image = refs::publish(stage, false).unwrap();
+    let descriptors = oci::roots(&raw_image).unwrap();
     assert_eq!(descriptors.len(), 1);
     assert_eq!(descriptors[0], descriptor);
     assert_eq!(
@@ -380,11 +380,11 @@ fn failed_precommit_steps_preserve_the_previous_ref() {
         "blob.link",
         "blob.reuse-sync",
         "blob.reuse-directory-sync",
-        "generation.prepare",
-        "generation.file-sync",
-        "generation.blobs-sync",
-        "generation.directory-sync",
-        "generation.parent-sync",
+        "raw_image.prepare",
+        "raw_image.file-sync",
+        "raw_image.blobs-sync",
+        "raw_image.directory-sync",
+        "raw_image.parent-sync",
         "ref.namespace-sync",
         "ref.temporary-sync",
         "ref.rename",
@@ -459,7 +459,7 @@ fn durability_errors_identify_visible_namespace_changes() {
 fn unlink_failure_and_post_unlink_sync_failure_have_different_states() {
     let temporary = tempfile::tempdir().unwrap();
     let handle = store(temporary.path());
-    let generation = publish(&handle, &reference(), Image::One, false);
+    let raw_image = publish(&handle, &reference(), Image::One, false);
     let guard = handle.prepare(Operation::Remove).unwrap();
     let ref_guard = guard.lock_ref(&reference()).unwrap();
     fsutil::fail_once("ref.unlink", libc::EIO);
@@ -474,7 +474,7 @@ fn unlink_failure_and_post_unlink_sync_failure_have_different_states() {
         })
     ));
     assert!(matches!(refs::read(&ref_guard), Err(Error::RefMissing(_))));
-    assert!(generation.exists());
+    assert!(raw_image.exists());
 }
 
 #[test]
@@ -519,12 +519,12 @@ fn damaged_refs_can_be_replaced_or_unlinked_without_following_them() {
 }
 
 #[test]
-fn readers_reject_escaping_pointers_and_symlinked_generation_files() {
+fn readers_reject_escaping_pointers_and_symlinked_raw_image_files() {
     for damage in [
         "absolute",
         "traversal",
         "noncanonical",
-        "generation",
+        "raw_image",
         "metadata",
         "layout",
         "index",
@@ -534,25 +534,25 @@ fn readers_reject_escaping_pointers_and_symlinked_generation_files() {
         let temporary = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let handle = store(temporary.path());
-        let generation = publish(&handle, &reference(), Image::One, false);
+        let raw_image = publish(&handle, &reference(), Image::One, false);
         let path = handle.layout.ref_entry(&reference());
         match damage {
             "absolute" | "traversal" | "noncanonical" => {
                 let original = fs::read_link(&path).unwrap();
                 fs::remove_file(&path).unwrap();
                 let target = match damage {
-                    "absolute" => generation.clone(),
-                    "traversal" => PathBuf::from("../../../tmp/generation-abcdefghijkl"),
+                    "absolute" => raw_image.clone(),
+                    "traversal" => PathBuf::from("../../../tmp/raw-abcdefghijkl"),
                     _ => PathBuf::from(format!("./{}", original.display())),
                 };
                 symlink(target, &path).unwrap();
             }
-            "generation" => {
-                fs::remove_dir_all(&generation).unwrap();
-                symlink(outside.path(), &generation).unwrap();
+            "raw_image" => {
+                fs::remove_dir_all(&raw_image).unwrap();
+                symlink(outside.path(), &raw_image).unwrap();
             }
             "identity" => fs::write(
-                generation.join("metadata.json"),
+                raw_image.join("metadata.json"),
                 serde_json::to_vec(&RefMetadata::new(reference(), root(Image::Two))).unwrap(),
             )
             .unwrap(),
@@ -564,7 +564,7 @@ fn readers_reject_escaping_pointers_and_symlinked_generation_files() {
                     "blobs" => "blobs",
                     _ => unreachable!(),
                 };
-                let target = generation.join(file);
+                let target = raw_image.join(file);
                 if file == "blobs" {
                     fs::remove_dir(&target).unwrap();
                 } else {
@@ -815,7 +815,7 @@ fn separate_processes_race_to_insert_identical_content() {
 }
 
 #[test]
-fn readers_wait_for_replacement_and_observe_matching_complete_generations() {
+fn readers_wait_for_replacement_and_observe_matching_complete_raw_images() {
     let temporary = tempfile::tempdir().unwrap();
     let handle = store(temporary.path());
     let old = publish(&handle, &reference(), Image::One, false);
@@ -841,10 +841,7 @@ fn readers_wait_for_replacement_and_observe_matching_complete_generations() {
     reader.wait_for("PUBLICATION_READY");
     reader.finish();
     assert!(old.exists());
-    assert_eq!(
-        fs::read_dir(handle.layout.generations()).unwrap().count(),
-        3
-    );
+    assert_eq!(fs::read_dir(handle.layout.raw_images()).unwrap().count(), 3);
 }
 
 #[test]
@@ -864,13 +861,10 @@ fn killed_publication_exposes_only_complete_refs_and_retains_abandoned_data() {
         let resolved = refs::read(&ref_guard).unwrap();
         assert_eq!(resolved.root.digest, root(expected_image));
         if action == "interrupt" {
-            assert_eq!(resolved.generation, old);
+            assert_eq!(resolved.raw_image, old);
         }
         assert!(old.exists());
-        assert_eq!(
-            fs::read_dir(handle.layout.generations()).unwrap().count(),
-            2
-        );
+        assert_eq!(fs::read_dir(handle.layout.raw_images()).unwrap().count(), 2);
         assert_eq!(fs::read_dir(handle.layout.staging()).unwrap().count(), 2);
         assert_eq!(discovery::discover(&guard).unwrap().entries.len(), 1);
     }

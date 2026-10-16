@@ -73,7 +73,7 @@ fn visit(guard: &StoreGuard<'_>, relative: &Path, result: &mut Discovery) {
                 }
             };
             let diagnostic = match guard.lock_ref(&reference) {
-                Ok(ref_guard) => match refs::generation_path(&ref_guard) {
+                Ok(ref_guard) => match refs::raw_image_path(&ref_guard) {
                     Ok(_) => None,
                     // A ref can disappear between enumeration and acquisition.
                     Err(Error::RefMissing(_)) => continue,

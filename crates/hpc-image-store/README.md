@@ -41,8 +41,8 @@ images. Identity deserialization uses the same validation as constructors.
 store/
 ├── store.json                  # {"version":1}
 ├── blobs/sha256/
-├── refs/<encoded-key>/ref      # relative symlink into generations/
-├── generations/generation-<id>/
+├── refs/<encoded-key>/ref      # relative symlink into raw_images/
+├── raw_images/raw-<id>/
 │   ├── oci-layout
 │   ├── index.json              # exactly one selected root descriptor
 │   ├── metadata.json
@@ -55,7 +55,7 @@ store/
 
 The tree above includes entries created by later publication. Initialization
 creates only `store.json`, the stable `locks/store.lock`, and empty internal
-directories; there are initially no refs, generations, or operation directories.
+directories; there are initially no refs, raw images, or operation directories.
 
 The encoded key is the full logical `name:tag` converted to lowercase hex and
 split into directory components of at most 120 characters. Each nonfinal chunk
@@ -129,37 +129,37 @@ syncs. Modification time is preserved on reuse. A same-size corrupt object is
 not detected by these checks. Unsupported hard links fail without a copying
 fallback. Published objects must never be modified through their staging aliases.
 
-Each exclusively created generation contains small OCI wrapper files, matching
+Each exclusively created raw image contains small OCI wrapper files, matching
 versioned metadata, and an empty real `blobs/` directory. The layout index is
 normalized to exactly one selected root descriptor, retaining its extra fields.
 The root may be an OCI manifest or image index. Content blobs are unchanged,
 including the bytes and identity of an image-index root. Future Skopeo transfers
 must supply the shared-blob option to read the common CAS.
 
-Publication writes and syncs generation files, then syncs the generation's
-`blobs/` directory, generation directory, and `generations/` parent. It creates
+Publication writes and syncs raw image files, then syncs the raw image's
+`blobs/` directory, raw-image directory, and `raw_images/` parent. It creates
 and syncs namespace parents and prepares a relative symlink in private staging.
 After syncing the staging directory, one rename switches the committed ref to
-the complete generation. It then syncs both rename parents before success.
+the complete raw image. It then syncs both rename parents before success.
 The store lock and matching exclusive ref lock remain held throughout.
 
 An existing destination fails unless replacement is explicit, including a
 dangling symlink. Replacement accepts symlinks and regular files; directory
 entries are rejected. Removal unlinks the terminal entry and syncs its parent
-without following the pointer or touching shared content, retired generations,
+without following the pointer or touching shared content, retired raw images,
 namespace directories, or lock files.
 
 Before ref commit, failures preserve any previous ref. After namespace changes,
 `Error::Durability` identifies a potentially visible blob insertion, ref
 publication, or ref removal, plus the failed sync path. A committed pointer is
 never rolled back after a sync failure. Staging and unpublished or retired
-generations remain for later conservative pruning; automatic cleanup is not
+raw images remain for later conservative pruning; automatic cleanup is not
 implemented. Staging aliases left after publication are inactive and must not be
 used for later writes.
 
-Readers retain their ref and store guards while resolving and using a generation.
-Pointers must use the exact relative path into the generation area. Namespace
-parents, generation directories, and small files reject symlink redirection.
+Readers retain their ref and store guards while resolving and using a raw image.
+Pointers must use the exact relative path into the raw image area. Namespace
+parents, raw-image directories, and small files reject symlink redirection.
 Discovery reads namespace entries rather than hiding refs with broken pointers
 or malformed terminal entries. Unexpected branches and enumeration failures are
 retained as diagnostics and mark discovery incomplete. Discovery validates
