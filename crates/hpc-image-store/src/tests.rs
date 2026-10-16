@@ -160,7 +160,7 @@ fn metadata_round_trips_and_checks_versions() {
         Err(Error::UnsupportedVersion { .. })
     ));
     assert!(matches!(
-        RefMetadata::from_json(b"{\"version\":2}"),
+        RefMetadata::from_json(b"{\"version\":1}"),
         Err(Error::UnsupportedVersion { .. })
     ));
     assert!(

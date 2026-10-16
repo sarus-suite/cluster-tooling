@@ -60,16 +60,22 @@ fn replaceable(path: &Path, metadata: &fs::Metadata) -> Result<()> {
 
 /// Publish only after content and a matching raw image are durable. The ref's
 /// exclusive guard serializes the destination policy and namespace change.
-pub(crate) fn publish(stage: CompletedStage<'_>, replace: bool) -> Result<PathBuf> {
-    let guard = stage.guard();
+pub(crate) fn check_destination(guard: &RefGuard<'_>, replace: bool) -> Result<()> {
     guard.require_exclusive()?;
-    let destination = guard.layout().ref_entry(guard.reference());
     if let Some(metadata) = namespace_entry(guard)? {
         if !replace {
             return Err(Error::RefExists(guard.reference().clone()));
         }
-        replaceable(&destination, &metadata)?;
+        replaceable(&guard.layout().ref_entry(guard.reference()), &metadata)?;
     }
+    Ok(())
+}
+
+pub(crate) fn publish(stage: CompletedStage<'_>, replace: bool) -> Result<PathBuf> {
+    let guard = stage.guard();
+    guard.require_exclusive()?;
+    let destination = guard.layout().ref_entry(guard.reference());
+    check_destination(guard, replace)?;
     for blob in stage.blobs() {
         cas::insert(guard, blob)?;
     }

@@ -44,7 +44,7 @@ impl Store {
         &self.config
     }
 
-    // Internal until actual image operations provide their public interfaces.
+    // Image operations keep this guard until their entire operation finishes.
     #[allow(dead_code)]
     pub(crate) fn prepare(
         &self,
