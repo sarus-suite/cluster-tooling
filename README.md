@@ -221,6 +221,9 @@ cargo build -p skybox
 cargo test
 ```
 
+For integration tests that execute Podman containers or transfer images with
+Skopeo, use the [Podman/Skopeo integration devcontainer](.devcontainer/integration/README.md).
+
 commit to workspace
 ```bash
 git add ...
