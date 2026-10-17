@@ -36,6 +36,50 @@ fn cli() -> Command {
 }
 
 #[test]
+fn invalid_implicit_import_destination_is_usage_failure() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("store");
+    for source in [
+        "alpine",
+        &"a".repeat(64),
+        &format!("sha256:{}", "a".repeat(64)),
+        "registry.example:5000/team/tool:latest",
+    ] {
+        let output = cli()
+            .arg("--store")
+            .arg(&root)
+            .args([
+                "--podman",
+                "/unavailable/podman",
+                "--skopeo",
+                "/unavailable/skopeo",
+                "import",
+                source,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("an explicit destination ref is required")
+        );
+        assert!(!root.exists());
+    }
+}
+
+#[test]
+fn command_help_describes_optional_destinations() {
+    for (action, positional) in [("import", "[LOCAL_REF]"), ("export", "[DESTINATION]")] {
+        let output = cli().args([action, "--help"]).output().unwrap();
+        assert!(output.status.success());
+        let help = String::from_utf8(output.stdout).unwrap();
+        assert!(help.contains(positional), "{help}");
+        assert!(help.contains("defaults to the source"), "{help}");
+    }
+}
+
+#[test]
 fn invalid_cli_usage_does_not_initialize_a_store() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("store");
@@ -95,67 +139,84 @@ fn missing_store_export_is_an_operation_failure_and_does_not_initialize() {
 #[test]
 fn cli_round_trip_has_clean_json_and_preserves_callers_configuration() {
     use std::{fs, os::unix::fs::PermissionsExt};
-    let temporary = tempfile::tempdir().unwrap();
-    let root = temporary.path().join("store");
-    let config = temporary.path().join("storage.conf");
-    fs::write(&config, "caller configuration sentinel\n").unwrap();
+    for implicit in [false, true] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("store");
+        let config = temporary.path().join("storage.conf");
+        fs::write(&config, "caller configuration sentinel\n").unwrap();
 
-    let podman = temporary.path().join("podman");
-    let skopeo = temporary.path().join("skopeo");
-    for tool in [&podman, &skopeo] {
-        fs::write(tool, PRODUCER).unwrap();
-        fs::set_permissions(tool, fs::Permissions::from_mode(0o700)).unwrap();
+        let podman = temporary.path().join("podman");
+        let skopeo = temporary.path().join("skopeo");
+        for tool in [&podman, &skopeo] {
+            fs::write(tool, PRODUCER).unwrap();
+            fs::set_permissions(tool, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let reference = if implicit {
+            "localhost/source:tag"
+        } else {
+            "tool:tag"
+        };
+        let destination = if implicit {
+            reference
+        } else {
+            "localhost/output:tag"
+        };
+        let mut imported = cli();
+        imported
+            .arg("--store")
+            .arg(&root)
+            .arg("--podman")
+            .arg(&podman)
+            .arg("--skopeo")
+            .arg(&skopeo)
+            .args([
+                "--json",
+                "import",
+                "localhost/source:tag",
+                "--notes",
+                "my notes",
+            ])
+            .env("CONTAINERS_STORAGE_CONF", &config);
+        if !implicit {
+            imported.arg(reference);
+        }
+        let imported = imported.output().unwrap();
+        assert!(
+            imported.status.success(),
+            "{}",
+            String::from_utf8_lossy(&imported.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+        assert_eq!(report["local_ref"], reference);
+        assert_eq!(report["cleanup_warnings"], serde_json::json!([]));
+        assert_eq!(fs::read_dir(root.join("tmp")).unwrap().count(), 0);
+        assert!(imported.stderr.is_empty());
+        let mut exported = cli();
+        exported
+            .arg("--store")
+            .arg(&root)
+            .args(["--podman", "/unavailable/podman"])
+            .arg("--skopeo")
+            .arg(&skopeo)
+            .args(["--json", "export", reference])
+            .env("CONTAINERS_STORAGE_CONF", &config);
+        if !implicit {
+            exported.arg(destination);
+        }
+        let exported = exported.output().unwrap();
+        assert!(
+            exported.status.success(),
+            "{}",
+            String::from_utf8_lossy(&exported.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&exported.stdout).unwrap();
+        assert_eq!(report["destination"], destination);
+        assert!(exported.stderr.is_empty());
+        assert_eq!(
+            fs::read_to_string(config).unwrap(),
+            "caller configuration sentinel\n"
+        );
     }
-    let imported = cli()
-        .arg("--store")
-        .arg(&root)
-        .arg("--podman")
-        .arg(&podman)
-        .arg("--skopeo")
-        .arg(&skopeo)
-        .args([
-            "--json",
-            "import",
-            "localhost/source:tag",
-            "tool:tag",
-            "--notes",
-            "my notes",
-        ])
-        .env("CONTAINERS_STORAGE_CONF", &config)
-        .output()
-        .unwrap();
-    assert!(
-        imported.status.success(),
-        "{}",
-        String::from_utf8_lossy(&imported.stderr)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
-    assert_eq!(report["local_ref"], "tool:tag");
-    assert_eq!(report["cleanup_warnings"], serde_json::json!([]));
-    assert_eq!(fs::read_dir(root.join("tmp")).unwrap().count(), 0);
-    assert!(imported.stderr.is_empty());
-    let exported = cli()
-        .arg("--store")
-        .arg(&root)
-        .args(["--podman", "/unavailable/podman"])
-        .arg("--skopeo")
-        .arg(&skopeo)
-        .args(["--json", "export", "tool:tag", "localhost/output:tag"])
-        .env("CONTAINERS_STORAGE_CONF", &config)
-        .output()
-        .unwrap();
-    assert!(
-        exported.status.success(),
-        "{}",
-        String::from_utf8_lossy(&exported.stderr)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&exported.stdout).unwrap();
-    assert_eq!(report["destination"], "localhost/output:tag");
-    assert!(exported.stderr.is_empty());
-    assert_eq!(
-        fs::read_to_string(config).unwrap(),
-        "caller configuration sentinel\n"
-    );
 }
 
 #[test]

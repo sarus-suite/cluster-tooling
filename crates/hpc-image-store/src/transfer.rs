@@ -175,14 +175,24 @@ fn storage_argument(image: &str) -> String {
 }
 
 impl Store {
+    /// Import a containers-storage image. An omitted ref uses the source verbatim,
+    /// which must be a valid explicitly tagged local ref.
     pub fn import(
         &self,
         source: &str,
-        reference: &LocalRef,
+        reference: Option<&LocalRef>,
         context: &TransferContext,
         options: &ImportOptions,
     ) -> Result<ImportReport> {
         validate_image_argument(source)?;
+        let default_reference;
+        let reference = match reference {
+            Some(reference) => reference,
+            None => {
+                default_reference = LocalRef::new(source)?;
+                &default_reference
+            }
+        };
         context.validate()?;
         if context.podman.as_os_str().is_empty() {
             return Err(Error::InvalidTransfer(
@@ -258,12 +268,15 @@ impl Store {
         })
     }
 
+    /// Export a stored image, using the local ref verbatim when no destination
+    /// is supplied.
     pub fn export(
         &self,
         reference: &LocalRef,
-        destination: &str,
+        destination: Option<&str>,
         context: &TransferContext,
     ) -> Result<ExportReport> {
+        let destination = destination.unwrap_or(reference.as_str());
         validate_image_argument(destination)?;
         // Podman is never used by export, even to probe its availability.
         context.validate()?;

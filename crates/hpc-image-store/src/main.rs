@@ -1,3 +1,4 @@
+use clap::CommandFactory;
 use clap::{Parser, Subcommand};
 use hpc_image_store::{ImportOptions, LocalRef, Platform, Store, StoreConfig, TransferContext};
 use std::path::PathBuf;
@@ -26,7 +27,8 @@ enum Action {
     Import {
         #[arg(value_parser = plain_image)]
         source: String,
-        local_ref: LocalRef,
+        /// Destination store ref; defaults to the source, which must include a tag.
+        local_ref: Option<LocalRef>,
         #[arg(long)]
         replace: bool,
         #[arg(long)]
@@ -34,8 +36,9 @@ enum Action {
     },
     Export {
         local_ref: LocalRef,
+        /// Destination containers-storage image; defaults to the source store ref.
         #[arg(value_parser = plain_image)]
-        destination: String,
+        destination: Option<String>,
     },
 }
 fn plain_image(value: &str) -> Result<String, String> {
@@ -88,7 +91,7 @@ fn execute(cli: Cli) -> hpc_image_store::Result<()> {
         } => {
             let report = store.import(
                 &source,
-                &local_ref,
+                local_ref.as_ref(),
                 &context,
                 &ImportOptions { replace, notes },
             )?;
@@ -115,7 +118,7 @@ fn execute(cli: Cli) -> hpc_image_store::Result<()> {
             local_ref,
             destination,
         } => {
-            let report = store.export(&local_ref, &destination, &context)?;
+            let report = store.export(&local_ref, destination.as_deref(), &context)?;
             if cli.json {
                 println!(
                     "{}",
@@ -132,7 +135,22 @@ fn execute(cli: Cli) -> hpc_image_store::Result<()> {
     Ok(())
 }
 fn main() {
-    if let Err(error) = execute(Cli::parse()) {
+    let cli = Cli::parse();
+    if let Action::Import {
+        source,
+        local_ref: None,
+        ..
+    } = &cli.command
+        && let Err(error) = LocalRef::new(source.as_str())
+    {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ValueValidation,
+                format!("an explicit destination ref is required for source {source:?}: {error}"),
+            )
+            .exit();
+    }
+    if let Err(error) = execute(cli) {
         eprintln!("hpc-image-store: {error}");
         std::process::exit(1);
     }

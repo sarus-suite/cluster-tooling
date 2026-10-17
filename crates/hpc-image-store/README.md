@@ -60,11 +60,19 @@ Import can initialize a missing or empty store; export requires an existing
 store.
 
 ```sh
+hpc-image-store --store /scratch/me/images import analysis/tool:release
+hpc-image-store --store /scratch/me/images export analysis/tool:release
 hpc-image-store --store /scratch/me/images import localhost/tool:latest analysis/tool:release
 hpc-image-store --store /scratch/me/images import localhost/tool:latest analysis/tool:release --replace --notes 'updated build'
 hpc-image-store --store /scratch/me/images --json export analysis/tool:release localhost/restored:latest
 hpc-image-store --store /scratch/me/images --platform linux/arm64/v8 import localhost/tool:latest analysis/tool:arm64
 ```
+
+The destination is optional for both operations and defaults to the source
+argument verbatim. An import source must be a valid store ref to use this
+default. Untagged names, image IDs, and registry names with ports require an
+explicit destination ref; no tag or name is inferred. Export defaults to its
+source store ref, rather than the original import source recorded in metadata.
 
 Import fails if the destination ref already exists, including a damaged ref,
 unless `--replace` is supplied. Use `--notes` to attach optional notes to the
@@ -143,11 +151,21 @@ use hpc_image_store::{ImportOptions, LocalRef, Store, StoreConfig, TransferConte
 let store = Store::new(StoreConfig::new("/scratch/me/images")?);
 let reference = LocalRef::new("analysis/tool:release")?;
 let context = TransferContext::default();
-let imported = store.import("localhost/tool:latest", &reference, &context,
+let imported = store.import("localhost/tool:latest", Some(&reference), &context,
                             &ImportOptions::default())?;
-let exported = store.export(&reference, "localhost/restored:latest", &context)?;
+let exported = store.export(&reference, Some("localhost/restored:latest"), &context)?;
+
+// None uses the source verbatim as the destination.
+let imported = store.import("analysis/other:release", None, &context,
+                            &ImportOptions::default())?;
+let exported = store.export(&imported.local_ref, None, &context)?;
 # Ok::<(), hpc_image_store::Error>(())
 ```
+
+The library accepts `Option<&LocalRef>` for the import destination and
+`Option<&str>` for the export destination. An invalid implicit import ref returns
+a typed validation error before store preparation or tool invocation. The CLI
+reports this as invalid usage with status 2 and asks for an explicit destination.
 
 `ImportReport` identifies the local ref, stored root digest, source `ImageId`,
 and content metadata, and includes any `cleanup_warnings`. `ExportReport`
@@ -592,6 +610,14 @@ cargo test --locked -p hpc-image-store actual_skopeo_retains_locks_after_parent_
 ```
 
 ### Recorded results and outstanding qualification
+
+On 2026-10-17, the optional-destination refinement passed the complete crate
+suite: 74 tests passed, including doctests and both real-tool tests, with five
+subprocess helpers ignored. The real containers-storage round trip used Podman
+5.4.2 and Skopeo 1.18.0 outside the sandbox. Cargo check, Clippy with warnings
+denied, formatting, and diff checks passed. Focused fixtures cover omitted
+destinations, invalid implicit import refs, replacement, and export defaults
+that differ from the recorded acquisition source.
 
 On 2026-10-16, local acceptance passed in the integration devcontainer with
 Podman 4.3.1 and Skopeo 1.9.3 using rootless native overlay. The real
