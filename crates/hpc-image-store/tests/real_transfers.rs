@@ -1,14 +1,22 @@
-//! Opt-in local acceptance. The caller must select disposable containers-storage
-//! using its normal configuration, and enter its rootless namespace as needed.
+//! Real-tool acceptance with disposable containers-storage prepared by the test
+//! caller. The transfer library inherits that context without changing it.
 use hpc_image_store::{
     Error, ImportOptions, LocalRef, Platform, Store, StoreConfig, TransferContext,
 };
 use serde_json::{Value, json};
 use std::{
     fs,
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    io::Write,
+    os::{
+        fd::AsRawFd,
+        unix::{
+            ffi::OsStrExt,
+            fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        },
+    },
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
 };
 
 fn run(command: &mut Command) -> Vec<u8> {
@@ -67,9 +75,133 @@ fn fixture(directory: &Path, layer: &[u8], marker: &str, architecture: &str) -> 
     layout
 }
 
+fn try_exclusive(path: &Path) -> bool {
+    let file = fs::File::open(path).unwrap();
+    // SAFETY: file owns a valid descriptor; this attempt never blocks.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+
+fn orphaned_export(directory: &Path, config: &Path, destination: &str) {
+    let bytes = fs::read(config).unwrap();
+    let backup = directory.join("saved-config");
+    fs::rename(config, &backup).unwrap();
+    let c_path = std::ffi::CString::new(config.as_os_str().as_bytes()).unwrap();
+    // SAFETY: the path is NUL-terminated and the permission mask is valid.
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+    let stderr = directory.join("orphan-stderr");
+    // Keep Skopeo's progress pipes open after its parent dies, so this test
+    // observes a completed orphan transfer rather than an allowed SIGPIPE exit.
+    let skopeo = directory.join("orphan-skopeo");
+    fs::write(
+        &skopeo,
+        "#!/bin/sh\nif [ \"$1\" = copy ] && [ \"$2\" != --help ]; then\nexec skopeo \"$@\" >\"$0.stdout\" 2>\"$0.stderr\"\nfi\nexec skopeo \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&skopeo, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut parent = Command::new(env!("CARGO_BIN_EXE_hpc-image-store"))
+        .arg("--store")
+        .arg(directory.join("store"))
+        .arg("--skopeo")
+        .arg(skopeo)
+        .args(["export", "test/one:tag", destination])
+        .stdout(Stdio::null())
+        .stderr(fs::File::create(&stderr).unwrap())
+        .spawn()
+        .unwrap();
+    // The real Skopeo process blocks reading the stored config. Opening the
+    // other end proves it has reached the transfer before we kill its parent.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut writer = loop {
+        match fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(config)
+        {
+            Ok(writer) => break writer,
+            Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {}
+            Err(error) => panic!("FIFO writer: {error}"),
+        }
+        if parent.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+            let _ = parent.kill();
+            let _ = parent.wait();
+            panic!(
+                "Skopeo did not open config: {}",
+                fs::read_to_string(stderr).unwrap()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    parent.kill().unwrap();
+    parent.wait().unwrap();
+    let store_lock = directory.join("store/locks/store.lock");
+    let ref_lock = directory.join("store/locks/refs/746573742f6f6e653a746167/ref.lock");
+    assert!(!try_exclusive(&store_lock), "Skopeo lost store lock");
+    assert!(!try_exclusive(&ref_lock), "Skopeo lost ref lock");
+    writer.write_all(&bytes).unwrap();
+    drop(writer);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !try_exclusive(&store_lock) || !try_exclusive(&ref_lock) {
+        assert!(Instant::now() < deadline, "Skopeo did not release locks");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    fs::rename(backup, config).unwrap();
+    let restored: Value = serde_json::from_slice(&run(Command::new("skopeo")
+        .args(["inspect", "--config"])
+        .arg(format!("containers-storage:{destination}"))))
+    .unwrap();
+    assert_eq!(restored["config"]["Env"][0], "MARKER=one");
+}
+
+fn run_in_disposable_storage() {
+    let temporary = tempfile::Builder::new()
+        .prefix("hpc-rootless-")
+        .tempdir()
+        .unwrap();
+    let directory = temporary.path();
+    let graphroot = directory.join("storage");
+    let configuration = directory.join("storage.conf");
+    fs::write(
+        &configuration,
+        format!(
+            "[storage]\ndriver = \"overlay\"\nrunroot = {}\ngraphroot = {}\nrootless_storage_path = {}\n",
+            serde_json::to_string(&directory.join("run")).unwrap(),
+            serde_json::to_string(&graphroot).unwrap(),
+            serde_json::to_string(&graphroot).unwrap(),
+        ),
+    )
+    .unwrap();
+    // Verify Podman's effective root before running a destructive test or reset.
+    // Older rootless Podman versions need rootless_storage_path as well as
+    // graphroot to select the same store as Skopeo.
+    let selected = run(Command::new("podman")
+        .env("CONTAINERS_STORAGE_CONF", &configuration)
+        .args(["info", "--format", "{{.Store.GraphRoot}}"]));
+    assert_eq!(
+        Path::new(String::from_utf8_lossy(&selected).trim()),
+        graphroot
+    );
+    // A separate process gives every tool the same environment without mutating
+    // the test runner's environment while other Cargo tests may be running.
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "real_rootless_round_trip", "--nocapture"])
+        .env("CONTAINERS_STORAGE_CONF", &configuration)
+        .env("HPC_IMAGE_STORE_TEST_DISPOSABLE", "1")
+        .status()
+        .unwrap();
+    // Release overlay mounts even when acceptance fails, before TempDir removes
+    // the test-owned files. Never reset caller-supplied storage.
+    run(Command::new("podman")
+        .env("CONTAINERS_STORAGE_CONF", &configuration)
+        .args(["system", "reset", "--force"]));
+    assert!(status.success(), "real-tool acceptance failed: {status}");
+}
+
 #[test]
-#[ignore = "requires caller-selected disposable rootless Podman storage and Skopeo"]
 fn real_rootless_round_trip() {
+    if std::env::var_os("HPC_IMAGE_STORE_TEST_DISPOSABLE").is_none() {
+        run_in_disposable_storage();
+        return;
+    }
     assert_eq!(
         std::env::var("HPC_IMAGE_STORE_TEST_DISPOSABLE").as_deref(),
         Ok("1"),
@@ -87,6 +219,10 @@ fn real_rootless_round_trip() {
             String::from_utf8_lossy(&run(Command::new(executable).arg("--version")))
         );
     }
+    assert!(
+        run(Command::new("podman").args(["images", "--quiet"])).is_empty(),
+        "acceptance needs empty disposable storage; cached layers can mask failed exports"
+    );
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path();
     fs::create_dir(directory.join("payload")).unwrap();
@@ -184,6 +320,32 @@ fn real_rootless_round_trip() {
         .arg(format!("containers-storage:{output}"))))
     .unwrap();
     assert_eq!(config["config"]["Env"][0], "MARKER=one");
+    // Exercise the executable with real tools as well as the library API.
+    let imported: Value =
+        serde_json::from_slice(&run(Command::new(env!("CARGO_BIN_EXE_hpc-image-store"))
+            .arg("--store")
+            .arg(directory.join("store"))
+            .args(["--json", "import", &source, "test/cli:tag"])))
+        .unwrap();
+    assert_eq!(imported["stored_root"], report.stored_root.as_str());
+    assert_eq!(imported["cleanup_warnings"], json!([]));
+    let exported: Value =
+        serde_json::from_slice(&run(Command::new(env!("CARGO_BIN_EXE_hpc-image-store"))
+            .arg("--store")
+            .arg(directory.join("store"))
+            .args(["--json", "export", "test/cli:tag", &output])))
+        .unwrap();
+    assert_eq!(exported["stored_manifest"], imported["stored_root"]);
+    let config_digest = manifest["config"]["digest"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("sha256:")
+        .unwrap();
+    orphaned_export(
+        directory,
+        &blobs.join(config_digest),
+        &format!("{prefix}:orphan"),
+    );
     let overridden = TransferContext {
         platform: Some(Platform {
             os: "linux".into(),
@@ -273,14 +435,19 @@ fn real_rootless_round_trip() {
     // Empty the destination image cache first: otherwise Skopeo may legitimately
     // reuse its existing layer without reading the missing source blob.
     run(Command::new("podman").args(["image", "rm", "--force", &output]));
+    run(Command::new("podman").args(["image", "rm", "--force", &format!("{prefix}:orphan")]));
     // Missing content is detected by Skopeo on export, without a wrapper graph check.
     fs::remove_file(&shared_layer).unwrap();
-    assert!(matches!(
-        store.export(&reference, &format!("{prefix}:broken"), &context),
-        Err(Error::ToolFailed {
-            operation: "export image",
-            ..
-        })
-    ));
+    let failed_export = store.export(&reference, &format!("{prefix}:broken"), &context);
+    assert!(
+        matches!(
+            failed_export,
+            Err(Error::ToolFailed {
+                operation: "export image",
+                ..
+            })
+        ),
+        "expected missing-content export failure, got {failed_export:?}"
+    );
     assert_eq!(fs::read(configuration).unwrap(), configuration_before);
 }

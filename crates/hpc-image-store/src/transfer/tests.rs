@@ -704,7 +704,6 @@ fn transfer_worker() {
 }
 
 #[test]
-#[ignore = "requires real Skopeo; run explicitly"]
 fn actual_skopeo_retains_locks_after_parent_termination() {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
