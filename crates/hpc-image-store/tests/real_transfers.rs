@@ -260,7 +260,12 @@ fn real_rootless_round_trip() {
     let store = Store::new(StoreConfig::new(directory.join("store")).unwrap());
     let reference = LocalRef::new("test/one:tag").unwrap();
     let report = store
-        .import(&source, &reference, &context, &ImportOptions::default())
+        .import(
+            &source,
+            Some(&reference),
+            &context,
+            &ImportOptions::default(),
+        )
         .unwrap();
     assert!(report.cleanup_warnings.is_empty());
     assert_eq!(
@@ -273,7 +278,12 @@ fn real_rootless_round_trip() {
         Some("2020-01-02T03:04:05Z")
     );
     assert!(matches!(
-        store.import(&source, &reference, &context, &ImportOptions::default()),
+        store.import(
+            &source,
+            Some(&reference),
+            &context,
+            &ImportOptions::default()
+        ),
         Err(Error::RefExists(_))
     ));
     let blobs = directory.join("store/blobs/sha256");
@@ -294,7 +304,7 @@ fn real_rootless_round_trip() {
     let age = fs::metadata(&shared_layer).unwrap().modified().unwrap();
     let second = LocalRef::new("test/two:tag").unwrap();
     store
-        .import(&other, &second, &context, &ImportOptions::default())
+        .import(&other, Some(&second), &context, &ImportOptions::default())
         .unwrap();
     assert_eq!(
         fs::read_dir(directory.join("store/tmp")).unwrap().count(),
@@ -308,7 +318,7 @@ fn real_rootless_round_trip() {
     store
         .export(
             &reference,
-            &output,
+            Some(&output),
             &TransferContext {
                 podman: "/unavailable/podman".into(),
                 ..context.clone()
@@ -357,7 +367,7 @@ fn real_rootless_round_trip() {
     store
         .import(
             &source,
-            &reference,
+            Some(&reference),
             &overridden,
             &ImportOptions {
                 replace: true,
@@ -373,7 +383,7 @@ fn real_rootless_round_trip() {
     let pinned = store
         .import(
             &source,
-            &reference,
+            Some(&reference),
             &TransferContext {
                 podman: wrapper,
                 ..context.clone()
@@ -390,7 +400,7 @@ fn real_rootless_round_trip() {
         fs::read_dir(directory.join("store/tmp")).unwrap().count(),
         0
     );
-    store.export(&reference, &output, &context).unwrap();
+    store.export(&reference, Some(&output), &context).unwrap();
     let config: Value = serde_json::from_slice(&run(Command::new("skopeo")
         .args(["inspect", "--config"])
         .arg(format!("containers-storage:{output}"))))
@@ -406,7 +416,7 @@ fn real_rootless_round_trip() {
     assert!(matches!(
         store.import(
             &other,
-            &reference,
+            Some(&reference),
             &TransferContext {
                 podman: wrapper,
                 ..context.clone()
@@ -431,14 +441,14 @@ fn real_rootless_round_trip() {
         fs::read_dir(directory.join("store/tmp")).unwrap().count(),
         1
     );
-    store.export(&reference, &output, &context).unwrap();
+    store.export(&reference, Some(&output), &context).unwrap();
     // Empty the destination image cache first: otherwise Skopeo may legitimately
     // reuse its existing layer without reading the missing source blob.
     run(Command::new("podman").args(["image", "rm", "--force", &output]));
     run(Command::new("podman").args(["image", "rm", "--force", &format!("{prefix}:orphan")]));
     // Missing content is detected by Skopeo on export, without a wrapper graph check.
     fs::remove_file(&shared_layer).unwrap();
-    let failed_export = store.export(&reference, &format!("{prefix}:broken"), &context);
+    let failed_export = store.export(&reference, Some(&format!("{prefix}:broken")), &context);
     assert!(
         matches!(
             failed_export,

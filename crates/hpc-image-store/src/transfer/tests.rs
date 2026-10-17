@@ -103,7 +103,7 @@ impl Fixture {
     fn import(&self, replace: bool) -> Result<ImportReport> {
         self.store.import(
             "localhost/source:mutable",
-            &self.reference,
+            Some(&self.reference),
             &self.context,
             &ImportOptions {
                 replace,
@@ -137,6 +137,96 @@ impl Fixture {
             serde_json::to_vec(&index).unwrap(),
         )
         .unwrap();
+    }
+}
+
+#[test]
+fn omitted_destinations_use_source_verbatim_and_obey_replacement_policy() {
+    let mut fixture = Fixture::new();
+    fixture.reference = LocalRef::new("example/tool:Release_1").unwrap();
+    let source = fixture.reference.as_str();
+    let options = ImportOptions::default();
+    let imported = fixture
+        .store
+        .import(source, None, &fixture.context, &options)
+        .unwrap();
+    assert_eq!(imported.local_ref, fixture.reference);
+    assert!(
+        matches!(fixture.read().acquisition, Acquisition::Import { source: recorded, .. } if recorded == source)
+    );
+    let calls = fixture.log().len();
+    assert!(matches!(
+        fixture
+            .store
+            .import(source, None, &fixture.context, &options),
+        Err(Error::RefExists(_))
+    ));
+    assert_eq!(fixture.log().len(), calls);
+    fixture
+        .store
+        .import(
+            source,
+            None,
+            &fixture.context,
+            &ImportOptions {
+                replace: true,
+                notes: None,
+            },
+        )
+        .unwrap();
+    let exported = fixture
+        .store
+        .export(&fixture.reference, None, &fixture.context)
+        .unwrap();
+    assert_eq!(exported.local_ref, fixture.reference);
+    assert_eq!(exported.destination, source);
+    assert_eq!(exported.stored_manifest, imported.stored_root);
+    let calls = fixture.log();
+    let inspection = calls.iter().find(|call| call["tool"] == "podman").unwrap();
+    assert_eq!(
+        inspection["args"].as_array().unwrap().last().unwrap(),
+        source
+    );
+    assert_eq!(
+        calls.last().unwrap()["args"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap(),
+        &json!(format!("containers-storage:{source}"))
+    );
+}
+
+#[test]
+fn invalid_implicit_import_refs_require_explicit_destinations_before_any_side_effects() {
+    let prefixed_id = format!("sha256:{ID}");
+    for source in [
+        "alpine",
+        ID,
+        prefixed_id.as_str(),
+        "registry.example:5000/team/tool:latest",
+    ] {
+        let fixture = Fixture::new();
+        assert!(matches!(
+            fixture
+                .store
+                .import(source, None, &fixture.context, &ImportOptions::default()),
+            Err(Error::InvalidRef { .. })
+        ));
+        assert!(!fixture.store.config().root().exists());
+        assert!(!fixture.temporary.path().join("log").exists());
+        fixture
+            .store
+            .import(
+                source,
+                Some(&fixture.reference),
+                &fixture.context,
+                &ImportOptions::default(),
+            )
+            .unwrap();
+        assert!(
+            matches!(fixture.read().acquisition, Acquisition::Import { source: recorded, .. } if recorded == source)
+        );
     }
 }
 
@@ -195,7 +285,11 @@ fn import_pins_id_builds_metadata_and_exports_without_podman() {
     fixture.context.podman = "/does/not/exist".into();
     let exported = fixture
         .store
-        .export(&fixture.reference, "localhost/output:tag", &fixture.context)
+        .export(
+            &fixture.reference,
+            Some("localhost/output:tag"),
+            &fixture.context,
+        )
         .unwrap();
     assert_eq!(exported.stored_manifest, report.stored_root);
     assert_eq!(fixture.read(), metadata);
@@ -225,6 +319,21 @@ fn import_pins_id_builds_metadata_and_exports_without_podman() {
             assert!(!text.contains(forbidden), "{text}");
         }
     }
+    let exported = fixture
+        .store
+        .export(&fixture.reference, None, &fixture.context)
+        .unwrap();
+    assert_eq!(exported.destination, fixture.reference.as_str());
+    assert_ne!(exported.destination, "localhost/source:mutable");
+    assert_eq!(
+        fixture.log().last().unwrap()["args"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap(),
+        &json!(format!("containers-storage:{}", fixture.reference))
+    );
+    assert_eq!(fixture.read(), metadata);
 }
 
 #[test]
@@ -347,14 +456,14 @@ fn transport_named_images_reach_the_tools_without_changing_transport_or_id_pinni
             .store
             .import(
                 image,
-                &fixture.reference,
+                Some(&fixture.reference),
                 &fixture.context,
                 &ImportOptions::default(),
             )
             .unwrap();
         fixture
             .store
-            .export(&fixture.reference, image, &fixture.context)
+            .export(&fixture.reference, Some(image), &fixture.context)
             .unwrap();
         let calls = fixture.log();
         let inspection = calls.iter().find(|call| call["tool"] == "podman").unwrap();
@@ -414,7 +523,7 @@ fn unsupported_capabilities_and_invalid_arguments_fail_without_copying() {
         assert!(matches!(
             fixture.store.import(
                 image,
-                &fixture.reference,
+                Some(&fixture.reference),
                 &fixture.context,
                 &ImportOptions::default()
             ),
@@ -423,7 +532,7 @@ fn unsupported_capabilities_and_invalid_arguments_fail_without_copying() {
         assert!(matches!(
             fixture
                 .store
-                .export(&fixture.reference, image, &fixture.context),
+                .export(&fixture.reference, Some(image), &fixture.context),
             Err(Error::InvalidTransfer(_))
         ));
     }
@@ -571,7 +680,11 @@ fn cleanup_failures_warn_after_commit_and_later_imports_leave_remnants_alone() {
         assert_eq!(fixture.read().stored_root, report.stored_root);
         fixture
             .store
-            .export(&fixture.reference, "localhost/output:tag", &fixture.context)
+            .export(
+                &fixture.reference,
+                Some("localhost/output:tag"),
+                &fixture.context,
+            )
             .unwrap();
         assert_eq!(fs::metadata(&blob_path).unwrap().ino(), before.ino());
         assert_eq!(
@@ -640,7 +753,11 @@ fn pulled_manifest_export_requests_preservation() {
     .unwrap();
     fixture
         .store
-        .export(&fixture.reference, "localhost/output:tag", &fixture.context)
+        .export(
+            &fixture.reference,
+            Some("localhost/output:tag"),
+            &fixture.context,
+        )
         .unwrap();
     assert!(
         fixture.log().last().unwrap()["args"]
@@ -688,7 +805,7 @@ fn transfer_worker() {
         store
             .import(
                 "localhost/source:mutable",
-                &reference,
+                Some(&reference),
                 &context,
                 &ImportOptions {
                     replace: true,
@@ -698,7 +815,7 @@ fn transfer_worker() {
             .unwrap();
     } else {
         store
-            .export(&reference, "localhost/output:tag", &context)
+            .export(&reference, Some("localhost/output:tag"), &context)
             .unwrap();
     }
 }
