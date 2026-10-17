@@ -9,9 +9,9 @@ storage using Skopeo to copy the image data.
 The crate provides a synchronous Rust library and the `hpc-image-store` CLI.
 The library is private to this workspace and is not published as a package.
 The storage foundations from stages 1–2 and the import/export code from stage 3
-are implemented, but stage 3 still needs acceptance testing with real rootless
-transfers in a suitable environment. Pull, list, remove, check, and prune are
-not public operations yet, and there is no `init` CLI action.
+are implemented and have passed local acceptance with real rootless Podman
+and Skopeo transfers. Pull, list, remove, check, and prune are not public
+operations yet, and there is no `init` CLI action.
 
 The [filesystem image store design](../../hpc-image-store-design.md) describes
 the agreed behavior and guarantees. The
@@ -35,9 +35,9 @@ reconstruct storage configuration. It also does not select another driver,
 because changing the driver changes which images are visible. There are no CLI
 flags for overriding storage roots, driver settings, or the environment.
 
-If your driver requires a rootless user namespace, enter that namespace before
-launching the CLI or a program that uses the library, using the same normal
-Podman context:
+Run the CLI or a program that uses the library directly in your normal Podman context.
+If your tools or storage driver report that an existing rootless user namespace is required,
+`podman unshare` is a fallback using that same context:
 
 ```sh
 podman unshare hpc-image-store --store /scratch/me/images import localhost/tool:latest analysis/tool:release
@@ -494,8 +494,10 @@ the orphaned copy to release them.
 
 ### Local checks and test coverage
 
-Run the following commands from the workspace root. The ordinary suite needs
-Python 3 for controlled tool fixtures.
+Run the following commands from the workspace root. The suite needs Podman,
+Skopeo, Python 3, tar, and sha256sum, plus permission to create rootless user
+namespaces and use overlay storage. Real-tool tests run as part of ordinary
+`cargo test`; no `--ignored` flag or external Bash harness is needed.
 
 ```sh
 cargo check --locked -p hpc-image-store
@@ -532,48 +534,86 @@ stderr diagnostics in both human and JSON modes.
 Coordination tests cover stable lock identities, separate processes, lock-wait
 warnings, and acquisition timeouts. Process tests verify both inherited locks
 after wrapper termination using readiness handshakes and bounded waits.
-The ignored `lock_worker`, `wait_worker`, and `publication_worker` unit tests
-are internal subprocess helpers invoked by ordinary tests. Do not run these
-helpers directly or use an unfiltered `--ignored` invocation.
+The five ignored tests (`lock_worker`, `wait_worker`, `publication_worker`,
+`transfer_worker`, and `cleanup_warning_worker`) are internal subprocess helpers
+invoked by ordinary tests. Do not run these helpers directly or use an
+unfiltered `--ignored` invocation. Neither real-tool acceptance test is ignored.
 
 ### Tests with real tools
 
-Run the real Skopeo lock test independently; it needs no Podman storage:
+Run the containers-storage acceptance test directly with Cargo:
 
 ```sh
-cargo test --locked -p hpc-image-store actual_skopeo_retains_locks_after_parent_termination -- --ignored --nocapture
+cargo test --locked -p hpc-image-store --test real_transfers -- --nocapture
 ```
 
-For real rootless acceptance, use a dedicated disposable local
-containers-storage context prepared by the test caller with its normal driver
-and configuration. Set `CONTAINERS_STORAGE_CONF` to that existing configuration
-and explicitly opt in. The test does not amend the configuration or set a
-storage driver, and all tools inherit it. Do not select your ordinary image
-store: the test retags and removes its disposable images to exercise races and
-failures. It needs Podman, Skopeo, Python 3, tar, and sha256sum; hashing is used
-only to construct test fixtures.
+By default, the test caller prepares a fresh temporary overlay storage
+configuration, verifies Podman's effective graph root, and launches the
+acceptance test in a child process with `CONTAINERS_STORAGE_CONF` set. Podman,
+Skopeo, the library, and the CLI all inherit this same context. The library does
+not prepare or change storage configuration. The caller resets only its own
+disposable storage after the child exits, including after test failure, then
+removes its temporary files. No registry access or image download is needed.
+
+To qualify another configuration or driver, prepare an **empty disposable**
+containers-storage context yourself, then opt in explicitly:
 
 ```sh
 export CONTAINERS_STORAGE_CONF=/path/to/disposable/storage.conf
 export HPC_IMAGE_STORE_TEST_DISPOSABLE=1
-podman unshare cargo test --locked -p hpc-image-store --test real_transfers -- --ignored --nocapture
+cargo test --locked -p hpc-image-store --test real_transfers -- --nocapture
 ```
 
-This opt-in test covers a layered local round trip, OCI compression,
-shared-layer reuse, explicit platform selection, replacement, tag movement
-after inspection, image removal before copying, missing-content export
-failure, and unchanged configuration. The dedicated real-Skopeo lock test and
-ordinary process tests cover termination; a containers-storage transfer under
-the deployment's actual rootless context still needs qualification.
+Both tools must select the same disposable storage. With the tested older
+rootless Podman, set `rootless_storage_path` as well as `graphroot` in that
+configuration. Do not select your ordinary image store: the test retags and
+removes images to exercise races and failures. It rejects nonempty storage
+because cached layers can mask missing-source export failures. Caller-supplied
+storage is left for the caller to clean up and must be recreated or emptied
+before another run.
 
-### Recorded results and outstanding acceptance
+These commands run without an outer `podman unshare`. If the deployment's tools
+require an existing rootless namespace, prefix the Cargo command with
+`podman unshare` as a fallback. A sandbox that prohibits user namespace setup
+must also permit the real-tool subprocesses; wrapping them in `podman unshare`
+does not grant that permission.
 
-Earlier local validation used Skopeo 1.14.4 and Podman 4.9.5. A real Skopeo
-OCI-to-OCI copy passed the orphaned-lock test. The rootless containers-storage
-round trip was not qualified: `podman unshare true` failed with a `newuidmap`
-permission error both in the sandbox and outside it. These are historical
-observations, rather than a statement about currently installed tools or a
-new test run. Full stage-3 acceptance remains outstanding.
+The test covers library and JSON CLI round trips, OCI compression, shared-layer
+reuse, explicit platform selection, replacement, tag movement after inspection,
+image removal before copying, missing-content export failure, staging cleanup,
+and unchanged configuration. During a real containers-storage export, it also
+terminates the CLI parent, proves that the surviving Skopeo retains both store
+and ref locks, and verifies that the exported image is complete after it exits.
+
+The independent real-Skopeo OCI-to-OCI lock test needs no Podman storage:
+
+```sh
+cargo test --locked -p hpc-image-store actual_skopeo_retains_locks_after_parent_termination -- --nocapture
+```
+
+### Recorded results and outstanding qualification
+
+On 2026-10-16, local acceptance passed in the integration devcontainer with
+Podman 4.3.1 and Skopeo 1.9.3 using rootless native overlay. The real
+containers-storage test passed both directly and with an outer `podman unshare`;
+the direct run exercised both library operations and CLI commands. An outer
+`podman unshare` was unnecessary in this environment.
+
+The complete Cargo suite passed with both real-tool tests enabled: 70 tests
+passed, with only the five subprocess helpers marked ignored. Cargo check,
+Clippy with warnings denied, formatting, and diff checks also passed. No
+production transfer changes or Bash harnesses were needed. Cleanup failure
+warnings and unexpected index rejection remain covered by controlled fixtures.
+FUSE overlay remains unverified because this container has no `/dev/fuse`.
+
+Earlier checks with Podman 4.9.5 and Skopeo 1.14.4 encountered a `newuidmap`
+permission failure; those historical environment limits do not describe this
+successful run. In the current sandbox, namespace setup initially failed with
+`/proc/.../setgroups: permission denied`; the real containers-storage tests
+passed after running outside that sandbox. The first disposable configuration
+also exposed Podman's need for `rootless_storage_path`, and reusing storage
+from a failed run exposed cached-layer interference. The Cargo fixture now
+prepares fresh storage and checks its selection and initial emptiness.
 
 Local tests do not qualify Lustre or VAST locking, cross-node visibility,
 atomic rename, or durability guarantees. Those require deployment-site
