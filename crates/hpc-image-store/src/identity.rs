@@ -6,6 +6,51 @@ use std::{
     str::FromStr,
 };
 
+fn is_reserved_digest(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+/// Select committed content by logical name or by its actual manifest/index
+/// root digest. Config digests and acquisition provenance are not lookup keys.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ImageSelector {
+    LocalRef(LocalRef),
+    Digest(Sha256Digest),
+}
+
+impl From<LocalRef> for ImageSelector {
+    fn from(reference: LocalRef) -> Self {
+        Self::LocalRef(reference)
+    }
+}
+impl From<Sha256Digest> for ImageSelector {
+    fn from(digest: Sha256Digest) -> Self {
+        Self::Digest(digest)
+    }
+}
+impl FromStr for ImageSelector {
+    type Err = Error;
+    fn from_str(value: &str) -> Result<Self> {
+        // Only complete hexadecimal spellings are reserved. Uppercase hex
+        // stays reserved but fails canonical digest validation below.
+        if is_reserved_digest(value) {
+            Sha256Digest::new(value).map(Self::Digest)
+        } else {
+            LocalRef::new(value).map(Self::LocalRef)
+        }
+    }
+}
+impl fmt::Display for ImageSelector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LocalRef(reference) => reference.fmt(f),
+            Self::Digest(digest) => digest.fmt(f),
+        }
+    }
+}
+
 /// A local, explicitly tagged name, without registry normalization.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -32,7 +77,7 @@ impl LocalRef {
         {
             return Err(invalid("invalid tag or tag exceeds 128 bytes"));
         }
-        if name == "sha256" && tag.len() == 64 && tag.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if is_reserved_digest(&value) {
             return Err(invalid("this spelling is reserved for digest selectors"));
         }
         Ok(Self(value))

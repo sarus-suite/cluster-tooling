@@ -23,6 +23,15 @@ impl std::fmt::Display for NamespaceChange {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("no committed ref selects stored-root digest {0}")]
+    DigestMissing(crate::Sha256Digest),
+    #[error(
+        "cannot completely resolve stored-root digest {digest}; damaged or unreadable namespace entries remain"
+    )]
+    ResolutionIncomplete {
+        digest: crate::Sha256Digest,
+        diagnostics: Vec<crate::ListDiagnostic>,
+    },
     #[error("invalid OCI transfer JSON at {path}: {source}")]
     ContentJson {
         path: PathBuf,

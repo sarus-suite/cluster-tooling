@@ -51,7 +51,6 @@ RUN printf 'vscode:1001:64536\n' > /etc/subuid \
 
 ENV CARGO_HOME=/home/vscode/.cargo \
     RUSTUP_HOME=/home/vscode/.rustup \
-    CARGO_TARGET_DIR=/home/vscode/.cache/cargo-target \
     PATH=/home/vscode/.cargo/bin:${PATH}
 
 USER vscode

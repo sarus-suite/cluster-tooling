@@ -183,22 +183,76 @@ pub(crate) struct ResolvedRef<'a> {
 }
 
 pub(crate) fn read<'a>(guard: &'a RefGuard<'a>) -> Result<ResolvedRef<'a>> {
-    let raw_image = raw_image_path(guard)?;
-    require_directory(&raw_image.join("blobs"))?;
-    let root = oci::single_root(&raw_image)?;
-    let metadata =
-        RefMetadata::from_json(&fsutil::read_regular(&raw_image.join("metadata.json"))?)?;
-    if &metadata.local_ref != guard.reference() || metadata.stored_root != root.digest {
-        return Err(Error::InvalidObject {
-            path: raw_image.join("metadata.json"),
-            reason: "metadata disagrees with logical ref or layout root".into(),
-        });
+    let resolved = read_small(guard)?;
+    fsutil::sized_object(
+        &guard.layout().blob(&resolved.root.digest),
+        resolved.root.size,
+    )?;
+    Ok(resolved)
+}
+
+/// Inventory validates only wrapper files; no CAS object is opened here.
+pub(crate) fn read_small<'a>(guard: &'a RefGuard<'a>) -> Result<ResolvedRef<'a>> {
+    let mut inspected = inspect_small(guard)?;
+    if !inspected.errors.is_empty() {
+        return Err(inspected.errors.remove(0));
     }
-    fsutil::sized_object(&guard.layout().blob(&root.digest), root.size)?;
     Ok(ResolvedRef {
         _guard: guard,
+        raw_image: inspected.raw_image,
+        root: inspected.root.expect("successful root inspection"),
+        metadata: inspected.metadata.expect("successful metadata inspection"),
+    })
+}
+
+pub(crate) struct RefInspection {
+    pub raw_image: PathBuf,
+    pub root: Option<Descriptor>,
+    pub metadata: Option<RefMetadata>,
+    pub errors: Vec<Error>,
+}
+
+/// Keep independently readable fields available when another wrapper file is
+/// damaged. A cached digest never replaces an unreadable authoritative root.
+pub(crate) fn inspect_small(guard: &RefGuard<'_>) -> Result<RefInspection> {
+    let raw_image = raw_image_path(guard)?;
+    let mut errors = Vec::new();
+    if let Err(error) = require_directory(&raw_image.join("blobs")) {
+        errors.push(error);
+    }
+    let root = match oci::single_root(&raw_image) {
+        Ok(root) => Some(root),
+        Err(error) => {
+            errors.push(error);
+            None
+        }
+    };
+    let metadata_path = raw_image.join("metadata.json");
+    let metadata = match fsutil::read_regular(&metadata_path)
+        .and_then(|bytes| RefMetadata::from_json(&bytes))
+    {
+        Ok(metadata) => {
+            if &metadata.local_ref != guard.reference()
+                || root
+                    .as_ref()
+                    .is_some_and(|root| metadata.stored_root != root.digest)
+            {
+                errors.push(Error::InvalidObject {
+                    path: metadata_path,
+                    reason: "metadata disagrees with logical ref or layout root".into(),
+                });
+            }
+            Some(metadata)
+        }
+        Err(error) => {
+            errors.push(error);
+            None
+        }
+    };
+    Ok(RefInspection {
         raw_image,
         root,
         metadata,
+        errors,
     })
 }

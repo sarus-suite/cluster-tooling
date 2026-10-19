@@ -8,10 +8,11 @@ storage using Skopeo to copy the image data.
 
 The crate provides a synchronous Rust library and the `hpc-image-store` CLI.
 The library is private to this workspace and is not published as a package.
-The storage foundations from stages 1–2 and the import/export code from stage 3
-are implemented and have passed local acceptance with real rootless Podman
-and Skopeo transfers. Pull, list, remove, check, and prune are not public
-operations yet, and there is no `init` CLI action.
+Stages 1–4 provide import, export by name or stored-root digest, inventory, and
+explicit-name removal. Inventory formatting can match Podman's image table or
+show richer fields and JSON diagnostics. Pull, check, and prune remain future
+operations, and there is no `init` CLI action. Recorded validation results are
+listed below.
 
 The [filesystem image store design](../../hpc-image-store-design.md) describes
 the agreed behavior and guarantees. The
@@ -72,7 +73,10 @@ The destination is optional for both operations and defaults to the source
 argument verbatim. An import source must be a valid store ref to use this
 default. Untagged names, image IDs, and registry names with ports require an
 explicit destination ref; no tag or name is inferred. Export defaults to its
-source store ref, rather than the original import source recorded in metadata.
+source selector, rather than the original import source recorded in metadata.
+Export also accepts a bare stored-root `sha256:…` digest. If its destination is
+omitted, that digest spelling is passed verbatim to containers-storage; tool
+failures are reported normally. Supply a destination name to restore under a tag.
 
 Import fails if the destination ref already exists, including a damaged ref,
 unless `--replace` is supplied. Use `--notes` to attach optional notes to the
@@ -95,6 +99,59 @@ usage. With `--json`, results go to stdout; errors and warnings go to stderr.
 Output from the tools is captured separately so that it does not corrupt JSON
 results. A successful import can report cleanup warnings while still returning
 status 0; see [Cleanup after import](#cleanup-after-import).
+
+### Inventory, formatting, and removal
+
+```sh
+hpc-image-store --store /scratch/me/images list
+hpc-image-store --store /scratch/me/images list --digests
+hpc-image-store --store /scratch/me/images list --format full
+hpc-image-store --store /scratch/me/images list --format json
+hpc-image-store --store /scratch/me/images remove analysis/tool:release
+```
+
+The default `podman` format uses `REPOSITORY`, `TAG`, `IMAGE ID`, `CREATED`, and
+`SIZE` columns. `--digests` inserts `DIGEST` before `IMAGE ID`, as in
+`podman images --digests`. Image IDs are the first 12 hex characters of the
+stored image's config digest, not a raw-image directory ID or an acquisition
+source ID. The digest column contains the full stored manifest root digest.
+Creation ages use the cached image creation time; missing or unusable values
+display as `<none>`. Rows are ordered newest first, with name/path tie-breaking.
+Size uses decimal units and three significant digits. Its value is stored
+content size, which can differ from the size shown by Podman.
+
+`--format full` adds full config/root digests, acquisition and creation
+timestamps, platform, exact cached bytes, status, and namespace paths. JSON
+contains all entries, structured diagnostics and enumeration completion.
+Global `--json` is an alias for JSON output. It conflicts with explicit
+`--format podman` or `full`; `--digests` requires Podman formatting. Invalid
+combinations fail as usage errors before accessing the store.
+
+List reads only the committed namespace and small wrapper files, never CAS
+objects or external tools. It validates pointer confinement, layout and metadata
+versions, root selection, and cached name/root agreement. A usable entry is
+`unverified`: its config digest, platform, timestamps, size and image content
+have not been checked against the CAS. Damaged entries stay visible, using
+their namespace path if a name cannot be decoded. Diagnostics go to stderr
+and are also included in JSON. Collected results are printed before returning
+status 1 for damage or incomplete enumeration; empty healthy inventory succeeds.
+Individual refs are read coherently under locks, without a store-wide snapshot.
+Non-UTF-8 paths use a quoted, byte-escaped representation in report strings;
+Rust reports retain the native `PathBuf` values.
+
+Digest selection scans committed OCI layout roots in local-name order. It uses
+a healthy matching ref despite unrelated damage. Without a match, damage or
+unreadable namespace entries produce incomplete resolution, rather than a claim
+that the digest is absent. Config digests and source provenance never act as
+lookup aliases. Unreferenced CAS content is not a retained digest-only image.
+
+Remove requires an explicit local `name:tag`, including for damaged refs. It
+unlinks that committed name without following its target, saves the namespace
+change, and leaves the retired raw image, shared content and lock files for
+future maintenance. Directories, special files and malformed namespace parents
+are preserved with an error. Removal initializes a missing store beneath a
+prepared parent under the existing mutation contract, then reports the ref
+missing; list and export never initialize stores.
 
 ### What transfers preserve and validate
 
@@ -172,23 +229,55 @@ and content metadata, and includes any `cleanup_warnings`. `ExportReport`
 identifies the local ref, stored manifest digest, and destination. The CLI uses
 these reports for its JSON results.
 
+Inventory and removal need no transfer context. Formatters only turn a collected
+report into a string; they do not open the store or print diagnostics:
+
+```no_run
+use hpc_image_store::{ImageSelector, Store, StoreConfig, TransferContext,
+                      format_list_podman, presentation};
+
+let store = Store::new(StoreConfig::new("/scratch/me/images")?);
+let report = store.list()?;
+let table = format_list_podman(&report, false);
+let table_with_digests = format_list_podman(&report, true);
+let full_table = presentation::format_list_full(&report);
+// report.has_errors() includes damaged refs and incomplete enumeration.
+let selector: ImageSelector = "analysis/tool:release".parse()?;
+store.export_selected(&selector, Some("localhost/restored:latest"),
+                      &TransferContext::default())?;
+if let Some(root) = report.entries.iter().find_map(|entry| entry.stored_root.clone()) {
+    store.export_selected(&ImageSelector::Digest(root), Some("localhost/by-digest:latest"),
+                          &TransferContext::default())?;
+}
+# Ok::<(), hpc_image_store::Error>(())
+```
+
+`ListReport` contains `entries`, `diagnostics`, and `complete`. The completion
+flag describes namespace enumeration, separately from damage. Store-level
+failures return `Err`; per-ref failures stay in the report. `ListEntry` preserves
+independently readable root and metadata fields when another wrapper file is
+damaged. `RemoveReport` identifies the removed name without estimating reclaimed
+space. `export_selected` returns the existing `ExportReport`, including the
+deterministically chosen local ref. The original named `export` API is retained.
+
 ### Names, digests, and metadata
 
 Local refs use lowercase OCI-style repository paths and explicit,
 case-sensitive tags. Names are limited to 255 ASCII bytes and tags to 128.
 The library does not parse registry domains, supply an implicit `latest` tag,
 or normalize names. The bare spelling `sha256:<64 hex digits>` is reserved for
-future digest selectors, even if its hex digits are uppercase.
+digest selectors, even if its hex digits are uppercase.
 `Sha256Digest` values accept only lowercase SHA-256 hex.
 
 `StoreMetadata` and `RefMetadata` serialize to JSON, and their `from_json`
 methods check the schema version. Identity values read from JSON undergo the
 same validation as values passed to constructors. Store markers use version 1,
-and ref metadata uses version 2; obsolete version-1 ref metadata is rejected
-without migration.
+and ref metadata uses version 3. Older development metadata is rejected without
+migration or modification. Recreate those development refs explicitly.
 
 Ref metadata records `local_ref` and `stored_root`. Its `content` fields cache
-information for display: the platform, optional OCI creation time, and unique
+information for display: the required config digest (OCI ImageID), platform,
+optional OCI creation time, and unique
 content size. The size is the sum of unique manifest, configuration, and layer
 objects, excluding the small wrapper metadata files. It does not estimate how
 much space removing an image would reclaim, since other images may share its
@@ -274,7 +363,7 @@ even when the final stored content is shared with other images.
 
 This prototype layout has no migration or compatibility fallback. Recreate
 outdated developer stores and fixtures explicitly; the library does not remove
-them for you. Store metadata remains version 1 and ref metadata remains version 2.
+them for you. Store metadata remains version 1 and ref metadata uses version 3.
 There is no offline qualification machinery.
 
 ## Store initialization
@@ -410,10 +499,9 @@ replacement is explicitly requested. Replacement accepts symlinks and regular
 files but rejects directory entries. Replaced raw images remain for future
 prune; an individual import does not delete them.
 
-The internal removal primitive unlinks the terminal ref entry and syncs its
+Removal unlinks the terminal ref entry and syncs its
 parent without following the pointer. It leaves shared content, retired raw
-images, namespace directories, and lock files in place. Removal is not yet a
-public operation.
+images, namespace directories, and lock files in place.
 
 Before the ref is committed, failures preserve any previous ref. Once a
 filesystem entry has changed, a sync failure can mean that the change is
@@ -455,8 +543,9 @@ through symlinks.
 Internal discovery reads namespace entries rather than hiding refs with broken
 pointers or malformed terminal entries. Unexpected branches and enumeration
 failures are retained as diagnostics and mark discovery incomplete. Discovery
-validates pointers, but full inventory validation and presentation remain
-stage-4 work.
+only enumerates names; inventory validates pointers and wrapper files under
+each ref's shared lock. Digest resolution retains its selected ref lock until
+the transfer completes, then export performs its existing small source checks.
 
 ## How locking works
 
@@ -465,8 +554,8 @@ images. Lock files stay in place across replacement and removal, so processes
 continue to coordinate through the same files even when a ref selects a new
 image.
 
-The operation lock policy is shown below. Import and export are public today;
-pull, remove, list, check, and prune describe the policy for planned operations.
+The operation lock policy is shown below. Import, export, remove, and list are
+public today; pull, check, and prune describe the policy for planned operations.
 
 | Operation | Store lock | Ref lock |
 | --- | --- | --- |
@@ -610,6 +699,21 @@ cargo test --locked -p hpc-image-store actual_skopeo_retains_locks_after_parent_
 ```
 
 ### Recorded results and outstanding qualification
+
+On 2026-10-18, stage 4 passed the full crate suite: 96 tests passed, including
+three doctests and both real-tool tests, with five internal subprocess helpers
+ignored. The rootless containers-storage test used Podman 5.4.2 and Skopeo
+1.18.0 with fresh disposable storage. It verified export by root digest and
+that the displayed OCI config ID matches Podman's image ID. Crate check,
+Clippy with warnings denied, formatting, and diff checks passed.
+
+New fixtures cover damaged and incomplete inventories, missing CAS content,
+schema-2 rejection without modification, partial JSON results (including
+non-UTF-8 paths), formatter ages and sizes, duplicate-root selection, and
+explicit damaged-ref removal. Subprocess handshakes exercise replacement and
+removal after enumeration, retention of the selected ref lock, and orphaned
+Skopeo lock retention for digest export. These are local results; no Lustre or
+VAST qualification was performed.
 
 On 2026-10-17, the optional-destination refinement passed the complete crate
 suite: 74 tests passed, including doctests and both real-tool tests, with five

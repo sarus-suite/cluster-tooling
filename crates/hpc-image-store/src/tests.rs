@@ -163,12 +163,84 @@ fn metadata_round_trips_and_checks_versions() {
         RefMetadata::from_json(b"{\"version\":1}"),
         Err(Error::UnsupportedVersion { .. })
     ));
+    assert!(matches!(
+        RefMetadata::from_json(b"{\"version\":2}"),
+        Err(Error::UnsupportedVersion { version: 2, .. })
+    ));
+    let mut value = serde_json::to_value(&reference).unwrap();
+    value["content"]
+        .as_object_mut()
+        .unwrap()
+        .remove("config_digest");
+    assert!(RefMetadata::from_json(&serde_json::to_vec(&value).unwrap()).is_err());
     assert!(
         RefMetadata::from_json(
             b"{\"version\":1,\"local_ref\":\"../a:t\",\"stored_root\":\"sha256:no\"}"
         )
         .is_err()
     );
+}
+
+#[test]
+fn image_selectors_distinguish_names_from_root_digests() {
+    use crate::ImageSelector;
+    let reference = LocalRef::new("tool:release").unwrap();
+    let root = digest();
+    for selector in [ImageSelector::from(reference), ImageSelector::from(root)] {
+        assert_eq!(
+            selector.to_string().parse::<ImageSelector>().unwrap(),
+            selector
+        );
+    }
+    assert!(matches!(
+        "sha256:latest".parse::<ImageSelector>(),
+        Ok(ImageSelector::LocalRef(_))
+    ));
+    for invalid in [
+        format!("sha256:{}", "A".repeat(64)),
+        format!("tool@sha256:{}", "a".repeat(64)),
+        "tool".into(),
+    ] {
+        assert!(invalid.parse::<ImageSelector>().is_err(), "{invalid}");
+    }
+}
+
+#[test]
+fn selector_digest_reservation_preserves_valid_sha256_repository_tags() {
+    use crate::ImageSelector;
+    for tag in [
+        "g".repeat(64),
+        format!("{}g", "a".repeat(63)),
+        format!("g{}", "a".repeat(63)),
+        "_".repeat(64),
+        format!("g{}", ".".repeat(63)),
+        format!("g{}", "-".repeat(63)),
+        "a".repeat(63),
+        "a".repeat(65),
+    ] {
+        let value = format!("sha256:{tag}");
+        let reference = LocalRef::new(&value).unwrap();
+        assert_eq!(
+            value.parse::<ImageSelector>().unwrap(),
+            ImageSelector::LocalRef(reference)
+        );
+    }
+    let value = format!("sha256:{}", "ab".repeat(32));
+    assert_eq!(
+        value.parse::<ImageSelector>().unwrap(),
+        ImageSelector::Digest(Sha256Digest::new(&value).unwrap())
+    );
+    for tag in ["A".repeat(64), "aB".repeat(32)] {
+        let value = format!("sha256:{tag}");
+        assert!(matches!(
+            LocalRef::new(&value),
+            Err(Error::InvalidRef { .. })
+        ));
+        assert!(matches!(
+            value.parse::<ImageSelector>(),
+            Err(Error::InvalidDigest(_))
+        ));
+    }
 }
 
 #[test]

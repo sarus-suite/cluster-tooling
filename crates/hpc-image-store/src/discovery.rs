@@ -1,4 +1,4 @@
-use crate::{Error, LocalRef, Result, error::io_error, fsutil, locks::StoreGuard, refs};
+use crate::{Error, LocalRef, Result, error::io_error, fsutil, locks::StoreGuard};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -72,19 +72,10 @@ fn visit(guard: &StoreGuard<'_>, relative: &Path, result: &mut Discovery) {
                     continue;
                 }
             };
-            let diagnostic = match guard.lock_ref(&reference) {
-                Ok(ref_guard) => match refs::raw_image_path(&ref_guard) {
-                    Ok(_) => None,
-                    // A ref can disappear between enumeration and acquisition.
-                    Err(Error::RefMissing(_)) => continue,
-                    Err(error) => Some(error),
-                },
-                Err(error) => Some(error),
-            };
             result.entries.push(NamespaceEntry {
                 path: child_path,
                 local_ref: Some(reference),
-                diagnostic,
+                diagnostic: None,
             });
             continue;
         }

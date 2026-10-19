@@ -1,7 +1,8 @@
 //! Real-tool acceptance with disposable containers-storage prepared by the test
 //! caller. The transfer library inherits that context without changing it.
 use hpc_image_store::{
-    Error, ImportOptions, LocalRef, Platform, Store, StoreConfig, TransferContext,
+    Error, ImageSelector, ImportOptions, LocalRef, Platform, Store, StoreConfig, TransferContext,
+    format_list_podman,
 };
 use serde_json::{Value, json};
 use std::{
@@ -268,6 +269,14 @@ fn real_rootless_round_trip() {
         )
         .unwrap();
     assert!(report.cleanup_warnings.is_empty());
+    let podman_id = String::from_utf8(run(
+        Command::new("podman").args(["images", "--format", "{{.ID}}", &source])
+    ))
+    .unwrap();
+    let inventory = store.list().unwrap();
+    assert!(!inventory.has_errors());
+    assert_eq!(&report.content.config_digest.hex()[..12], podman_id.trim());
+    assert!(format_list_podman(&inventory, false).contains(podman_id.trim()));
     assert_eq!(
         fs::read_dir(directory.join("store/tmp")).unwrap().count(),
         0
@@ -289,6 +298,10 @@ fn real_rootless_round_trip() {
     let blobs = directory.join("store/blobs/sha256");
     let manifest: Value =
         serde_json::from_slice(&fs::read(blobs.join(report.stored_root.hex())).unwrap()).unwrap();
+    assert_eq!(
+        manifest["config"]["digest"],
+        report.content.config_digest.as_str()
+    );
     let layer_digest = manifest["layers"][0]["digest"]
         .as_str()
         .unwrap()
@@ -316,8 +329,8 @@ fn real_rootless_round_trip() {
         age
     );
     store
-        .export(
-            &reference,
+        .export_selected(
+            &ImageSelector::Digest(report.stored_root.clone()),
             Some(&output),
             &TransferContext {
                 podman: "/unavailable/podman".into(),
