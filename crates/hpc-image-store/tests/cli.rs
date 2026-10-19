@@ -84,7 +84,7 @@ fn invalid_cli_usage_does_not_initialize_a_store() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("store");
     for arguments in [
-        vec!["list"],
+        vec!["list", "--format", "invalid"],
         vec!["import", "source", "no-tag"],
         vec!["import", "docker://example/image", "tool:tag"],
         vec!["import", "", "tool:tag"],
@@ -112,11 +112,19 @@ fn invalid_cli_usage_does_not_initialize_a_store() {
     }
 }
 #[test]
-fn help_is_successful_and_lists_only_stage_three_commands() {
+fn help_is_successful_and_lists_stage_four_commands() {
     let output = cli().arg("--help").output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("import") && help.contains("export"));
+    assert!(help.contains("list") && help.contains("remove"));
+    for command in ["prune", "pull", "check"] {
+        assert!(
+            !help
+                .lines()
+                .any(|line| line.split_whitespace().next() == Some(command))
+        );
+    }
     assert!(!help.contains("--storage-driver"));
     assert!(output.stderr.is_empty());
 }
@@ -134,6 +142,278 @@ fn missing_store_export_is_an_operation_failure_and_does_not_initialize() {
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("store does not exist"));
     assert!(!root.exists());
+}
+
+struct InventoryFixture {
+    directory: tempfile::TempDir,
+}
+
+#[test]
+fn malformed_non_utf8_namespace_paths_remain_visible_in_json() {
+    use std::{ffi::OsString, fs, os::unix::ffi::OsStringExt};
+    let fixture = InventoryFixture::new();
+    let path = fixture
+        .root()
+        .join("refs")
+        .join(OsString::from_vec(vec![0xff]));
+    fs::write(&path, b"preserve").unwrap();
+    let output = fixture
+        .command()
+        .args(["list", "--format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["entries"].as_array().unwrap().len(), 2);
+    assert!(
+        report["diagnostics"][0]["path"]
+            .as_str()
+            .unwrap()
+            .contains("\\xFF")
+    );
+    assert_eq!(fs::read(path).unwrap(), b"preserve");
+}
+impl InventoryFixture {
+    fn new() -> Self {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("storage.conf"),
+            "caller configuration sentinel\n",
+        )
+        .unwrap();
+        for tool in ["podman", "skopeo"] {
+            let path = directory.path().join(tool);
+            fs::write(&path, PRODUCER).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let fixture = Self { directory };
+        fixture.import("tool:t");
+        fixture
+    }
+    fn root(&self) -> std::path::PathBuf {
+        self.directory.path().join("store")
+    }
+    fn command(&self) -> Command {
+        let mut command = cli();
+        command
+            .arg("--store")
+            .arg(self.root())
+            .arg("--podman")
+            .arg(self.directory.path().join("podman"))
+            .arg("--skopeo")
+            .arg(self.directory.path().join("skopeo"))
+            .env(
+                "CONTAINERS_STORAGE_CONF",
+                self.directory.path().join("storage.conf"),
+            );
+        command
+    }
+    fn import(&self, reference: &str) {
+        let output = self
+            .command()
+            .args(["import", "source:tag", reference])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    fn report(&self) -> serde_json::Value {
+        let output = self
+            .command()
+            .args(["list", "--format", "json"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+}
+
+#[test]
+fn accepted_sha256_repository_name_remains_exportable() {
+    let fixture = InventoryFixture::new();
+    let reference = format!("sha256:{}", "g".repeat(64));
+    fixture.import(&reference);
+    let inventory = fixture.report();
+    let entry = inventory["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["local_ref"] == reference)
+        .unwrap();
+    assert_eq!(entry["status"], "unverified");
+    for destination in [Some("restored:tag"), None] {
+        let mut command = fixture.command();
+        command.args(["--json", "export", &reference]);
+        if let Some(destination) = destination {
+            command.arg(destination);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let exported: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(exported["local_ref"], reference);
+        assert_eq!(exported["stored_manifest"], entry["stored_root"]);
+        assert_eq!(exported["destination"], destination.unwrap_or(&reference));
+    }
+}
+
+#[test]
+fn inventory_formats_and_digest_export_use_the_collected_identities() {
+    let fixture = InventoryFixture::new();
+    let report = fixture.report();
+    let root = report["entries"][0]["stored_root"].as_str().unwrap();
+    let config = report["entries"][0]["metadata"]["content"]["config_digest"]
+        .as_str()
+        .unwrap();
+    assert_eq!(report["entries"][0]["metadata"]["version"], 3);
+    assert_eq!(report["entries"][0]["status"], "unverified");
+    for arguments in [
+        vec!["list"],
+        vec!["list", "--format", "podman"],
+        vec!["list", "--digests"],
+        vec!["list", "--format", "full"],
+    ] {
+        let output = fixture.command().args(&arguments).output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.starts_with("REPOSITORY") && text.contains("IMAGE ID"));
+        assert!(text.contains(&config[7..19]));
+        assert!(!text.contains("aaaaaaaaaaaa"));
+        if arguments.contains(&"--digests") || arguments.contains(&"full") {
+            assert!(text.contains(root));
+        }
+        if arguments.contains(&"full") {
+            assert!(text.contains("unverified") && text.contains("SIZE BYTES"));
+        }
+    }
+    for arguments in [
+        vec!["--json", "list"],
+        vec!["list", "--json"],
+        vec!["--json", "list", "--format", "json"],
+    ] {
+        let output = fixture.command().args(arguments).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+            report
+        );
+    }
+    let output = fixture
+        .command()
+        .args(["--json", "export", root])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let exported: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(exported["local_ref"], "tool:t");
+    assert_eq!(exported["destination"], root);
+    let absent = fixture
+        .command()
+        .args(["export", config, "output:tag"])
+        .output()
+        .unwrap();
+    assert_eq!(absent.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&absent.stderr).contains("no committed ref"));
+}
+
+#[test]
+fn inventory_usage_errors_and_missing_store_are_distinct() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("missing");
+    let digest = format!("sha256:{}", "a".repeat(64));
+    for arguments in [
+        vec!["list", "--format", "invalid"],
+        vec!["list", "--format", "full", "--digests"],
+        vec!["list", "--format", "json", "--digests"],
+        vec!["--json", "list", "--digests"],
+        vec!["--json", "list", "--format", "podman"],
+        vec!["--json", "list", "--format", "full"],
+        vec!["remove", &digest],
+        vec!["remove", "untagged"],
+        vec!["export", "tool@sha256:abcd"],
+    ] {
+        let output = cli()
+            .arg("--store")
+            .arg(&root)
+            .args(&arguments)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+        assert!(!root.exists());
+    }
+    let output = cli()
+        .arg("--store")
+        .arg(&root)
+        .arg("list")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!root.exists());
+}
+
+#[test]
+fn damaged_inventory_prints_partial_results_and_explicit_remove_does_not_follow_it() {
+    use std::fs;
+    let fixture = InventoryFixture::new();
+    fixture.import("healthy:t");
+    let reference = hpc_image_store::LocalRef::new("tool:t").unwrap();
+    let pointer = fixture
+        .root()
+        .join("refs")
+        .join(reference.encoded_path())
+        .join("ref");
+    let raw = fs::canonicalize(&pointer).unwrap();
+    fs::write(raw.join("metadata.json"), b"{").unwrap();
+    let unknown = fixture.root().join("refs/unknown");
+    fs::write(&unknown, b"preserve").unwrap();
+    for arguments in [
+        vec!["list"],
+        vec!["list", "--format", "full"],
+        vec!["list", "--format", "json"],
+    ] {
+        let output = fixture.command().args(&arguments).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(!output.stderr.is_empty());
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains("healthy") && text.contains("tool") && text.contains("unknown"));
+        if arguments.contains(&"json") {
+            let report: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(report["complete"], false);
+            assert_eq!(report["entries"].as_array().unwrap().len(), 3);
+            assert_eq!(report["diagnostics"].as_array().unwrap().len(), 2);
+        }
+    }
+    let removed = fixture
+        .command()
+        .args(["--json", "remove", "tool:t"])
+        .output()
+        .unwrap();
+    assert!(removed.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&removed.stdout).unwrap()["local_ref"],
+        "tool:t"
+    );
+    assert!(raw.exists());
+    assert!(fs::symlink_metadata(pointer).is_err());
+    assert_eq!(fs::read(unknown).unwrap(), b"preserve");
 }
 
 #[test]

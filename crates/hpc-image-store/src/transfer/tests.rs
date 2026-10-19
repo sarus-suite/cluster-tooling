@@ -252,7 +252,12 @@ fn import_pins_id_builds_metadata_and_exports_without_podman() {
         (CONFIG.len() + MANIFEST.len()) as u64
     );
     let metadata = fixture.read();
-    assert_eq!(metadata.version(), 2);
+    assert_eq!(metadata.version(), 3);
+    assert_eq!(metadata.content.config_digest.hex(), CONFIG_DIGEST);
+    assert_ne!(
+        metadata.content.config_digest.hex(),
+        report.image_id.as_str()
+    );
     assert_eq!(metadata.notes.as_deref(), Some("retained notes"));
     assert!(metadata.acquired_at_unix_seconds > 0);
     assert!(
@@ -753,8 +758,8 @@ fn pulled_manifest_export_requests_preservation() {
     .unwrap();
     fixture
         .store
-        .export(
-            &fixture.reference,
+        .export_selected(
+            &ImageSelector::Digest(metadata.stored_root.clone()),
             Some("localhost/output:tag"),
             &fixture.context,
         )
@@ -765,6 +770,116 @@ fn pulled_manifest_export_requests_preservation() {
             .unwrap()
             .contains(&json!("--preserve-digests"))
     );
+}
+
+#[test]
+fn digest_export_uses_layout_identity_and_a_deterministic_healthy_name() {
+    let fixture = Fixture::new();
+    let imported = fixture.import(false).unwrap();
+    let first = LocalRef::new("aaa/tool:tag").unwrap();
+    fixture
+        .store
+        .import(
+            "localhost/source:mutable",
+            Some(&first),
+            &fixture.context,
+            &ImportOptions::default(),
+        )
+        .unwrap();
+    let selector = ImageSelector::Digest(imported.stored_root.clone());
+    let report = fixture
+        .store
+        .export_selected(&selector, None, &fixture.context)
+        .unwrap();
+    assert_eq!(report.local_ref, first);
+    assert_eq!(report.destination, imported.stored_root.as_str());
+    assert_eq!(
+        fixture.log().last().unwrap()["args"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap(),
+        &json!(format!("containers-storage:{}", imported.stored_root))
+    );
+    // A damaged earlier name must not hide a usable duplicate root.
+    let raw = fs::canonicalize(fixture.store.layout.ref_entry(&first)).unwrap();
+    fs::write(raw.join("metadata.json"), b"{").unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .export_selected(&selector, Some("localhost/output:tag"), &fixture.context)
+            .unwrap()
+            .local_ref,
+        fixture.reference
+    );
+    // Healthy resolution also wins over unrelated unknown namespace damage.
+    fs::write(fixture.store.layout.root().join("refs/unknown"), b"keep").unwrap();
+    assert!(
+        fixture
+            .store
+            .export_selected(&selector, Some("localhost/output:tag"), &fixture.context)
+            .is_ok()
+    );
+    let absent =
+        ImageSelector::Digest(Sha256Digest::new(format!("sha256:{}", "f".repeat(64))).unwrap());
+    assert!(
+        matches!(fixture.store.export_selected(&absent, None, &fixture.context), Err(Error::ResolutionIncomplete { diagnostics, .. }) if diagnostics.len() == 2)
+    );
+}
+
+#[test]
+fn digest_export_never_uses_config_or_acquisition_identity_as_an_alias() {
+    let fixture = Fixture::new();
+    fixture.import(false).unwrap();
+    for hex in [
+        CONFIG_DIGEST,
+        ID,
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    ] {
+        let selector = ImageSelector::Digest(Sha256Digest::new(format!("sha256:{hex}")).unwrap());
+        let before = fixture.log().len();
+        assert!(matches!(
+            fixture
+                .store
+                .export_selected(&selector, None, &fixture.context),
+            Err(Error::DigestMissing(_))
+        ));
+        assert_eq!(fixture.log().len(), before);
+    }
+    // A missing root is authoritative even if intact metadata claims it.
+    let raw = fs::canonicalize(fixture.store.layout.ref_entry(&fixture.reference)).unwrap();
+    fs::write(raw.join("index.json"), b"{").unwrap();
+    let selector = ImageSelector::Digest(Sha256Digest::new(format!("sha256:{ROOT}")).unwrap());
+    assert!(matches!(
+        fixture
+            .store
+            .export_selected(&selector, None, &fixture.context),
+        Err(Error::ResolutionIncomplete { .. })
+    ));
+    let report = fixture.store.list().unwrap();
+    assert!(report.entries[0].stored_root.is_none());
+    assert!(report.entries[0].metadata.is_some());
+}
+
+#[test]
+fn digest_resolution_reports_incomplete_enumeration_and_skips_removed_names() {
+    let fixture = Fixture::new();
+    let imported = fixture.import(false).unwrap();
+    let selector = ImageSelector::Digest(imported.stored_root);
+    fsutil::fail_once("discovery.enumerate", libc::EACCES);
+    assert!(matches!(
+        fixture
+            .store
+            .export_selected(&selector, None, &fixture.context),
+        Err(Error::ResolutionIncomplete { .. })
+    ));
+    fixture.store.remove(&fixture.reference).unwrap();
+    assert!(matches!(
+        fixture
+            .store
+            .export_selected(&selector, None, &fixture.context),
+        Err(Error::DigestMissing(_))
+    ));
 }
 
 #[test]
@@ -811,6 +926,14 @@ fn transfer_worker() {
                     replace: true,
                     notes: None,
                 },
+            )
+            .unwrap();
+    } else if operation == "digest-export" {
+        store
+            .export_selected(
+                &ImageSelector::Digest(Sha256Digest::new(format!("sha256:{ROOT}")).unwrap()),
+                Some("localhost/output:tag"),
+                &context,
             )
             .unwrap();
     } else {
@@ -921,7 +1044,7 @@ fn try_exclusive(path: &Path) -> bool {
 }
 #[test]
 fn orphaned_transfer_retains_store_and_ref_locks_and_inherits_environment() {
-    for operation in ["import", "export"] {
+    for operation in ["import", "export", "digest-export"] {
         let mut fixture = Fixture::new();
         fixture.import(false).unwrap();
         let root = fixture.temporary.path();

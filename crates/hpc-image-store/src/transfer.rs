@@ -1,6 +1,6 @@
 use crate::{
-    Acquisition, ContentMetadata, Error, ImageId, LocalRef, Platform, RefMetadata, Result,
-    Sha256Digest, Store, fsutil,
+    Acquisition, ContentMetadata, Error, ImageId, ImageSelector, LocalRef, Platform, RefMetadata,
+    Result, Sha256Digest, Store, fsutil,
     initialization::require_directory,
     locks::Operation,
     oci::{self, Descriptor},
@@ -276,12 +276,28 @@ impl Store {
         destination: Option<&str>,
         context: &TransferContext,
     ) -> Result<ExportReport> {
-        let destination = destination.unwrap_or(reference.as_str());
+        self.export_selected(
+            &ImageSelector::LocalRef(reference.clone()),
+            destination,
+            context,
+        )
+    }
+
+    /// Export a committed name or stored-root digest. An omitted destination
+    /// uses the selector verbatim, including its digest spelling.
+    pub fn export_selected(
+        &self,
+        selector: &ImageSelector,
+        destination: Option<&str>,
+        context: &TransferContext,
+    ) -> Result<ExportReport> {
+        let default_destination = selector.to_string();
+        let destination = destination.unwrap_or(&default_destination);
         validate_image_argument(destination)?;
         // Podman is never used by export, even to probe its availability.
         context.validate()?;
         let store_guard = self.prepare(Operation::Export)?;
-        let ref_guard = store_guard.lock_ref(reference)?;
+        let ref_guard = crate::inventory::select(&store_guard, selector)?;
         let resolved = refs::read(&ref_guard)?;
         require_manifest(&resolved.root, &resolved.raw_image)?;
         let preserve = matches!(resolved.metadata.acquisition, Acquisition::Pull { .. });
@@ -302,7 +318,7 @@ impl Store {
             Some(ref_guard.transfer_fds()),
         )?;
         Ok(ExportReport {
-            local_ref: reference.clone(),
+            local_ref: ref_guard.reference().clone(),
             stored_manifest: resolved.root.digest.clone(),
             destination: destination.into(),
         })
@@ -310,7 +326,11 @@ impl Store {
 }
 fn require_manifest(root: &Descriptor, path: &Path) -> Result<()> {
     if root.media_type != OCI_MANIFEST {
-        return Err(Error::InvalidObject { path: path.to_owned(), reason: "stage 3 transfers require a single OCI manifest; index transfers are not implemented".into() });
+        return Err(Error::InvalidObject {
+            path: path.to_owned(),
+            reason: "transfers require a single OCI manifest; index transfers are not implemented"
+                .into(),
+        });
     }
     Ok(())
 }
@@ -388,6 +408,7 @@ fn import_content(
         .map(|(digest, size)| BlobSpec { digest, size })
         .collect();
     let content = ContentMetadata {
+        config_digest: manifest.config.digest,
         platform: Platform {
             os: config.os,
             architecture: config.architecture,

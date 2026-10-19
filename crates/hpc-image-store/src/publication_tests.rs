@@ -655,7 +655,7 @@ fn discovery_keeps_damage_and_reports_incomplete_enumeration() {
             .iter()
             .filter(|entry| entry.diagnostic.is_some())
             .count(),
-        2
+        0 // Enumeration preserves entries; inventory validates under ref locks.
     );
     assert!(result.entries.iter().all(|entry| entry.local_ref.is_some()));
     let outside = tempfile::tempdir().unwrap();
@@ -674,6 +674,220 @@ fn discovery_keeps_damage_and_reports_incomplete_enumeration() {
 }
 
 #[test]
+fn public_inventory_is_empty_or_unverified_without_reading_cas() {
+    use crate::ListStatus;
+    let temporary = tempfile::tempdir().unwrap();
+    let handle = store(temporary.path());
+    drop(handle.prepare(Operation::Import).unwrap());
+    let empty = handle.list().unwrap();
+    assert!(empty.complete && !empty.has_errors() && empty.entries.is_empty());
+    publish(&handle, &reference(), Image::One, false);
+    // Even an unusable root blob is outside inventory's quick check.
+    fs::remove_file(handle.layout.blob(&root(Image::One))).unwrap();
+    symlink(
+        "/unavailable/outside",
+        handle.layout.blob(&root(Image::One)),
+    )
+    .unwrap();
+    let report = handle.list().unwrap();
+    assert!(report.complete && !report.has_errors());
+    assert_eq!(report.entries.len(), 1);
+    assert_eq!(report.entries[0].status, ListStatus::Unverified);
+    assert_eq!(report.entries[0].stored_root, Some(root(Image::One)));
+    assert!(report.entries[0].metadata.is_some());
+}
+
+#[test]
+fn public_inventory_preserves_damage_and_independently_readable_fields() {
+    use crate::ListStatus;
+    use serde_json::{Value, json};
+    for damage in [
+        "metadata-missing",
+        "metadata-json",
+        "metadata-version",
+        "config-digest-missing",
+        "identity",
+        "layout-version",
+        "index-empty",
+        "index-ambiguous",
+        "index-json",
+        "root-type",
+        "blobs-missing",
+        "pointer",
+        "file",
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let handle = store(temporary.path());
+        let raw = publish(&handle, &reference(), Image::One, false);
+        let healthy = LocalRef::new("healthy:t").unwrap();
+        publish(&handle, &healthy, Image::Two, false);
+        let metadata_path = raw.join("metadata.json");
+        match damage {
+            "metadata-missing" => fs::remove_file(&metadata_path).unwrap(),
+            "metadata-json" => fs::write(&metadata_path, b"{").unwrap(),
+            "metadata-version" | "config-digest-missing" | "identity" => {
+                let mut value: Value =
+                    serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+                match damage {
+                    "metadata-version" => value["version"] = json!(2),
+                    "config-digest-missing" => {
+                        value["content"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("config_digest");
+                    }
+                    _ => value["stored_root"] = json!(root(Image::Two)),
+                }
+                fs::write(&metadata_path, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            "layout-version" => {
+                fs::write(raw.join("oci-layout"), br#"{"imageLayoutVersion":"9"}"#).unwrap()
+            }
+            "index-json" => fs::write(raw.join("index.json"), b"[").unwrap(),
+            "index-empty" | "index-ambiguous" | "root-type" => {
+                let path = raw.join("index.json");
+                let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                match damage {
+                    "index-empty" => value["manifests"] = json!([]),
+                    "index-ambiguous" => {
+                        let first = value["manifests"][0].clone();
+                        value["manifests"].as_array_mut().unwrap().push(first);
+                    }
+                    _ => value["manifests"][0]["mediaType"] = json!("unsupported"),
+                }
+                fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            "blobs-missing" => fs::remove_dir(raw.join("blobs")).unwrap(),
+            "pointer" | "file" => {
+                let path = handle.layout.ref_entry(&reference());
+                fs::remove_file(&path).unwrap();
+                if damage == "file" {
+                    fs::write(path, b"damaged").unwrap();
+                } else {
+                    symlink("/unavailable/outside", path).unwrap();
+                }
+            }
+            _ => unreachable!(),
+        }
+        let before = fs::read(&metadata_path).ok();
+        let report = handle.list().unwrap();
+        assert!(report.complete && report.has_errors(), "{damage}");
+        assert_eq!(report.entries.len(), 2, "{damage}");
+        let bad = report
+            .entries
+            .iter()
+            .find(|entry| entry.local_ref.as_ref() == Some(&reference()))
+            .unwrap();
+        assert_eq!(bad.status, ListStatus::Damaged, "{damage}");
+        assert!(
+            report
+                .entries
+                .iter()
+                .any(|entry| entry.local_ref.as_ref() == Some(&healthy)
+                    && entry.status == ListStatus::Unverified)
+        );
+        assert!(!report.diagnostics.is_empty());
+        if damage.starts_with("metadata") || damage == "config-digest-missing" {
+            assert_eq!(bad.stored_root, Some(root(Image::One)));
+        }
+        if damage.starts_with("index") || damage == "layout-version" || damage == "root-type" {
+            assert!(bad.stored_root.is_none() && bad.metadata.is_some());
+        }
+        assert_eq!(
+            fs::read(&metadata_path).ok(),
+            before,
+            "inventory modified {damage}"
+        );
+    }
+}
+
+#[test]
+fn public_inventory_reports_unknown_namespace_and_incomplete_enumeration() {
+    let temporary = tempfile::tempdir().unwrap();
+    let handle = store(temporary.path());
+    publish(&handle, &reference(), Image::One, false);
+    let unknown = handle.layout.root().join("refs/unknown");
+    symlink("/unavailable/outside", &unknown).unwrap();
+    let report = handle.list().unwrap();
+    assert!(!report.complete && report.has_errors());
+    assert!(
+        report
+            .entries
+            .iter()
+            .any(|entry| entry.path == unknown && entry.local_ref.is_none())
+    );
+    fsutil::fail_once("discovery.enumerate", libc::EACCES);
+    let report = handle.list().unwrap();
+    assert!(!report.complete && report.has_errors());
+    assert_eq!(report.diagnostics.len(), 1);
+}
+
+#[test]
+fn public_remove_preserves_retired_content_and_reports_unlink_durability() {
+    let temporary = tempfile::tempdir().unwrap();
+    let handle = store(temporary.path());
+    let raw = publish(&handle, &reference(), Image::One, false);
+    let lock = handle.layout.ref_lock(&reference());
+    let inode = fs::metadata(&lock).unwrap().ino();
+    fsutil::fail_once("ref.unlink", libc::EIO);
+    assert!(matches!(handle.remove(&reference()), Err(Error::Io { .. })));
+    assert_eq!(handle.list().unwrap().entries.len(), 1);
+    fsutil::fail_once("ref.remove-sync", libc::EIO);
+    assert!(matches!(
+        handle.remove(&reference()),
+        Err(Error::Durability {
+            change: NamespaceChange::RefRemoved,
+            ..
+        })
+    ));
+    assert!(handle.list().unwrap().entries.is_empty());
+    assert!(raw.join("metadata.json").is_file());
+    assert!(handle.layout.blob(&root(Image::One)).is_file());
+    assert_eq!(fs::metadata(&lock).unwrap().ino(), inode);
+    assert!(matches!(
+        handle.remove(&reference()),
+        Err(Error::RefMissing(_))
+    ));
+}
+
+#[test]
+fn public_remove_unlinks_damaged_refs_without_following_them() {
+    for kind in ["file", "broken", "escape", "directory", "fifo", "parent"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let handle = store(temporary.path());
+        publish(&handle, &reference(), Image::One, false);
+        let path = handle.layout.ref_entry(&reference());
+        fs::remove_file(&path).unwrap();
+        let outside = temporary.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("ref"), b"preserve").unwrap();
+        match kind {
+            "file" => fs::write(&path, b"bad").unwrap(),
+            "broken" => symlink("missing", &path).unwrap(),
+            "escape" => symlink(outside.join("ref"), &path).unwrap(),
+            "directory" => fs::create_dir(&path).unwrap(),
+            "fifo" => {
+                let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+                // SAFETY: NUL-terminated path and a valid permission mask.
+                assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+            }
+            "parent" => {
+                fs::remove_dir(path.parent().unwrap()).unwrap();
+                symlink(&outside, path.parent().unwrap()).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let result = handle.remove(&reference());
+        if matches!(kind, "directory" | "fifo" | "parent") {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result.unwrap().local_ref, reference());
+        }
+        assert_eq!(fs::read(outside.join("ref")).unwrap(), b"preserve");
+    }
+}
+
+#[test]
 #[ignore = "subprocess helper"]
 fn publication_worker() {
     let root_path = std::env::var_os("HPC_PUBLICATION_ROOT").unwrap();
@@ -682,6 +896,49 @@ fn publication_worker() {
     let action = std::env::var("HPC_PUBLICATION_ACTION").unwrap();
     println!("PUBLICATION_STARTED");
     std::io::stdout().flush().unwrap();
+    if action.starts_with("inventory-") {
+        fsutil::pause_once("inventory.discovered");
+        let report = handle.list().unwrap();
+        assert!(!report.has_errors());
+        if action == "inventory-remove" {
+            assert!(report.entries.is_empty());
+        } else {
+            assert_eq!(report.entries.len(), 1);
+            assert_eq!(report.entries[0].stored_root, Some(root(Image::Two)));
+            assert_eq!(
+                report.entries[0].metadata.as_ref().unwrap().stored_root,
+                root(Image::Two)
+            );
+        }
+        println!("PUBLICATION_READY");
+        return;
+    }
+    if action.starts_with("select-") {
+        use crate::ImageSelector;
+        fsutil::pause_once(if action == "select-held" {
+            "selector.selected"
+        } else {
+            "selector.discovered"
+        });
+        let guard = handle.prepare(Operation::Export).unwrap();
+        let selected = crate::inventory::select(&guard, &ImageSelector::Digest(root(Image::One)));
+        if action == "select-after-remove" {
+            assert!(matches!(selected, Err(Error::DigestMissing(_))));
+        } else {
+            let selected = selected.unwrap();
+            if action == "select-after-replace" {
+                assert_eq!(selected.reference().as_str(), "z:tag");
+            }
+            assert_eq!(refs::read(&selected).unwrap().root.digest, root(Image::One));
+        }
+        println!("PUBLICATION_READY");
+        return;
+    }
+    if action == "remove-public" {
+        handle.remove(&reference).unwrap();
+        println!("PUBLICATION_READY");
+        return;
+    }
     let guard = handle
         .prepare(if action == "read" {
             Operation::List
@@ -713,6 +970,77 @@ fn publication_worker() {
         fsutil::pause_once("ref.destination-sync");
     }
     refs::publish(stage, action != "race").unwrap();
+}
+
+#[test]
+fn inventory_revalidates_refs_replaced_or_removed_after_enumeration() {
+    for action in ["inventory-remove", "inventory-replace"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let handle = store(temporary.path());
+        publish(&handle, &reference(), Image::One, false);
+        let mut reader = Worker::start(temporary.path(), &reference(), action);
+        reader.wait_for("PUBLICATION_PAUSED");
+        if action == "inventory-remove" {
+            handle.remove(&reference()).unwrap();
+        } else {
+            publish(&handle, &reference(), Image::Two, true);
+        }
+        reader.proceed();
+        reader.wait_for("PUBLICATION_READY");
+        reader.finish();
+    }
+}
+
+#[test]
+fn digest_resolution_revalidates_candidates_after_namespace_scan() {
+    for action in ["select-after-remove", "select-after-replace"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let handle = store(temporary.path());
+        publish(&handle, &reference(), Image::One, false);
+        if action == "select-after-replace" {
+            publish(&handle, &LocalRef::new("z:tag").unwrap(), Image::One, false);
+        }
+        let mut reader = Worker::start(temporary.path(), &reference(), action);
+        reader.wait_for("PUBLICATION_PAUSED");
+        if action == "select-after-remove" {
+            handle.remove(&reference()).unwrap();
+        } else {
+            publish(&handle, &reference(), Image::Two, true);
+        }
+        reader.proceed();
+        reader.wait_for("PUBLICATION_READY");
+        reader.finish();
+    }
+}
+
+#[test]
+fn selected_digest_guard_excludes_replacement_and_removal_until_use_finishes() {
+    for action in ["replace", "remove-public"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let handle = store(temporary.path());
+        publish(&handle, &reference(), Image::One, false);
+        let mut reader = Worker::start(temporary.path(), &reference(), "select-held");
+        reader.wait_for("PUBLICATION_PAUSED");
+        let mut writer = Worker::start(temporary.path(), &reference(), action);
+        assert!(matches!(
+            writer.events.recv_timeout(Duration::from_millis(150)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        reader.proceed();
+        reader.wait_for("PUBLICATION_READY");
+        reader.finish();
+        writer.wait_for("PUBLICATION_READY");
+        if action == "replace" {
+            writer.proceed();
+        }
+        writer.finish();
+        let inventory = handle.list().unwrap();
+        if action == "replace" {
+            assert_eq!(inventory.entries[0].stored_root, Some(root(Image::Two)));
+        } else {
+            assert!(inventory.entries.is_empty());
+        }
+    }
 }
 
 struct Worker {

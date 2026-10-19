@@ -1,5 +1,5 @@
-//! Foundations for a Linux, user-owned filesystem OCI image store.
-//! Synchronous containers-storage import and export using private OCI staging.
+//! A Linux, user-owned filesystem OCI image store.
+//! Synchronous transfers, inventory, digest selection and explicit-name removal.
 
 #![doc = include_str!("../README.md")]
 
@@ -8,6 +8,8 @@ compile_error!("hpc-image-store currently supports Linux only");
 
 mod error;
 mod identity;
+mod inventory;
+pub mod presentation;
 // Storage primitives are internal; transfers own their locking and publication.
 #[allow(dead_code)]
 mod cas;
@@ -34,8 +36,12 @@ mod subprocess;
 mod transfer;
 
 pub use error::{Error, NamespaceChange, Result};
-pub use identity::{LocalRef, Sha256Digest};
+pub use identity::{ImageSelector, LocalRef, Sha256Digest};
+pub use inventory::{
+    DiagnosticCategory, ListDiagnostic, ListEntry, ListReport, ListStatus, RemoveReport,
+};
 pub use metadata::{Acquisition, ContentMetadata, ImageId, Platform, RefMetadata, StoreMetadata};
+pub use presentation::format_list_podman;
 pub use staging::CleanupWarning;
 pub use store::{Store, StoreConfig};
 pub use transfer::{ExportReport, ImportOptions, ImportReport, TransferContext};

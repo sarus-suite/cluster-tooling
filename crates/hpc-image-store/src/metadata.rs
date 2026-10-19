@@ -60,6 +60,8 @@ pub struct Platform {
 /// Display caches derived from completed OCI content, not operational provenance.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ContentMetadata {
+    /// OCI ImageID: the digest of the completed image's configuration JSON.
+    pub config_digest: Sha256Digest,
     pub platform: Platform,
     pub created: Option<String>,
     pub size_bytes: u64,
@@ -72,7 +74,7 @@ pub enum Acquisition {
         source: String,
         image_id: ImageId,
     },
-    // No pull operation is exposed in stage 3. This discriminator establishes
+    // No pull operation is exposed yet. This discriminator establishes
     // the export policy; registry acquisition and index support come later.
     Pull {
         requested_reference: String,
@@ -80,7 +82,7 @@ pub enum Acquisition {
     },
 }
 
-/// Ref schema version 2. Version 1 development envelopes are not migrated.
+/// Ref schema version 3. Older development envelopes are not migrated.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RefMetadata {
     version: u64,
@@ -102,7 +104,7 @@ impl RefMetadata {
         notes: Option<String>,
     ) -> Self {
         Self {
-            version: 2,
+            version: 3,
             local_ref,
             stored_root,
             content,
@@ -115,7 +117,7 @@ impl RefMetadata {
         self.version
     }
     pub fn from_json(bytes: &[u8]) -> Result<Self> {
-        check_version(bytes, "ref", 2)?;
+        check_version(bytes, "ref", 3)?;
         #[derive(Deserialize)]
         struct Fields {
             local_ref: LocalRef,
@@ -130,7 +132,7 @@ impl RefMetadata {
             source,
         })?;
         let metadata = Self {
-            version: 2,
+            version: 3,
             local_ref: fields.local_ref,
             stored_root: fields.stored_root,
             content: fields.content,
@@ -164,6 +166,7 @@ impl RefMetadata {
             local_ref,
             stored_root,
             ContentMetadata {
+                config_digest: Sha256Digest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
                 platform: Platform {
                     os: "linux".into(),
                     architecture: "amd64".into(),
