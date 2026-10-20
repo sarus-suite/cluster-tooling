@@ -108,13 +108,14 @@ fn invalid_cli_usage_does_not_initialize_a_store() {
     }
 }
 #[test]
-fn help_is_successful_and_lists_stage_four_commands() {
+fn help_is_successful_and_lists_stage_five_commands() {
     let output = cli().arg("--help").output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("import") && help.contains("export"));
     assert!(help.contains("list") && help.contains("remove"));
-    for command in ["prune", "pull", "check"] {
+    assert!(help.contains("check"));
+    for command in ["prune", "pull"] {
         assert!(
             !help
                 .lines()
@@ -123,6 +124,141 @@ fn help_is_successful_and_lists_stage_four_commands() {
     }
     assert!(!help.contains("--storage-driver"));
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn check_usage_and_missing_store_fail_without_initialization() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("store");
+    for args in [
+        vec!["check"],
+        vec!["check", "--all", "tool:t"],
+        vec!["check", "alpine"],
+        vec!["check", "tool@sha256:abcd"],
+        vec!["check", "--deep"],
+    ] {
+        let output = cli().arg("--store").arg(&root).args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(!root.exists());
+    }
+    for args in [vec!["check", "--all"], vec!["--json", "check", "tool:t"]] {
+        let output = cli().arg("--store").arg(&root).args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert!(!root.exists());
+    }
+}
+
+#[test]
+fn check_reports_human_and_json_results_without_external_tools() {
+    use std::fs;
+    let fixture = InventoryFixture::new();
+    let inventory = fixture.report();
+    let root_digest = inventory["entries"][0]["stored_root"].as_str().unwrap();
+    let raw = fs::canonicalize(inventory["entries"][0]["path"].as_str().unwrap()).unwrap();
+    let selector = format!("tool:ignored@{root_digest}");
+    // Removing the producer executables proves checks make no tool calls.
+    for tool in ["podman", "skopeo"] {
+        fs::remove_file(fixture.directory.path().join(tool)).unwrap();
+    }
+    for args in [
+        vec!["check", "tool:t"],
+        vec!["check", "--all"],
+        vec!["check", &selector],
+    ] {
+        let output = fixture.command().args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains("tool:t: passed") && text.contains("1 passed, 0 failed"));
+        assert!(output.stderr.is_empty());
+    }
+    let output = fixture
+        .command()
+        .args(["check", "--all", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["complete"], true);
+    assert_eq!(report["entries"][0]["status"], "passed");
+    let manifest_path = fixture
+        .root()
+        .join("blobs/sha256")
+        .join(root_digest.strip_prefix("sha256:").unwrap());
+    fs::remove_file(&manifest_path).unwrap();
+    fs::write(raw.join("metadata.json"), b"{").unwrap();
+    for args in [
+        vec!["--json", "check", "--all"],
+        vec!["check", "tool:t", "--json"],
+    ] {
+        let output = fixture.command().args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["complete"], false);
+        assert_eq!(report["entries"][0]["status"], "failed");
+        assert!(
+            report["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|diagnostic| diagnostic["object_digest"] == root_digest)
+        );
+        assert!(!output.stderr.is_empty());
+    }
+    let output = fixture.command().args(["check", "--all"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("tool:t: failed"));
+    // Explicit-name removal also works after both metadata and graph damage.
+    assert!(
+        fixture
+            .command()
+            .args(["remove", "tool:t"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let output = fixture
+        .command()
+        .args(["--json", "check", "--all"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["entries"], serde_json::json!([]));
+    assert_eq!(report["complete"], true);
+}
+
+#[test]
+fn check_keeps_malformed_non_utf8_namespace_entries_in_partial_json() {
+    use std::{ffi::OsString, fs, os::unix::ffi::OsStringExt};
+    let fixture = InventoryFixture::new();
+    let path = fixture
+        .root()
+        .join("refs")
+        .join(OsString::from_vec(vec![0xff]));
+    fs::write(&path, b"preserve").unwrap();
+    let output = fixture
+        .command()
+        .args(["--json", "check", "--all"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(report["complete"], false);
+    assert!(
+        report["diagnostics"][0]["path"]
+            .as_str()
+            .unwrap()
+            .contains("\\xFF")
+    );
+    assert_eq!(fs::read(path).unwrap(), b"preserve");
 }
 #[test]
 fn missing_store_export_is_an_operation_failure_and_does_not_initialize() {

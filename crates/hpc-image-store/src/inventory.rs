@@ -24,6 +24,7 @@ pub enum DiagnosticCategory {
     Layout,
     Io,
     Lock,
+    Graph,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -88,7 +89,7 @@ pub(crate) fn display_path(path: &Path) -> String {
         .unwrap_or_else(|| format!("{path:?}"))
 }
 
-fn serialize_path<S: Serializer>(
+pub(crate) fn serialize_path<S: Serializer>(
     path: &Path,
     serializer: S,
 ) -> std::result::Result<S::Ok, S::Error> {

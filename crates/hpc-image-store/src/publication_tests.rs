@@ -896,6 +896,44 @@ fn publication_worker() {
     let action = std::env::var("HPC_PUBLICATION_ACTION").unwrap();
     println!("PUBLICATION_STARTED");
     std::io::stdout().flush().unwrap();
+    if action == "check-exclusive" {
+        let _guard = handle.prepare(Operation::Prune).unwrap();
+        println!("PUBLICATION_READY");
+        return;
+    }
+    if action.starts_with("check-") {
+        use crate::{CheckScope, CheckStatus, ImageSelector};
+        fsutil::pause_once(if action.starts_with("check-scan-") {
+            "check.discovered"
+        } else {
+            "check.selected"
+        });
+        let scope = if action.starts_with("check-scan-") {
+            CheckScope::All
+        } else {
+            CheckScope::Image(
+                ImageSelector::new(format!("{}@{}", reference.name(), root(Image::One))).unwrap(),
+            )
+        };
+        let report = handle.check(&scope).unwrap();
+        assert!(!report.has_errors(), "{report:?}");
+        if action == "check-scan-remove" {
+            assert!(report.entries.is_empty());
+        } else {
+            assert_eq!(report.entries.len(), 1);
+            assert_eq!(report.entries[0].status, CheckStatus::Passed);
+            assert_eq!(
+                report.entries[0].stored_root,
+                Some(root(if action == "check-scan-replace" {
+                    Image::Two
+                } else {
+                    Image::One
+                }))
+            );
+        }
+        println!("PUBLICATION_READY");
+        return;
+    }
     if action.starts_with("inventory-") {
         fsutil::pause_once("inventory.discovered");
         let report = handle.list().unwrap();
@@ -1218,4 +1256,241 @@ fn unsupported_hard_link_does_not_fall_back_to_copying() {
         matches!(cas::insert(&ref_guard, &stage.blobs()[0]), Err(Error::Io { source, .. }) if source.raw_os_error() == Some(libc::EXDEV))
     );
     assert_eq!(fs::read_dir(handle.layout.blobs()).unwrap().count(), 0);
+}
+
+#[test]
+fn public_check_covers_indexes_selectors_and_preserves_store_data() {
+    use crate::{CheckScope, CheckStatus, ImageSelector};
+    let temporary = tempfile::tempdir().unwrap();
+    let handle = store(temporary.path());
+    assert!(matches!(
+        handle.check(&CheckScope::All),
+        Err(Error::MissingStore(_))
+    ));
+    {
+        let _guard = handle.prepare(Operation::Import).unwrap();
+    }
+    let empty = handle.check(&CheckScope::All).unwrap();
+    assert!(empty.entries.is_empty() && !empty.has_errors());
+    publish(&handle, &reference(), Image::Index, false);
+    let duplicate = LocalRef::new("analysis/tool:zzzz").unwrap();
+    publish(&handle, &duplicate, Image::Index, false);
+    let unrelated = LocalRef::new("other/tool:release").unwrap();
+    publish(&handle, &unrelated, Image::One, false);
+
+    // All these files, directories, symlinks, staging remnants, and existing
+    // lock identities must survive checks byte-for-byte and with the same age.
+    fn snapshot(path: &Path, result: &mut BTreeMap<PathBuf, (u64, i64, u32, Vec<u8>)>) {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        let bytes = if metadata.file_type().is_symlink() {
+            use std::os::unix::ffi::OsStrExt;
+            fs::read_link(path).unwrap().as_os_str().as_bytes().to_vec()
+        } else if metadata.is_file() {
+            fs::read(path).unwrap()
+        } else {
+            Vec::new()
+        };
+        result.insert(
+            path.to_owned(),
+            (metadata.ino(), metadata.mtime(), metadata.mode(), bytes),
+        );
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path).unwrap() {
+                snapshot(&entry.unwrap().path(), result);
+            }
+        }
+    }
+    let mut before = BTreeMap::new();
+    snapshot(temporary.path(), &mut before);
+    for selector in [
+        reference().to_string(),
+        format!("analysis/tool@{}", root(Image::Index)),
+        format!("analysis/tool:ignored@{}", root(Image::Index)),
+    ] {
+        let report = handle
+            .check(&CheckScope::Image(ImageSelector::new(selector).unwrap()))
+            .unwrap();
+        assert!(!report.has_errors(), "{report:?}");
+        assert_eq!(report.entries[0].local_ref, Some(reference()));
+        assert_eq!(report.entries[0].stored_root, Some(root(Image::Index)));
+        assert_eq!(report.entries[0].status, CheckStatus::Passed);
+    }
+    let report = handle.check(&CheckScope::All).unwrap();
+    assert!(!report.has_errors() && report.entries.len() == 3);
+    let mut after = BTreeMap::new();
+    snapshot(temporary.path(), &mut after);
+    assert_eq!(before, after);
+    assert!(matches!(
+        handle.check(&CheckScope::Image(
+            ImageSelector::new(format!("analysis/tool@{}", root(Image::One))).unwrap()
+        )),
+        Err(Error::DigestMissing(_))
+    ));
+    let missing = handle
+        .check(&CheckScope::Image(
+            ImageSelector::new("missing:tag").unwrap(),
+        ))
+        .unwrap();
+    assert!(missing.has_errors());
+}
+
+#[test]
+fn public_check_continues_after_ref_damage_and_reports_graph_despite_bad_metadata() {
+    use crate::{CheckScope, CheckStatus, DiagnosticCategory, ImageSelector};
+    for damage in [
+        "metadata",
+        "pointer",
+        "layout",
+        "schema",
+        "root-missing",
+        "config-missing",
+        "root-size",
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let handle = store(temporary.path());
+        let raw = publish(&handle, &reference(), Image::One, false);
+        let healthy = LocalRef::new("healthy:tag").unwrap();
+        publish(&handle, &healthy, Image::Two, false);
+        match damage {
+            "metadata" => {
+                fs::write(raw.join("metadata.json"), b"{").unwrap();
+                fs::remove_file(handle.layout.blob(&root(Image::One))).unwrap();
+            }
+            "pointer" => {
+                let path = handle.layout.ref_entry(&reference());
+                fs::remove_file(&path).unwrap();
+                symlink("/outside/unavailable", path).unwrap();
+            }
+            "layout" => fs::write(raw.join("index.json"), b"{").unwrap(),
+            "schema" => {
+                let path = raw.join("metadata.json");
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                value["version"] = serde_json::json!(2);
+                fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            "root-missing" => fs::remove_file(handle.layout.blob(&root(Image::One))).unwrap(),
+            "config-missing" => {
+                fs::remove_file(handle.layout.blob(&digest(CONFIG_DIGEST))).unwrap()
+            }
+            "root-size" => fs::write(handle.layout.blob(&root(Image::One)), b"{}").unwrap(),
+            _ => unreachable!(),
+        }
+        let report = handle.check(&CheckScope::All).unwrap();
+        assert!(report.has_errors() && !report.complete, "{damage}");
+        assert_eq!(report.entries.len(), 2);
+        assert!(
+            report
+                .entries
+                .iter()
+                .any(|entry| entry.local_ref.as_ref() == Some(&reference())
+                    && entry.status == CheckStatus::Failed)
+        );
+        // A shared missing config must fail both refs, including a cache hit.
+        let expected = if damage == "config-missing" {
+            CheckStatus::Failed
+        } else {
+            CheckStatus::Passed
+        };
+        assert!(report.entries.iter().any(|entry| entry.local_ref.as_ref() == Some(&healthy) && entry.status == expected));
+        if damage == "metadata" {
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.category == DiagnosticCategory::Metadata)
+            );
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.object_digest == Some(root(Image::One)))
+            );
+            let selector =
+                ImageSelector::new(format!("analysis/tool@{}", root(Image::One))).unwrap();
+            assert!(matches!(
+                handle.check(&CheckScope::Image(selector)),
+                Err(Error::ResolutionIncomplete { .. })
+            ));
+        }
+        let selector = ImageSelector::new(reference().as_str()).unwrap();
+        assert!(
+            handle
+                .check(&CheckScope::Image(selector))
+                .unwrap()
+                .has_errors()
+        );
+    }
+}
+
+#[test]
+fn public_check_preserves_unknown_namespace_and_reports_incomplete_scans() {
+    use crate::{CheckScope, CheckStatus};
+    let temporary = tempfile::tempdir().unwrap();
+    let handle = store(temporary.path());
+    publish(&handle, &reference(), Image::One, false);
+    let unknown = handle.layout.root().join("refs/unknown");
+    fs::write(&unknown, b"preserve").unwrap();
+    let report = handle.check(&CheckScope::All).unwrap();
+    assert!(report.has_errors() && !report.complete);
+    assert!(report.entries.iter().any(|entry| entry.local_ref.is_none()));
+    assert!(
+        report
+            .entries
+            .iter()
+            .any(|entry| entry.status == CheckStatus::Passed)
+    );
+    assert_eq!(fs::read(unknown).unwrap(), b"preserve");
+    fsutil::fail_once("discovery.enumerate", libc::EIO);
+    let report = handle.check(&CheckScope::All).unwrap();
+    assert!(report.has_errors() && !report.complete);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|error| error.message.contains("enumerate"))
+    );
+}
+
+#[test]
+fn checking_holds_selected_ref_and_store_locks_until_graph_reading_finishes() {
+    for action in ["replace", "remove-public", "check-exclusive"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let handle = store(temporary.path());
+        publish(&handle, &reference(), Image::One, false);
+        let mut checker = Worker::start(temporary.path(), &reference(), "check-held");
+        checker.wait_for("PUBLICATION_PAUSED");
+        let mut writer = Worker::start(temporary.path(), &reference(), action);
+        assert!(matches!(
+            writer.events.recv_timeout(Duration::from_millis(150)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        checker.proceed();
+        checker.wait_for("PUBLICATION_READY");
+        checker.finish();
+        writer.wait_for("PUBLICATION_READY");
+        if action == "replace" {
+            writer.proceed();
+        }
+        writer.finish();
+    }
+}
+
+#[test]
+fn checking_revalidates_refs_after_namespace_discovery() {
+    for action in ["check-scan-remove", "check-scan-replace"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let handle = store(temporary.path());
+        publish(&handle, &reference(), Image::One, false);
+        let mut checker = Worker::start(temporary.path(), &reference(), action);
+        checker.wait_for("PUBLICATION_PAUSED");
+        if action == "check-scan-remove" {
+            handle.remove(&reference()).unwrap();
+        } else {
+            publish(&handle, &reference(), Image::Two, true);
+        }
+        checker.proceed();
+        checker.wait_for("PUBLICATION_READY");
+        checker.finish();
+    }
 }

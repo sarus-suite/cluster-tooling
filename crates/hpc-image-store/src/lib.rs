@@ -1,12 +1,14 @@
 //! A Linux, user-owned filesystem OCI image store.
-//! Synchronous transfers, inventory, digest selection and explicit-name removal.
+//! Synchronous transfers, inventory, graph checking, digest selection and removal.
 
 #![doc = include_str!("../README.md")]
 
 #[cfg(not(target_os = "linux"))]
 compile_error!("hpc-image-store currently supports Linux only");
 
+mod check;
 mod error;
+mod graph;
 mod identity;
 mod inventory;
 pub mod presentation;
@@ -35,6 +37,7 @@ mod store;
 mod subprocess;
 mod transfer;
 
+pub use check::{CheckDiagnostic, CheckEntry, CheckReport, CheckScope, CheckStatus};
 pub use error::{Error, NamespaceChange, Result};
 pub use identity::{ImageSelector, LocalRef, Sha256Digest};
 pub use inventory::{

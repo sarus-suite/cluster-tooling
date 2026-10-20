@@ -222,6 +222,41 @@ fn table(mut rows: Vec<Vec<String>>) -> String {
     output
 }
 
+/// Human-readable checking results; diagnostics are printed separately on stderr.
+pub fn format_check(report: &crate::CheckReport) -> String {
+    use std::fmt::Write;
+    let mut text = String::new();
+    let mut passed = 0;
+    for entry in &report.entries {
+        let status = if entry.status == crate::CheckStatus::Passed {
+            passed += 1;
+            "passed"
+        } else {
+            "failed"
+        };
+        let name = entry
+            .local_ref
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| crate::inventory::display_path(&entry.path));
+        writeln!(text, "{name}: {status}").expect("writing to a String cannot fail");
+    }
+    writeln!(
+        text,
+        "Checked {} entries: {passed} passed, {} failed; {} diagnostics; {}",
+        report.entries.len(),
+        report.entries.len() - passed,
+        report.diagnostics.len(),
+        if report.complete {
+            "complete"
+        } else {
+            "incomplete"
+        }
+    )
+    .expect("writing to a String cannot fail");
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
