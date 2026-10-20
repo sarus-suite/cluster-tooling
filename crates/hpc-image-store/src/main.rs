@@ -1,13 +1,13 @@
 use clap::CommandFactory;
 use clap::{Parser, Subcommand, ValueEnum};
 use hpc_image_store::{
-    ImageSelector, ImportOptions, LocalRef, Platform, Store, StoreConfig, TransferContext,
-    presentation,
+    CheckScope, ImageSelector, ImportOptions, LocalRef, Platform, Store, StoreConfig,
+    TransferContext, presentation,
 };
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(about = "Import, export, list and remove images in a filesystem OCI store")]
+#[command(about = "Import, export, list, check and remove images in a filesystem OCI store")]
 struct Cli {
     #[arg(long)]
     store: PathBuf,
@@ -52,6 +52,14 @@ enum Action {
     },
     /// Remove one named ref, leaving its content for future pruning.
     Remove { local_ref: LocalRef },
+    /// Check metadata and all supported local OCI dependencies, without hashing.
+    Check {
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        selector: Option<ImageSelector>,
+        /// Check every committed ref, continuing after individual failures.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -86,6 +94,26 @@ fn execute(cli: Cli) -> hpc_image_store::Result<bool> {
         platform: cli.platform,
     };
     match cli.command {
+        Action::Check { selector, all: _ } => {
+            let scope = selector.map_or(CheckScope::All, CheckScope::Image);
+            let report = store.check(&scope)?;
+            for diagnostic in &report.diagnostics {
+                eprintln!(
+                    "hpc-image-store: {}: {}",
+                    diagnostic.path.display(),
+                    diagnostic.message
+                );
+            }
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).expect("report serialization")
+                );
+            } else {
+                print!("{}", presentation::format_check(&report));
+            }
+            return Ok(!report.has_errors());
+        }
         Action::Import {
             source,
             destination,

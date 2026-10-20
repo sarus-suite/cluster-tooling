@@ -273,6 +273,27 @@ fn real_rootless_round_trip() {
         )
         .unwrap();
     assert!(report.cleanup_warnings.is_empty());
+    let checked = store
+        .check(&hpc_image_store::CheckScope::Image(parse_selector(
+            format!("test/one@{}", report.stored_root),
+        )))
+        .unwrap();
+    assert!(!checked.has_errors(), "{checked:?}");
+    let checked_json = run(Command::new(env!("CARGO_BIN_EXE_hpc-image-store"))
+        .arg("--store")
+        .arg(directory.join("store"))
+        .args([
+            "--json",
+            "--podman",
+            "/unavailable/podman",
+            "--skopeo",
+            "/unavailable/skopeo",
+            "check",
+            "--all",
+        ]));
+    let checked_json: Value = serde_json::from_slice(&checked_json).unwrap();
+    assert_eq!(checked_json["complete"], true);
+    assert_eq!(checked_json["entries"][0]["status"], "passed");
     let podman_id = String::from_utf8(run(
         Command::new("podman").args(["images", "--format", "{{.ID}}", &source])
     ))

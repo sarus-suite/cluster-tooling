@@ -1,23 +1,35 @@
 # Staged implementation of the HPC OCI image store
 
-Status: stages 1–4.1 are implemented in `crates/hpc-image-store`. The crate
-provides single-platform containers-storage import and export, inventory, and
-explicit-name removal. Stage 4.1 adds common selectors, repository-scoped
-stored-root lookup, and digest-aware transfer arguments without changing store
-format 1 or ref metadata schema 3. Stages 5–8 remain planned. Lustre/VAST behavior
-remains unqualified pending site tests.
+Status: stages 1–5 are implemented in `crates/hpc-image-store`. The crate
+provides single-platform containers-storage import and export, inventory,
+read-only graph checking, and explicit-name removal. Stage 4.1 adds common
+selectors, repository-scoped stored-root lookup, and digest-aware transfer
+arguments without changing store format 1 or ref metadata schema 3. Stage 5
+checks complete supported OCI image
+graphs, including nested indexes, without changing those formats. Stages 6–8
+remain planned. Lustre/VAST behavior remains unqualified pending site tests.
 
 Design baseline: [Filesystem OCI Image Store Design](hpc-image-store-design.md), version 1.5.
 
-Implementation update, 2026-10-20: stage 4.1 passed 103 tests, including three
+Implementation update, 2026-10-20: stage 5 passed 120 tests, including four
+doctests and both real-tool tests, with the five existing subprocess helpers
+ignored. Crate check, Clippy with warnings denied, formatting, and diff checks
+passed. Real acceptance used Podman 5.4.2 and Skopeo 1.18.0 with fresh disposable
+overlay storage and also checked the imported image through the library and
+JSON CLI. Final graph-fixture refinements and the new documentation example
+passed targeted graph tests and all doctests after the full run. Store format 1
+and ref metadata schema 3 remain unchanged. Stage 6 is next; pull and prune
+remain future work. The README records supported content, reporting semantics,
+test coverage, and checking limits. Lustre/VAST qualification remains separate.
+
+Earlier update, 2026-10-20: stage 4.1 passed 103 tests, including three
 doctests and both real-tool tests, with only five internal subprocess helpers
 ignored. Crate check, Clippy with warnings denied, formatting, and diff checks
 passed. Real acceptance used Podman 5.4.2 and Skopeo 1.18.0 in fresh disposable
 storage outside the sandbox. It verified digest-selected imports, source-derived
 tags, repository-qualified exports, and matching and mismatching export
 destination digests. The README records the breaking API changes and results.
-Stage 5 is the next implementation stage; pull, check, and prune remain future
-work. The dated results below describe earlier stages and their historical APIs.
+The dated results below describe earlier stages and their historical APIs.
 
 The optional-destination refinement was verified on 2026-10-17: import and export
 accept omitted destinations in the CLI and library, using the source verbatim.
@@ -258,7 +270,7 @@ never generate an alternative tag.
 - Verify CLI/library parity, validation before store preparation or tool invocation, and removal's rejection of digest-bearing selectors.
 - Extend real Podman/Skopeo round trips in disposable storage to cover digest-selected imports, source-derived tags, and qualified stored-root exports. Run the existing crate check, full test suite, Clippy with warnings denied, formatting check, and diff check; record tool versions and results without claiming site qualification.
 
-### 5. Read-only graph checking
+### 5. Read-only graph checking (implemented)
 
 Add `check <selector>` and `check --all`, with graph-reading logic reusable by prune.
 Single-image checks use the stage-4.1 `ImageSelector` and repository-scoped
@@ -323,8 +335,8 @@ Complete local verification and prepare external filesystem acceptance procedure
 
 This section describes the target contract after the relevant stages. Stage
 4.1 implements the common selectors and containers-storage transfer arguments;
-pull, check, and prune remain planned. Earlier interfaces and their historical
-validation are recorded above.
+pull and prune remain planned; stage 5 implements checking. Earlier interfaces
+and their historical validation are recorded above.
 
 The library exposes a store handle, a common `ImageSelector`, tagged `LocalRef` namespace identities, separate containers-storage transfer and registry pull options, operation reports, and typed failures. Its seven operations are `import`, `pull`, `export`, `list`, `remove`, `check`, and `prune`. Storage semantics and diagnostics belong to the library; argument parsing and presentation belong to the executable.
 

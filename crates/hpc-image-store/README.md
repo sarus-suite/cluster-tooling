@@ -8,11 +8,11 @@ storage using Skopeo to copy the image data.
 
 The crate provides a synchronous Rust library and the `hpc-image-store` CLI.
 The library is private to this workspace and is not published as a package.
-Stages 1–4.1 provide import, export by name or repository-qualified stored-root
-digest, inventory, and explicit-name removal. Inventory formatting can match Podman's image table or
-show richer fields and JSON diagnostics. Pull, check, and prune remain future
-operations, and there is no `init` CLI action. Recorded validation results are
-listed below.
+Stages 1–5 provide import, export by name or repository-qualified stored-root
+digest, inventory, read-only graph checking, and explicit-name removal.
+Inventory formatting can match Podman's image table or show richer fields and
+JSON diagnostics. Pull and prune remain future operations, and there is no
+`init` CLI action. Recorded validation results are listed below.
 
 The [filesystem image store design](docs/hpc-image-store-design.md) describes
 the agreed behavior and guarantees. The
@@ -177,7 +177,66 @@ change, and leaves the retired raw image, shared content and lock files for
 future maintenance. Directories, special files and malformed namespace parents
 are preserved with an error. Removal initializes a missing store beneath a
 prepared parent under the existing mutation contract, then reports the ref
-missing; list and export never initialize stores.
+missing; list, export, and check never initialize stores.
+
+### Checking stored images
+
+```sh
+hpc-image-store --store /scratch/me/images check analysis/tool:release
+hpc-image-store --store /scratch/me/images check 'analysis/tool@sha256:<stored-root>'
+hpc-image-store --store /scratch/me/images --json check --all
+```
+
+Replace `<stored-root>` with the full 64 lowercase hexadecimal digest characters.
+Supply either one selector or `--all`. Digest selection uses the same literal
+repository-scoped lookup as export, with a digest taking precedence over a tag.
+The selected ref lock remains held while its content is checked. A missing
+named ref is reported as a failed entry; failed digest resolution returns an
+operation error, including existing incomplete-resolution diagnostics.
+
+Check validates the pointer, wrapper files, and current metadata envelope, then
+walks the authoritative image root and all supported dependencies. It reads
+every reachable manifest, nested index, and image configuration, covering all
+platforms regardless of `--platform`. It checks descriptor structure, media
+types, regular-file type, existence, and byte sizes. A damaged metadata file
+does not prevent traversal when the authoritative root remains readable.
+Checking uses no external tools and does not require registry access.
+
+Supported content is schema-version-2 OCI image manifests and indexes, OCI
+image-config JSON, and ordinary or nondistributable OCI tar layers, including
+gzip and zstd representations. Configuration JSON must specify nonempty OS and
+architecture, with correctly typed optional platform and creation fields.
+Layers must exist locally even when their descriptors include URLs or embedded
+data. Docker-specific media types, unknown schemas and media types, artifacts,
+and `subject`-bearing content are reported as unresolved. Stage 5 can inspect
+index graphs through internal fixtures; public index acquisition and export,
+and metadata that describes an index parent, remain stage-6 work.
+
+`CheckReport` contains `entries`, structured `diagnostics`, and `complete`.
+Each entry includes its path, optional local ref and authoritative root, and
+`passed` or `failed` status. Diagnostics include a category, path, optional ref
+and object digest, and a contextual message. `complete` is false when namespace
+enumeration or any requested ref or dependency cannot be fully inspected.
+`has_errors()` also considers diagnostics and failed entries. `--all` continues
+after individual failures, retains malformed namespace entries in the report,
+and succeeds for an empty initialized store. Like inventory, it observes each
+ref under its own lock without promising a single store-wide snapshot.
+
+Human output lists each result and totals. JSON results stay on stdout even
+when a collected report contains damage; diagnostics go to stderr. Status 0
+means the scope passed, 1 means damage, incomplete checking, or an operation
+failure, and 2 means invalid usage. Store preparation and selector-resolution
+errors produce stderr diagnostics rather than a collected JSON report.
+
+Checking does not repair or remove anything. It can create missing coordination
+lock directories or files through the existing lock mechanism, and keeps their
+identities stable. Observations and parsed objects are reused within the
+operation, including failed observations, but every descriptor's declared size
+and media type is checked. Cached config digests, platforms, creation times, and
+stored sizes are not compared with graph-derived values. Blobs are not hashed,
+decompressed, or unpacked, so same-size byte corruption and invalid compressed
+or tar data may remain undetected. A passing result does not certify content
+digests or replace backups.
 
 ### What transfers preserve and validate
 
@@ -226,6 +285,24 @@ Constructing the configuration and handle does not change the filesystem.
 A relative store path is resolved against the current working directory when
 the configuration is constructed. Import and export perform their own store
 preparation and locking, so callers do not need to coordinate those steps.
+
+Checking returns collected damage as a report, while store and selection
+failures return typed errors:
+
+```no_run
+use hpc_image_store::{CheckScope, ImageSelector, Store, StoreConfig};
+
+let store = Store::new(StoreConfig::new("/scratch/me/images")?);
+let selected = store.check(&CheckScope::Image(
+    ImageSelector::new("analysis/tool:release")?,
+))?;
+assert!(!selected.has_errors());
+let all = store.check(&CheckScope::All)?;
+for diagnostic in &all.diagnostics {
+    eprintln!("{}: {}", diagnostic.path.display(), diagnostic.message);
+}
+# Ok::<(), hpc_image_store::Error>(())
+```
 
 `TransferContext` contains only the executable paths and an optional platform
 selection. The tools inherit the caller's existing storage context as described
@@ -494,8 +571,8 @@ states, and an ordinary directory rename cannot replace an existing nonempty
 directory.
 
 The internal storage primitives described here also support behavior reserved
-for later stages. They do not make removal, discovery, or image-index transfers
-public operations.
+for later stages. Registry pulls and image-index transfers remain future public
+operations.
 
 ### Preparing and saving the image
 
@@ -595,8 +672,8 @@ images. Lock files stay in place across replacement and removal, so processes
 continue to coordinate through the same files even when a ref selects a new
 image.
 
-The operation lock policy is shown below. Import, export, remove, and list are
-public today; pull, check, and prune describe the policy for planned operations.
+The operation lock policy is shown below. Import, export, remove, list, and check
+are public today; pull and prune describe the policy for planned operations.
 
 | Operation | Store lock | Ref lock |
 | --- | --- | --- |
@@ -660,6 +737,18 @@ permissions, and rejected stores. Initialization tests verify missing-parent
 rejection, exact sync ordering, persistent sync failures, unprivileged parent
 permissions, and process termination after root creation, lock creation,
 scaffolding, parent sync, and marker publication.
+
+Stage-5 fixtures cover manifests, all supported layer types, all platforms and
+nested indexes, a chain of 1,500 nested indexes, cycles, conflicting descriptors,
+malformed JSON and descriptors, missing content, and rejected symlinks,
+directories, and FIFOs. Cache tests cover reused successes and failures, while
+public checks verify that shared failures affect every dependent ref. CLI tests
+exercise human and JSON results, partial failures, invalid usage, empty stores,
+and non-UTF-8 namespace paths without requiring tool executables. Process
+handshakes verify ref/store lock retention and replacement or removal after
+discovery. Snapshot checks preserve image content, metadata, pointers, staging,
+and stable lock identities. Real-tool acceptance also checks a newly imported
+image through both the library and JSON CLI.
 
 Publication tests use complete zero-layer manifest and image-index fixtures.
 They exercise insertion races and replacement in separate processes,
@@ -740,6 +829,15 @@ cargo test --locked -p hpc-image-store actual_skopeo_retains_locks_after_parent_
 ```
 
 ### Recorded results and outstanding qualification
+
+On 2026-10-20, stage 5 passed 120 tests, including four doctests and both
+real-tool tests, with the existing five internal subprocess helpers ignored.
+Crate check, Clippy with warnings denied, formatting, and diff checks passed.
+The full suite used Podman 5.4.2 and Skopeo 1.18.0 with fresh disposable overlay
+storage. After the full run, the final graph-fixture refinements and added
+documentation example passed targeted graph tests and all four doctests.
+No Lustre or VAST qualification was performed. Store format 1 and ref metadata
+schema 3 remain unchanged; stage 6 is next.
 
 On 2026-10-20, stage 4.1 passed 103 tests, including three doctests and both
 real-tool tests, with five internal subprocess helpers ignored. Crate check,
