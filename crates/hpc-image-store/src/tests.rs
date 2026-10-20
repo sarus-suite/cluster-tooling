@@ -30,6 +30,8 @@ fn local_name_grammar_and_boundaries() {
         "a.b/c__d/e---f:Release_1.2",
         "sha256:latest",
         "a:_",
+        "host:5000/a:t",
+        "Registry.EXAMPLE:05000/team/tool:Release_1",
     ] {
         let reference = LocalRef::new(value).unwrap();
         assert_eq!(reference.to_string(), value);
@@ -56,7 +58,6 @@ fn local_name_grammar_and_boundaries() {
         "a:é",
         "a:t@sha256:abc",
         "docker://a:t",
-        "host:5000/a:t",
         "a:t\n",
     ] {
         assert!(LocalRef::new(value).is_err(), "accepted {value:?}");
@@ -182,64 +183,103 @@ fn metadata_round_trips_and_checks_versions() {
 }
 
 #[test]
-fn image_selectors_distinguish_names_from_root_digests() {
+fn image_selectors_preserve_components_and_validate_named_references() {
     use crate::ImageSelector;
-    let reference = LocalRef::new("tool:release").unwrap();
     let root = digest();
-    for selector in [ImageSelector::from(reference), ImageSelector::from(root)] {
-        assert_eq!(
-            selector.to_string().parse::<ImageSelector>().unwrap(),
-            selector
+    for (reference, name, tag) in [
+        ("tool:Release_1", "tool", Some("Release_1")),
+        ("tool", "tool", None),
+        (
+            "registry.example:5000/team/tool:old",
+            "registry.example:5000/team/tool",
+            Some("old"),
+        ),
+        (
+            "Registry.EXAMPLE:05000/team/tool",
+            "Registry.EXAMPLE:05000/team/tool",
+            None,
+        ),
+        ("a_b/c__d/e---f:tag", "a_b/c__d/e---f", Some("tag")),
+    ] {
+        let value = format!("{reference}@{root}");
+        let selected = ImageSelector::new(&value).unwrap();
+        assert_eq!(selected.as_str(), value);
+        assert_eq!(selected.to_string(), value);
+        assert_eq!(selected.reference(), reference);
+        assert_eq!(selected.name(), name);
+        assert_eq!(selected.tag(), tag);
+        assert_eq!(selected.digest(), Some(&root));
+        assert_eq!(selected, value.parse().unwrap());
+        if tag.is_some() {
+            let local = LocalRef::new(reference).unwrap();
+            let tagged = ImageSelector::from(local.clone());
+            assert_eq!(tagged, ImageSelector::new(reference).unwrap());
+            assert_eq!(tagged.name(), local.name());
+            assert_eq!(tagged.tag(), Some(local.tag()));
+            assert_eq!(tagged.digest(), None);
+            assert_eq!(
+                LocalRef::from_encoded_path(&local.encoded_path()).unwrap(),
+                local
+            );
+        }
+        assert!(LocalRef::new(value).is_err());
+    }
+    for invalid in [
+        "".to_owned(),
+        "tool".into(),
+        "a".repeat(64),
+        root.to_string(),
+        format!("sha256:{}", "A".repeat(64)),
+        format!("@{root}"),
+        format!("tool:@{root}"),
+        format!("tool@@{root}"),
+        format!("tool@{root}@{root}"),
+        "tool@sha256:abc".into(),
+        format!("tool@sha512:{}", "a".repeat(128)),
+        format!("tool@sha256:{}", "A".repeat(64)),
+        format!("tool:tag@{root}suffix"),
+        "docker://tool:tag".into(),
+        "[vfs@/tmp]tool:tag".into(),
+        "host:port/tool:tag".into(),
+        "host:/tool:tag".into(),
+        "host..example/tool:tag".into(),
+        "Upper/Upper:tag".into(),
+        "host:5000/../tool:tag".into(),
+        "host:5000/tool".into(),
+        "host:5000//tool:tag".into(),
+        "a:tag\n".into(),
+    ] {
+        assert!(
+            ImageSelector::new(&invalid).is_err(),
+            "accepted {invalid:?}"
         );
     }
-    assert!(matches!(
-        "sha256:latest".parse::<ImageSelector>(),
-        Ok(ImageSelector::LocalRef(_))
-    ));
-    for invalid in [
-        format!("sha256:{}", "A".repeat(64)),
-        format!("tool@sha256:{}", "a".repeat(64)),
-        "tool".into(),
-    ] {
-        assert!(invalid.parse::<ImageSelector>().is_err(), "{invalid}");
-    }
+    assert!(ImageSelector::new(format!("{}@{root}", "a".repeat(255))).is_ok());
+    assert!(ImageSelector::new(format!("{}@{root}", "a".repeat(256))).is_err());
+    assert!(ImageSelector::new(format!("a:{}@{root}", "t".repeat(128))).is_ok());
+    assert!(ImageSelector::new(format!("a:{}@{root}", "t".repeat(129))).is_err());
 }
 
 #[test]
 fn selector_digest_reservation_preserves_valid_sha256_repository_tags() {
     use crate::ImageSelector;
     for tag in [
+        "latest".to_owned(),
         "g".repeat(64),
-        format!("{}g", "a".repeat(63)),
-        format!("g{}", "a".repeat(63)),
-        "_".repeat(64),
-        format!("g{}", ".".repeat(63)),
-        format!("g{}", "-".repeat(63)),
         "a".repeat(63),
         "a".repeat(65),
     ] {
         let value = format!("sha256:{tag}");
         let reference = LocalRef::new(&value).unwrap();
         assert_eq!(
-            value.parse::<ImageSelector>().unwrap(),
-            ImageSelector::LocalRef(reference)
+            ImageSelector::new(value).unwrap(),
+            ImageSelector::from(reference)
         );
     }
-    let value = format!("sha256:{}", "ab".repeat(32));
-    assert_eq!(
-        value.parse::<ImageSelector>().unwrap(),
-        ImageSelector::Digest(Sha256Digest::new(&value).unwrap())
-    );
-    for tag in ["A".repeat(64), "aB".repeat(32)] {
+    for tag in ["a".repeat(64), "A".repeat(64), "aB".repeat(32)] {
         let value = format!("sha256:{tag}");
-        assert!(matches!(
-            LocalRef::new(&value),
-            Err(Error::InvalidRef { .. })
-        ));
-        assert!(matches!(
-            value.parse::<ImageSelector>(),
-            Err(Error::InvalidDigest(_))
-        ));
+        assert!(LocalRef::new(&value).is_err());
+        assert!(ImageSelector::new(&value).is_err());
     }
 }
 

@@ -921,13 +921,16 @@ fn publication_worker() {
             "selector.discovered"
         });
         let guard = handle.prepare(Operation::Export).unwrap();
-        let selected = crate::inventory::select(&guard, &ImageSelector::Digest(root(Image::One)));
+        let selected = crate::inventory::select(
+            &guard,
+            &ImageSelector::new(format!("{}@{}", reference.name(), root(Image::One))).unwrap(),
+        );
         if action == "select-after-remove" {
             assert!(matches!(selected, Err(Error::DigestMissing(_))));
         } else {
             let selected = selected.unwrap();
             if action == "select-after-replace" {
-                assert_eq!(selected.reference().as_str(), "z:tag");
+                assert_eq!(selected.reference().as_str(), "analysis/tool:zzzz");
             }
             assert_eq!(refs::read(&selected).unwrap().root.digest, root(Image::One));
         }
@@ -998,7 +1001,12 @@ fn digest_resolution_revalidates_candidates_after_namespace_scan() {
         let handle = store(temporary.path());
         publish(&handle, &reference(), Image::One, false);
         if action == "select-after-replace" {
-            publish(&handle, &LocalRef::new("z:tag").unwrap(), Image::One, false);
+            publish(
+                &handle,
+                &LocalRef::new("analysis/tool:zzzz").unwrap(),
+                Image::One,
+                false,
+            );
         }
         let mut reader = Worker::start(temporary.path(), &reference(), action);
         reader.wait_for("PUBLICATION_PAUSED");

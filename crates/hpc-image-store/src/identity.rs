@@ -12,42 +12,79 @@ fn is_reserved_digest(value: &str) -> bool {
         .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
-/// Select committed content by logical name or by its actual manifest/index
-/// root digest. Config digests and acquisition provenance are not lookup keys.
+/// A literal repository name with a tag, a digest, or both. A digest selects
+/// only committed roots in this repository; provenance is never a lookup key.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ImageSelector {
-    LocalRef(LocalRef),
-    Digest(Sha256Digest),
+pub struct ImageSelector {
+    spelling: String,
+    reference_len: usize,
+    name_len: usize,
+    digest: Option<Sha256Digest>,
+}
+
+impl ImageSelector {
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let spelling = value.into();
+        let (reference, digest) = match spelling.split_once('@') {
+            Some((reference, digest)) => (reference, Some(Sha256Digest::new(digest)?)),
+            None => (spelling.as_str(), None),
+        };
+        let (name, tag) = parse_reference(reference).map_err(|reason| Error::InvalidSelector {
+            value: spelling.clone(),
+            reason,
+        })?;
+        if tag.is_none() && digest.is_none() {
+            return Err(Error::InvalidSelector {
+                value: spelling,
+                reason: "a repository name and at least one of tag or digest are required",
+            });
+        }
+        Ok(Self {
+            reference_len: reference.len(),
+            name_len: name.len(),
+            spelling,
+            digest,
+        })
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.spelling
+    }
+    /// The supplied `name[:tag]`, excluding the digest suffix.
+    pub fn reference(&self) -> &str {
+        &self.spelling[..self.reference_len]
+    }
+    pub fn name(&self) -> &str {
+        &self.spelling[..self.name_len]
+    }
+    pub fn tag(&self) -> Option<&str> {
+        (self.name_len < self.reference_len)
+            .then(|| &self.spelling[self.name_len + 1..self.reference_len])
+    }
+    pub fn digest(&self) -> Option<&Sha256Digest> {
+        self.digest.as_ref()
+    }
 }
 
 impl From<LocalRef> for ImageSelector {
     fn from(reference: LocalRef) -> Self {
-        Self::LocalRef(reference)
-    }
-}
-impl From<Sha256Digest> for ImageSelector {
-    fn from(digest: Sha256Digest) -> Self {
-        Self::Digest(digest)
+        Self {
+            name_len: reference.name().len(),
+            reference_len: reference.as_str().len(),
+            spelling: reference.0,
+            digest: None,
+        }
     }
 }
 impl FromStr for ImageSelector {
     type Err = Error;
     fn from_str(value: &str) -> Result<Self> {
-        // Only complete hexadecimal spellings are reserved. Uppercase hex
-        // stays reserved but fails canonical digest validation below.
-        if is_reserved_digest(value) {
-            Sha256Digest::new(value).map(Self::Digest)
-        } else {
-            LocalRef::new(value).map(Self::LocalRef)
-        }
+        Self::new(value)
     }
 }
 impl fmt::Display for ImageSelector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::LocalRef(reference) => reference.fmt(f),
-            Self::Digest(digest) => digest.fmt(f),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -63,22 +100,9 @@ impl LocalRef {
             value: value.clone(),
             reason,
         };
-        let (name, tag) = value
-            .split_once(':')
-            .ok_or_else(|| invalid("an explicit tag is required"))?;
-        if name.is_empty() || name.len() > 255 || !name.split('/').all(valid_name_component) {
-            return Err(invalid("invalid repository path or name exceeds 255 bytes"));
-        }
-        if tag.is_empty()
-            || tag.len() > 128
-            || !tag.bytes().enumerate().all(|(i, b)| {
-                b.is_ascii_alphanumeric() || b == b'_' || (i > 0 && matches!(b, b'.' | b'-'))
-            })
-        {
-            return Err(invalid("invalid tag or tag exceeds 128 bytes"));
-        }
-        if is_reserved_digest(&value) {
-            return Err(invalid("this spelling is reserved for digest selectors"));
+        let (_, tag) = parse_reference(&value).map_err(invalid)?;
+        if tag.is_none() {
+            return Err(invalid("an explicit tag is required"));
         }
         Ok(Self(value))
     }
@@ -87,10 +111,10 @@ impl LocalRef {
         &self.0
     }
     pub fn name(&self) -> &str {
-        self.0.split_once(':').unwrap().0
+        self.0.rsplit_once(':').unwrap().0
     }
     pub fn tag(&self) -> &str {
-        self.0.split_once(':').unwrap().1
+        self.0.rsplit_once(':').unwrap().1
     }
 
     /// Reversible directory key; terminal namespace entries are added separately.
@@ -142,6 +166,60 @@ impl LocalRef {
         }
         Ok(reference)
     }
+}
+
+/// Split a tag only after the last slash, so a registry port stays in the name.
+/// This follows containers/image's named-reference grammar without expansion.
+fn parse_reference(value: &str) -> std::result::Result<(&str, Option<&str>), &'static str> {
+    if is_reserved_digest(value) {
+        return Err("bare digests are unsupported; qualify the digest with a repository name");
+    }
+    let (name, tag) = match value.rsplit_once(':') {
+        Some((name, tag)) if !tag.contains('/') => (name, Some(tag)),
+        _ => (value, None),
+    };
+    if name.is_empty() || name.len() > 255 || !valid_name(name) {
+        return Err("invalid repository path or name exceeds 255 bytes");
+    }
+    if let Some(tag) = tag
+        && (tag.is_empty()
+            || tag.len() > 128
+            || !tag.bytes().enumerate().all(|(i, b)| {
+                b.is_ascii_alphanumeric() || b == b'_' || (i > 0 && matches!(b, b'.' | b'-'))
+            }))
+    {
+        return Err("invalid tag or tag exceeds 128 bytes");
+    }
+    Ok((name, tag))
+}
+
+fn valid_name(name: &str) -> bool {
+    let mut components = name.split('/');
+    let first = components.next().unwrap_or_default();
+    // The optional domain may contain uppercase letters and a numeric port.
+    // A plain first path component may instead contain repository separators.
+    let valid_first = valid_name_component(first) || (name.contains('/') && valid_domain(first));
+    valid_first && components.all(valid_name_component)
+}
+
+fn valid_domain(domain: &str) -> bool {
+    let host = match domain.split_once(':') {
+        Some((host, port)) => {
+            if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+                return false;
+            }
+            host
+        }
+        None => domain,
+    };
+    host.split('.').all(|part| {
+        let bytes = part.as_bytes();
+        bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+            && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+            && bytes
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+    })
 }
 
 fn valid_name_component(component: &str) -> bool {

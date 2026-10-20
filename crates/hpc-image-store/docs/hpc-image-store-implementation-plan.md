@@ -1,15 +1,23 @@
 # Staged implementation of the HPC OCI image store
 
-Status: stages 1–4 are implemented in the working tree in `crates/hpc-image-store`. Initialization follows the existing-parent contract and passes local regression and coordination checks. On 2026-10-16, stage 3 passed real rootless containers-storage acceptance in the rebuilt integration devcontainer with Podman 4.3.1 and Skopeo 1.9.3 using native overlay. Validation includes library and JSON CLI round trips, compression, deduplication, replacement, platform selection, source-tag movement and removal, failed export, staging cleanup, and orphaned Skopeo lock retention during a real containers-storage export. The direct Cargo tests passed both with and without an outer `podman unshare`, using fresh disposable storage and verified cleanup. Both real-tool Cargo tests now run without ignore attributes; the integration test caller prepares an isolated overlay configuration by default and verifies its effective root and initial emptiness. The transfer library required no changes. All 70 tests and crate checks passed; only five internal subprocess helpers remain ignored. FUSE remains unverified because the container has no `/dev/fuse`; cleanup failure warnings and index rejection use synthetic fixtures. The crate README records commands and results. The layout uses `raw_images/raw-<id>`; successful-import staging cleanup reports warnings after committed-ref success. Stage 4.1 and stages 5–8 remain planned. Stage 2 uses internal primitives and synthetic fixtures, without operational CLI commands. Lustre/VAST behavior remains unqualified pending site tests.
+Status: stages 1–4.1 are implemented in `crates/hpc-image-store`. The crate
+provides single-platform containers-storage import and export, inventory, and
+explicit-name removal. Stage 4.1 adds common selectors, repository-scoped
+stored-root lookup, and digest-aware transfer arguments without changing store
+format 1 or ref metadata schema 3. Stages 5–8 remain planned. Lustre/VAST behavior
+remains unqualified pending site tests.
 
 Design baseline: [Filesystem OCI Image Store Design](hpc-image-store-design.md), version 1.5.
 
-Planning update, 2026-10-20: stage 4.1 is pending and is the next implementation
-stage, before stages 5–8. It replaces the stage-4 selector API and broadens
-digest-aware transfer arguments without changing storage formats. The dated
-results below describe the implemented stages 1–4; they do not validate stage
-4.1. This update changes only the plan and design. Source code, the crate README,
-and examples will be updated when stage 4.1 is implemented.
+Implementation update, 2026-10-20: stage 4.1 passed 103 tests, including three
+doctests and both real-tool tests, with only five internal subprocess helpers
+ignored. Crate check, Clippy with warnings denied, formatting, and diff checks
+passed. Real acceptance used Podman 5.4.2 and Skopeo 1.18.0 in fresh disposable
+storage outside the sandbox. It verified digest-selected imports, source-derived
+tags, repository-qualified exports, and matching and mismatching export
+destination digests. The README records the breaking API changes and results.
+Stage 5 is the next implementation stage; pull, check, and prune remain future
+work. The dated results below describe earlier stages and their historical APIs.
 
 The optional-destination refinement was verified on 2026-10-17: import and export
 accept omitted destinations in the CLI and library, using the source verbatim.
@@ -155,7 +163,7 @@ Digest resolution retains the selected shared ref lock through transfer and
 uses the supplied selector verbatim as the omitted export destination.
 
 This enum, the separate named-export wrapper, and the bare-digest lookup syntax
-describe completed stage 4. Planned stage 4.1 supersedes them with a common
+describe completed stage 4. Stage 4.1 supersedes them with a common
 selector and repository-scoped digest lookup. In particular, stage 4's exclusion
 of qualified registry-provenance selectors below does not prohibit the planned
 `name@stored-root` syntax; provenance remains excluded as a lookup key.
@@ -187,9 +195,9 @@ print collected results and exit 1. Size remains stored-content size.
 
 **Acceptance:** stored-root lookup for imported and pulled images; duplicate refs to identical roots; obsolete registry digests never resolve through metadata; damaged layouts and metadata; concurrent replacement/removal; structured diagnostics.
 
-### 4.1. Unified selectors and digest-aware transfers (pending)
+### 4.1. Unified selectors and digest-aware transfers (implemented)
 
-Complete this stage before stage 5. It changes image arguments and resolution,
+This stage precedes stage 5. It changes image arguments and resolution,
 while keeping single-platform import, storage publication, locking, and
 durability guarantees. It does not implement pull, check, or prune.
 
@@ -239,7 +247,7 @@ never generate an alternative tag.
 - Default an omitted export destination to the supplied source selector, preserving its spelling rather than using acquisition metadata or the ref selected during lookup.
 - Pass export destination digests through to Skopeo and report digest-mismatch failures; never silently discard them. Follow the upstream [destination digest check](https://github.com/containers/image/blob/main/storage/storage_dest.go). Retain the preservation policy based on acquisition kind.
 - Use this selector for stage-5 single-image checking. Align stage-6 pull with the same selector, optional destination, and source-derived fallback naming rules, while retaining digest-preserving registry acquisition. Pull implementation remains in stage 6.
-- Keep store format 1 and ref metadata schema 3; no storage migration is required. Update the README, CLI help, library examples, and implementation status when stage 4.1 is implemented and verified, not as part of this planning update.
+- Keep store format 1 and ref metadata schema 3; no storage migration is required. The README, CLI help, library examples, and implementation status now describe the verified stage-4.1 interfaces.
 
 **Acceptance:**
 
@@ -313,9 +321,10 @@ Complete local verification and prepare external filesystem acceptance procedure
 
 ## Library and CLI contract
 
-This section describes the target contract after the relevant planned stages.
-The stage-4.1 selector and transfer changes are not yet implemented; completed
-stage-3 and stage-4 interfaces and their validation are recorded above.
+This section describes the target contract after the relevant stages. Stage
+4.1 implements the common selectors and containers-storage transfer arguments;
+pull, check, and prune remain planned. Earlier interfaces and their historical
+validation are recorded above.
 
 The library exposes a store handle, a common `ImageSelector`, tagged `LocalRef` namespace identities, separate containers-storage transfer and registry pull options, operation reports, and typed failures. Its seven operations are `import`, `pull`, `export`, `list`, `remove`, `check`, and `prune`. Storage semantics and diagnostics belong to the library; argument parsing and presentation belong to the executable.
 
@@ -345,7 +354,7 @@ The stored-content size is the sum of unique index, manifest, config, and layer 
 - Linux, user-owned stores, concurrent processes across nodes, single-platform containers-storage imports, complete-index registry pulls, and SHA-256 content.
 - The site's or user's prepared parent directory already exists and can be opened and synced during initialization. The library creates no missing ancestors, supports no stores inside other stores, and does not inspect ancestors to prove preparation or detect nesting.
 - All content selection and reachability derive from committed OCI layouts. Pull preserves the resolved registry root; import may convert or recompress and therefore cannot promise that root identity. Pull provenance is descriptive and must agree with the stored root, never act as an alias.
-- Stage 4.1's selector and transfer contracts remain pending before stage 5. They preserve literal names, use only qualified stored-root digests for lookup, and retain explicit tagged-ref-only removal. Generated tags use an explicit source digest; ignored acquisition-destination digests never become identities or naming inputs. Store format 1 and ref metadata schema 3 remain unchanged, with no stage-4.1 migration.
+- Stage 4.1's selector and transfer contracts are implemented before stage 5. They preserve literal names, use only qualified stored-root digests for lookup, and retain explicit tagged-ref-only removal. Generated tags use an explicit source digest; ignored acquisition-destination digests never become identities or naming inputs. Store format 1 and ref metadata schema 3 remain unchanged, with no stage-4.1 migration.
 - Exporting a platform from a pulled index preserves the selected manifest identity, not the parent index identity; the parent and its complete graph remain in the CAS.
 - Successful mutations sync before returning; post-publication sync errors explicitly report potentially committed state.
 - File locks, hard-link insertion, atomic rename, publication visibility, and sync behavior require validation on the actual Lustre and VAST deployments. Do not silently downgrade these guarantees if a primitive is unavailable.

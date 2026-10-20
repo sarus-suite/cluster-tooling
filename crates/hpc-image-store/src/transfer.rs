@@ -136,6 +136,9 @@ pub struct ImportReport {
     pub image_id: ImageId,
     pub content: ContentMetadata,
     pub cleanup_warnings: Vec<CleanupWarning>,
+    /// An explicit destination digest is descriptive input only, never an
+    /// assertion about transferred content or a source of a generated tag.
+    pub ignored_destination_digest: Option<Sha256Digest>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct ExportReport {
@@ -144,21 +147,23 @@ pub struct ExportReport {
     pub destination: String,
 }
 
-/// Arguments are image names or IDs in containers-storage. A name such as
-/// `oci:latest` is a repository and tag, not a transport selection. Explicit
-/// URLs and embedded storage settings are rejected; tools parse the full name.
-pub(crate) fn validate_image_argument(value: &str) -> Result<()> {
-    if value.is_empty()
-        || value.starts_with('-')
-        || value.contains(['[', ']'])
-        || value.contains("://")
-        || value
-            .bytes()
-            .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
-    {
-        return Err(Error::InvalidTransfer("expected a plain containers-storage image name or ID, without a transport or storage specifier".into()));
-    }
-    Ok(())
+/// Naming is resolved before preparing the store or invoking either tool.
+fn import_destination(
+    source: &ImageSelector,
+    destination: Option<&ImageSelector>,
+) -> Result<LocalRef> {
+    let effective = destination.unwrap_or(source);
+    let tag = match effective.tag() {
+        Some(tag) => tag,
+        None => source
+            .digest()
+            .map(|digest| &digest.hex()[..12])
+            .ok_or_else(|| Error::InvalidImportDestination {
+                source_selector: source.to_string(),
+                destination: effective.to_string(),
+            })?,
+    };
+    LocalRef::new(format!("{}:{tag}", effective.name()))
 }
 fn oci_argument(path: &Path) -> Result<OsString> {
     if path.as_os_str().as_bytes().contains(&b':') {
@@ -175,24 +180,17 @@ fn storage_argument(image: &str) -> String {
 }
 
 impl Store {
-    /// Import a containers-storage image. An omitted ref uses the source verbatim,
-    /// which must be a valid explicitly tagged local ref.
+    /// Import a containers-storage image, retaining an effective destination
+    /// tag or deriving one from the explicit source digest's first 12 hex digits.
     pub fn import(
         &self,
-        source: &str,
-        reference: Option<&LocalRef>,
+        source: &ImageSelector,
+        destination: Option<&ImageSelector>,
         context: &TransferContext,
         options: &ImportOptions,
     ) -> Result<ImportReport> {
-        validate_image_argument(source)?;
-        let default_reference;
-        let reference = match reference {
-            Some(reference) => reference,
-            None => {
-                default_reference = LocalRef::new(source)?;
-                &default_reference
-            }
-        };
+        let reference = import_destination(source, destination)?;
+        let ignored_destination_digest = destination.and_then(ImageSelector::digest).cloned();
         context.validate()?;
         if context.podman.as_os_str().is_empty() {
             return Err(Error::InvalidTransfer(
@@ -202,13 +200,23 @@ impl Store {
         // Fail on an unrepresentable OCI path before initializing the store.
         oci_argument(self.config().root())?;
         let store_guard = self.prepare(Operation::Import)?;
-        let ref_guard = store_guard.lock_ref(reference)?;
+        let ref_guard = store_guard.lock_ref(&reference)?;
         refs::check_destination(&ref_guard, options.replace)?;
         context.check_capabilities("--dest-shared-blob-dir", false)?;
 
+        let selected_source = match source.digest() {
+            Some(digest) => format!("{}@{digest}", source.name()),
+            None => source.to_string(),
+        };
         let output = subprocess::run(
-            Command::new(&context.podman)
-                .args(["image", "inspect", "--format", "{{.Id}}", "--", source]),
+            Command::new(&context.podman).args([
+                "image",
+                "inspect",
+                "--format",
+                "{{.Id}}",
+                "--",
+                &selected_source,
+            ]),
             "inspect source image ID",
             &context.podman,
             None,
@@ -226,7 +234,11 @@ impl Store {
         command
             .arg("--dest-shared-blob-dir")
             .arg(stage.shared_blob_path())
-            .arg(storage_argument(image_id.as_str()))
+            .arg(storage_argument(if source.digest().is_some() {
+                &selected_source
+            } else {
+                image_id.as_str()
+            }))
             .arg(oci_argument(&stage.layout_path())?);
         subprocess::run(
             &mut command,
@@ -247,7 +259,7 @@ impl Store {
             root.digest.clone(),
             content.clone(),
             acquired_at,
-            source.into(),
+            source.to_string(),
             image_id.clone(),
             options.notes.clone(),
         );
@@ -265,35 +277,19 @@ impl Store {
             image_id,
             content,
             cleanup_warnings,
+            ignored_destination_digest,
         })
     }
 
-    /// Export a stored image, using the local ref verbatim when no destination
-    /// is supplied.
+    /// Export a committed name or repository-qualified root. An omitted destination
+    /// uses the selector verbatim, including its digest spelling.
     pub fn export(
         &self,
-        reference: &LocalRef,
-        destination: Option<&str>,
-        context: &TransferContext,
-    ) -> Result<ExportReport> {
-        self.export_selected(
-            &ImageSelector::LocalRef(reference.clone()),
-            destination,
-            context,
-        )
-    }
-
-    /// Export a committed name or stored-root digest. An omitted destination
-    /// uses the selector verbatim, including its digest spelling.
-    pub fn export_selected(
-        &self,
         selector: &ImageSelector,
-        destination: Option<&str>,
+        destination: Option<&ImageSelector>,
         context: &TransferContext,
     ) -> Result<ExportReport> {
-        let default_destination = selector.to_string();
-        let destination = destination.unwrap_or(&default_destination);
-        validate_image_argument(destination)?;
+        let destination = destination.unwrap_or(selector).as_str();
         // Podman is never used by export, even to probe its availability.
         context.validate()?;
         let store_guard = self.prepare(Operation::Export)?;

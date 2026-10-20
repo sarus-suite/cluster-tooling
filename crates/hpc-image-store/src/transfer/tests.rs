@@ -8,6 +8,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn parse_selector(value: impl AsRef<str>) -> ImageSelector {
+    ImageSelector::new(value.as_ref()).unwrap()
+}
+
 const CONFIG: &[u8] =
     br#"{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}"#;
 const CONFIG_DIGEST: &str = "c5b1d63604f273462ef36fadac3182d43ae6a6138731cf594b314835cf1c034f";
@@ -102,8 +106,8 @@ impl Fixture {
     }
     fn import(&self, replace: bool) -> Result<ImportReport> {
         self.store.import(
-            "localhost/source:mutable",
-            Some(&self.reference),
+            &parse_selector("localhost/source:mutable"),
+            Some(&parse_selector(self.reference.as_str())),
             &self.context,
             &ImportOptions {
                 replace,
@@ -148,7 +152,7 @@ fn omitted_destinations_use_source_verbatim_and_obey_replacement_policy() {
     let options = ImportOptions::default();
     let imported = fixture
         .store
-        .import(source, None, &fixture.context, &options)
+        .import(&parse_selector(source), None, &fixture.context, &options)
         .unwrap();
     assert_eq!(imported.local_ref, fixture.reference);
     assert!(
@@ -158,14 +162,14 @@ fn omitted_destinations_use_source_verbatim_and_obey_replacement_policy() {
     assert!(matches!(
         fixture
             .store
-            .import(source, None, &fixture.context, &options),
+            .import(&parse_selector(source), None, &fixture.context, &options),
         Err(Error::RefExists(_))
     ));
     assert_eq!(fixture.log().len(), calls);
     fixture
         .store
         .import(
-            source,
+            &parse_selector(source),
             None,
             &fixture.context,
             &ImportOptions {
@@ -176,7 +180,11 @@ fn omitted_destinations_use_source_verbatim_and_obey_replacement_policy() {
         .unwrap();
     let exported = fixture
         .store
-        .export(&fixture.reference, None, &fixture.context)
+        .export(
+            &parse_selector(fixture.reference.as_str()),
+            None,
+            &fixture.context,
+        )
         .unwrap();
     assert_eq!(exported.local_ref, fixture.reference);
     assert_eq!(exported.destination, source);
@@ -198,36 +206,23 @@ fn omitted_destinations_use_source_verbatim_and_obey_replacement_policy() {
 }
 
 #[test]
-fn invalid_implicit_import_refs_require_explicit_destinations_before_any_side_effects() {
-    let prefixed_id = format!("sha256:{ID}");
-    for source in [
-        "alpine",
-        ID,
-        prefixed_id.as_str(),
-        "registry.example:5000/team/tool:latest",
-    ] {
-        let fixture = Fixture::new();
-        assert!(matches!(
-            fixture
-                .store
-                .import(source, None, &fixture.context, &ImportOptions::default()),
-            Err(Error::InvalidRef { .. })
-        ));
-        assert!(!fixture.store.config().root().exists());
-        assert!(!fixture.temporary.path().join("log").exists());
-        fixture
-            .store
-            .import(
-                source,
-                Some(&fixture.reference),
-                &fixture.context,
-                &ImportOptions::default(),
-            )
-            .unwrap();
-        assert!(
-            matches!(fixture.read().acquisition, Acquisition::Import { source: recorded, .. } if recorded == source)
-        );
-    }
+fn invalid_import_destination_fails_before_store_preparation_and_tools() {
+    let fixture = Fixture::new();
+    let source = parse_selector("alpine:latest");
+    let destination = parse_selector(format!("renamed@sha256:{ID}"));
+    let error = fixture
+        .store
+        .import(
+            &source,
+            Some(&destination),
+            &fixture.context,
+            &ImportOptions::default(),
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::InvalidImportDestination { .. }));
+    assert!(error.to_string().contains("destination digest is ignored"));
+    assert!(!fixture.store.config().root().exists());
+    assert!(!fixture.temporary.path().join("log").exists());
 }
 
 #[test]
@@ -291,8 +286,8 @@ fn import_pins_id_builds_metadata_and_exports_without_podman() {
     let exported = fixture
         .store
         .export(
-            &fixture.reference,
-            Some("localhost/output:tag"),
+            &parse_selector(fixture.reference.as_str()),
+            Some(&parse_selector("localhost/output:tag")),
             &fixture.context,
         )
         .unwrap();
@@ -326,7 +321,11 @@ fn import_pins_id_builds_metadata_and_exports_without_podman() {
     }
     let exported = fixture
         .store
-        .export(&fixture.reference, None, &fixture.context)
+        .export(
+            &parse_selector(fixture.reference.as_str()),
+            None,
+            &fixture.context,
+        )
         .unwrap();
     assert_eq!(exported.destination, fixture.reference.as_str());
     assert_ne!(exported.destination, "localhost/source:mutable");
@@ -423,32 +422,6 @@ fn failed_copy_and_invalid_id_preserve_previous_ref() {
 }
 
 #[test]
-fn image_arguments_accept_transport_named_repositories_and_unqualified_names() {
-    let prefixed_id = format!("sha256:{ID}");
-    for image in [
-        "containers-storage:latest",
-        "oci:latest",
-        "oci-archive:latest",
-        "dir:latest",
-        "docker:latest",
-        "docker-archive:latest",
-        "docker-daemon:latest",
-        "ostree:latest",
-        "sif:latest",
-        "tarball:latest",
-        "oci:path",
-        "alpine",
-        "alpine:latest",
-        "localhost/docker:latest",
-        "registry.example:5000/team/tool:latest",
-        ID,
-        prefixed_id.as_str(),
-    ] {
-        assert!(validate_image_argument(image).is_ok(), "rejected {image}");
-    }
-}
-
-#[test]
 fn transport_named_images_reach_the_tools_without_changing_transport_or_id_pinning() {
     for image in [
         "docker:latest",
@@ -460,15 +433,19 @@ fn transport_named_images_reach_the_tools_without_changing_transport_or_id_pinni
         fixture
             .store
             .import(
-                image,
-                Some(&fixture.reference),
+                &parse_selector(image),
+                Some(&parse_selector(fixture.reference.as_str())),
                 &fixture.context,
                 &ImportOptions::default(),
             )
             .unwrap();
         fixture
             .store
-            .export(&fixture.reference, Some(image), &fixture.context)
+            .export(
+                &parse_selector(fixture.reference.as_str()),
+                Some(&parse_selector(image)),
+                &fixture.context,
+            )
             .unwrap();
         let calls = fixture.log();
         let inspection = calls.iter().find(|call| call["tool"] == "podman").unwrap();
@@ -524,22 +501,10 @@ fn unsupported_capabilities_and_invalid_arguments_fail_without_copying() {
         "image:\n",
         "image:\u{7f}",
         "containers-storage:[vfs@/tmp]image",
+        "alpine",
+        ID,
     ] {
-        assert!(matches!(
-            fixture.store.import(
-                image,
-                Some(&fixture.reference),
-                &fixture.context,
-                &ImportOptions::default()
-            ),
-            Err(Error::InvalidTransfer(_))
-        ));
-        assert!(matches!(
-            fixture
-                .store
-                .export(&fixture.reference, Some(image), &fixture.context),
-            Err(Error::InvalidTransfer(_))
-        ));
+        assert!(ImageSelector::new(image).is_err());
     }
     assert_eq!(fixture.log().len(), calls_before_invalid_arguments);
 }
@@ -686,8 +651,8 @@ fn cleanup_failures_warn_after_commit_and_later_imports_leave_remnants_alone() {
         fixture
             .store
             .export(
-                &fixture.reference,
-                Some("localhost/output:tag"),
+                &parse_selector(fixture.reference.as_str()),
+                Some(&parse_selector("localhost/output:tag")),
                 &fixture.context,
             )
             .unwrap();
@@ -758,9 +723,9 @@ fn pulled_manifest_export_requests_preservation() {
     .unwrap();
     fixture
         .store
-        .export_selected(
-            &ImageSelector::Digest(metadata.stored_root.clone()),
-            Some("localhost/output:tag"),
+        .export(
+            &parse_selector(format!("example/tool@{}", metadata.stored_root)),
+            Some(&parse_selector("localhost/output:tag")),
             &fixture.context,
         )
         .unwrap();
@@ -776,30 +741,30 @@ fn pulled_manifest_export_requests_preservation() {
 fn digest_export_uses_layout_identity_and_a_deterministic_healthy_name() {
     let fixture = Fixture::new();
     let imported = fixture.import(false).unwrap();
-    let first = LocalRef::new("aaa/tool:tag").unwrap();
+    let first = LocalRef::new("example/tool:aaa").unwrap();
     fixture
         .store
         .import(
-            "localhost/source:mutable",
-            Some(&first),
+            &parse_selector("localhost/source:mutable"),
+            Some(&parse_selector(first.as_str())),
             &fixture.context,
             &ImportOptions::default(),
         )
         .unwrap();
-    let selector = ImageSelector::Digest(imported.stored_root.clone());
+    let selector = parse_selector(format!("example/tool:ignored@{}", imported.stored_root));
     let report = fixture
         .store
-        .export_selected(&selector, None, &fixture.context)
+        .export(&selector, None, &fixture.context)
         .unwrap();
     assert_eq!(report.local_ref, first);
-    assert_eq!(report.destination, imported.stored_root.as_str());
+    assert_eq!(report.destination, selector.as_str());
     assert_eq!(
         fixture.log().last().unwrap()["args"]
             .as_array()
             .unwrap()
             .last()
             .unwrap(),
-        &json!(format!("containers-storage:{}", imported.stored_root))
+        &json!(format!("containers-storage:{selector}"))
     );
     // A damaged earlier name must not hide a usable duplicate root.
     let raw = fs::canonicalize(fixture.store.layout.ref_entry(&first)).unwrap();
@@ -807,7 +772,11 @@ fn digest_export_uses_layout_identity_and_a_deterministic_healthy_name() {
     assert_eq!(
         fixture
             .store
-            .export_selected(&selector, Some("localhost/output:tag"), &fixture.context)
+            .export(
+                &selector,
+                Some(&parse_selector("localhost/output:tag")),
+                &fixture.context
+            )
             .unwrap()
             .local_ref,
         fixture.reference
@@ -817,13 +786,16 @@ fn digest_export_uses_layout_identity_and_a_deterministic_healthy_name() {
     assert!(
         fixture
             .store
-            .export_selected(&selector, Some("localhost/output:tag"), &fixture.context)
+            .export(
+                &selector,
+                Some(&parse_selector("localhost/output:tag")),
+                &fixture.context
+            )
             .is_ok()
     );
-    let absent =
-        ImageSelector::Digest(Sha256Digest::new(format!("sha256:{}", "f".repeat(64))).unwrap());
+    let absent = parse_selector(format!("example/tool@sha256:{}", "f".repeat(64)));
     assert!(
-        matches!(fixture.store.export_selected(&absent, None, &fixture.context), Err(Error::ResolutionIncomplete { diagnostics, .. }) if diagnostics.len() == 2)
+        matches!(fixture.store.export(&absent, None, &fixture.context), Err(Error::ResolutionIncomplete { diagnostics, .. }) if diagnostics.len() == 2)
     );
 }
 
@@ -836,12 +808,10 @@ fn digest_export_never_uses_config_or_acquisition_identity_as_an_alias() {
         ID,
         "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     ] {
-        let selector = ImageSelector::Digest(Sha256Digest::new(format!("sha256:{hex}")).unwrap());
+        let selector = parse_selector(format!("example/tool@sha256:{hex}"));
         let before = fixture.log().len();
         assert!(matches!(
-            fixture
-                .store
-                .export_selected(&selector, None, &fixture.context),
+            fixture.store.export(&selector, None, &fixture.context),
             Err(Error::DigestMissing(_))
         ));
         assert_eq!(fixture.log().len(), before);
@@ -849,11 +819,9 @@ fn digest_export_never_uses_config_or_acquisition_identity_as_an_alias() {
     // A missing root is authoritative even if intact metadata claims it.
     let raw = fs::canonicalize(fixture.store.layout.ref_entry(&fixture.reference)).unwrap();
     fs::write(raw.join("index.json"), b"{").unwrap();
-    let selector = ImageSelector::Digest(Sha256Digest::new(format!("sha256:{ROOT}")).unwrap());
+    let selector = parse_selector(format!("example/tool@sha256:{ROOT}"));
     assert!(matches!(
-        fixture
-            .store
-            .export_selected(&selector, None, &fixture.context),
+        fixture.store.export(&selector, None, &fixture.context),
         Err(Error::ResolutionIncomplete { .. })
     ));
     let report = fixture.store.list().unwrap();
@@ -865,19 +833,15 @@ fn digest_export_never_uses_config_or_acquisition_identity_as_an_alias() {
 fn digest_resolution_reports_incomplete_enumeration_and_skips_removed_names() {
     let fixture = Fixture::new();
     let imported = fixture.import(false).unwrap();
-    let selector = ImageSelector::Digest(imported.stored_root);
+    let selector = parse_selector(format!("example/tool@{}", imported.stored_root));
     fsutil::fail_once("discovery.enumerate", libc::EACCES);
     assert!(matches!(
-        fixture
-            .store
-            .export_selected(&selector, None, &fixture.context),
+        fixture.store.export(&selector, None, &fixture.context),
         Err(Error::ResolutionIncomplete { .. })
     ));
     fixture.store.remove(&fixture.reference).unwrap();
     assert!(matches!(
-        fixture
-            .store
-            .export_selected(&selector, None, &fixture.context),
+        fixture.store.export(&selector, None, &fixture.context),
         Err(Error::DigestMissing(_))
     ));
 }
@@ -919,8 +883,8 @@ fn transfer_worker() {
     } else if operation == "import" {
         store
             .import(
-                "localhost/source:mutable",
-                Some(&reference),
+                &parse_selector("localhost/source:mutable"),
+                Some(&parse_selector(reference.as_str())),
                 &context,
                 &ImportOptions {
                     replace: true,
@@ -930,15 +894,19 @@ fn transfer_worker() {
             .unwrap();
     } else if operation == "digest-export" {
         store
-            .export_selected(
-                &ImageSelector::Digest(Sha256Digest::new(format!("sha256:{ROOT}")).unwrap()),
-                Some("localhost/output:tag"),
+            .export(
+                &parse_selector(format!("example/tool@sha256:{ROOT}")),
+                Some(&parse_selector("localhost/output:tag")),
                 &context,
             )
             .unwrap();
     } else {
         store
-            .export(&reference, Some("localhost/output:tag"), &context)
+            .export(
+                &parse_selector(reference.as_str()),
+                Some(&parse_selector("localhost/output:tag")),
+                &context,
+            )
             .unwrap();
     }
 }
@@ -1109,4 +1077,199 @@ fn orphaned_transfer_retains_store_and_ref_locks_and_inherits_environment() {
             1
         );
     }
+}
+
+#[test]
+fn digest_aware_import_naming_reports_ignored_digests_and_preserves_source_selection() {
+    let digested = format!("alpine@sha256:{ID}");
+    let combined = format!("alpine:old@sha256:{ID}");
+    let destination_digest = format!("renamed@sha256:{CONFIG_DIGEST}");
+    let destination_both = format!("renamed:release@sha256:{CONFIG_DIGEST}");
+    for (source, destination, expected) in [
+        (digested.as_str(), None, "alpine:aaaaaaaaaaaa"),
+        (
+            digested.as_str(),
+            Some(destination_digest.as_str()),
+            "renamed:aaaaaaaaaaaa",
+        ),
+        (
+            digested.as_str(),
+            Some(destination_both.as_str()),
+            "renamed:release",
+        ),
+        (digested.as_str(), Some("renamed:tag"), "renamed:tag"),
+        (combined.as_str(), None, "alpine:old"),
+        (
+            "alpine:latest",
+            Some(destination_both.as_str()),
+            "renamed:release",
+        ),
+        (
+            "registry.example:5000/team/tool:latest",
+            None,
+            "registry.example:5000/team/tool:latest",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let source = parse_selector(source);
+        let destination = destination.map(parse_selector);
+        let imported = fixture
+            .store
+            .import(
+                &source,
+                destination.as_ref(),
+                &fixture.context,
+                &ImportOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(imported.local_ref.as_str(), expected);
+        assert_eq!(imported.stored_root.hex(), ROOT);
+        assert_eq!(imported.image_id.as_str(), ID);
+        assert_eq!(
+            imported.ignored_destination_digest.as_ref(),
+            destination.as_ref().and_then(ImageSelector::digest)
+        );
+        let guard = fixture.store.prepare(Operation::Export).unwrap();
+        let ref_guard = guard.lock_ref(&imported.local_ref).unwrap();
+        let metadata = refs::read(&ref_guard).unwrap().metadata;
+        assert!(
+            matches!(metadata.acquisition, Acquisition::Import { source: recorded, .. }
+                        if recorded == source.as_str())
+        );
+        drop(ref_guard);
+        drop(guard);
+        let calls = fixture.log();
+        let inspection = calls.iter().find(|call| call["tool"] == "podman").unwrap();
+        let selected = if let Some(digest) = source.digest() {
+            format!("{}@{digest}", source.name())
+        } else {
+            source.to_string()
+        };
+        assert_eq!(
+            inspection["args"].as_array().unwrap().last().unwrap(),
+            &selected
+        );
+        let copy = calls.last().unwrap()["args"].as_array().unwrap();
+        let copied_source = if source.digest().is_some() {
+            selected.as_str()
+        } else {
+            ID
+        };
+        assert!(copy.contains(&json!(format!("containers-storage:{copied_source}"))));
+        // The source digest determines naming, never an alternate store identity.
+        if let Some(digest) = source.digest() {
+            let alias = parse_selector(format!("{}@{digest}", imported.local_ref.name()));
+            assert!(matches!(
+                fixture.store.export(&alias, None, &fixture.context),
+                Err(Error::DigestMissing(_))
+            ));
+        }
+    }
+}
+
+#[test]
+fn generated_tag_collisions_require_explicit_replacement_without_alternative_tags() {
+    let fixture = Fixture::new();
+    let one = parse_selector(format!("alpine@sha256:{ID}"));
+    let two = parse_selector(format!("alpine@sha256:{}b", &ID[..63]));
+    let first = fixture
+        .store
+        .import(&one, None, &fixture.context, &ImportOptions::default())
+        .unwrap();
+    let calls = fixture.log().len();
+    assert!(
+        matches!(fixture.store.import(&two, None, &fixture.context, &ImportOptions::default()),
+                     Err(Error::RefExists(reference)) if reference == first.local_ref)
+    );
+    assert_eq!(fixture.log().len(), calls);
+    let replaced = fixture
+        .store
+        .import(
+            &two,
+            None,
+            &fixture.context,
+            &ImportOptions {
+                replace: true,
+                notes: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(replaced.local_ref, first.local_ref);
+    assert_eq!(fixture.store.list().unwrap().entries.len(), 1);
+}
+
+#[test]
+fn qualified_resolution_excludes_other_repositories_and_their_damage() {
+    let fixture = Fixture::new();
+    let imported = fixture.import(false).unwrap();
+    let other = parse_selector("docker.io/library/example/tool:tag");
+    fixture
+        .store
+        .import(
+            &parse_selector("source:tag"),
+            Some(&other),
+            &fixture.context,
+            &ImportOptions::default(),
+        )
+        .unwrap();
+    let selected = parse_selector(format!("example/tool:nonexistent@{}", imported.stored_root));
+    assert_eq!(
+        fixture
+            .store
+            .export(&selected, None, &fixture.context)
+            .unwrap()
+            .local_ref,
+        fixture.reference
+    );
+    let other_ref = LocalRef::new(other.reference()).unwrap();
+    let raw = fs::canonicalize(fixture.store.layout.ref_entry(&other_ref)).unwrap();
+    fs::write(raw.join("metadata.json"), b"{").unwrap();
+    let absent = parse_selector(format!("example/tool@sha256:{}", "f".repeat(64)));
+    let error = fixture
+        .store
+        .export(&absent, None, &fixture.context)
+        .unwrap_err();
+    assert!(matches!(&error, Error::DigestMissing(selector) if selector == &absent));
+    assert!(error.to_string().contains(absent.as_str()));
+    fixture.store.remove(&fixture.reference).unwrap();
+    assert!(matches!(
+        fixture.store.export(&selected, None, &fixture.context),
+        Err(Error::DigestMissing(_))
+    ));
+    let damaged = parse_selector(format!("{}@{}", other.name(), imported.stored_root));
+    assert!(
+        matches!(fixture.store.export(&damaged, None, &fixture.context),
+                     Err(Error::ResolutionIncomplete { selector, diagnostics })
+                     if selector == damaged && diagnostics.len() == 1)
+    );
+}
+
+#[test]
+fn export_forwards_combined_destination_and_propagates_tool_failure() {
+    let mut fixture = Fixture::new();
+    fixture.import(false).unwrap();
+    fixture.config["fail"] = json!(true);
+    fixture.save();
+    let destination = parse_selector(format!("output:release@sha256:{ID}"));
+    assert!(matches!(
+        fixture.store.export(
+            &parse_selector(fixture.reference.as_str()),
+            Some(&destination),
+            &fixture.context
+        ),
+        Err(Error::ToolFailed {
+            operation: "export image",
+            ..
+        })
+    ));
+    let calls = fixture.log();
+    assert_eq!(
+        calls.last().unwrap()["args"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap(),
+        &format!("containers-storage:{destination}")
+    );
+    assert!(!fixture.store.list().unwrap().has_errors());
 }
