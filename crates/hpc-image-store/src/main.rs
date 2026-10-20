@@ -26,20 +26,20 @@ struct Cli {
 #[derive(Subcommand)]
 enum Action {
     Import {
-        #[arg(value_parser = plain_image)]
-        source: String,
-        /// Destination store ref; defaults to the source, which must include a tag.
-        local_ref: Option<LocalRef>,
+        /// Containers-storage name[:tag][@sha256:digest]; a tag or digest is required.
+        source: ImageSelector,
+        /// Destination defaults to the source; retain its tag or use the source digest's first 12 hex digits. Explicit destination digests are ignored.
+        destination: Option<ImageSelector>,
         #[arg(long)]
         replace: bool,
         #[arg(long)]
         notes: Option<String>,
     },
     Export {
+        /// Stored name[:tag][@sha256:digest]; a digest overrides the tag within this repository.
         selector: ImageSelector,
-        /// Destination containers-storage image; defaults to the source selector.
-        #[arg(value_parser = plain_image)]
-        destination: Option<String>,
+        /// Destination containers-storage image; defaults to the source selector. Digests are enforced by Skopeo.
+        destination: Option<ImageSelector>,
     },
     /// List committed refs without checking their image content.
     List {
@@ -59,22 +59,6 @@ enum ListFormat {
     Podman,
     Full,
     Json,
-}
-fn plain_image(value: &str) -> Result<String, String> {
-    if value.is_empty()
-        || value.starts_with('-')
-        || value.contains(['[', ']'])
-        || value.contains("://")
-        || value
-            .bytes()
-            .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
-    {
-        return Err(
-            "use a plain containers-storage image name or ID without transport or storage settings"
-                .into(),
-        );
-    }
-    Ok(value.into())
 }
 fn parse_platform(value: &str) -> Result<Platform, String> {
     let fields: Vec<_> = value.split('/').collect();
@@ -104,16 +88,22 @@ fn execute(cli: Cli) -> hpc_image_store::Result<bool> {
     match cli.command {
         Action::Import {
             source,
-            local_ref,
+            destination,
             replace,
             notes,
         } => {
             let report = store.import(
                 &source,
-                local_ref.as_ref(),
+                destination.as_ref(),
                 &context,
                 &ImportOptions { replace, notes },
             )?;
+            if let Some(digest) = &report.ignored_destination_digest {
+                eprintln!(
+                    "hpc-image-store: notice: ignoring import destination digest {digest}; {} names the completed stored root {}",
+                    report.local_ref, report.stored_root
+                );
+            }
             for warning in &report.cleanup_warnings {
                 eprintln!(
                     "hpc-image-store: warning: {}: {}",
@@ -137,7 +127,7 @@ fn execute(cli: Cli) -> hpc_image_store::Result<bool> {
             selector,
             destination,
         } => {
-            let report = store.export_selected(&selector, destination.as_deref(), &context)?;
+            let report = store.export(&selector, destination.as_ref(), &context)?;
             if cli.json {
                 println!(
                     "{}",
@@ -197,17 +187,6 @@ fn usage_error(message: impl std::fmt::Display) -> ! {
 }
 fn main() {
     let cli = Cli::parse();
-    if let Action::Import {
-        source,
-        local_ref: None,
-        ..
-    } = &cli.command
-        && let Err(error) = LocalRef::new(source.as_str())
-    {
-        usage_error(format!(
-            "an explicit destination ref is required for source {source:?}: {error}"
-        ));
-    }
     if let Action::List { format, digests } = &cli.command {
         if cli.json && format.is_some_and(|format| format != ListFormat::Json) {
             usage_error("--json conflicts with --format podman or full");
@@ -220,6 +199,12 @@ fn main() {
         Ok(true) => (),
         Ok(false) => std::process::exit(1),
         Err(error) => {
+            if matches!(
+                error,
+                hpc_image_store::Error::InvalidImportDestination { .. }
+            ) {
+                usage_error(error);
+            }
             eprintln!("hpc-image-store: {error}");
             if let hpc_image_store::Error::ResolutionIncomplete { diagnostics, .. } = &error {
                 for diagnostic in diagnostics {

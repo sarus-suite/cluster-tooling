@@ -43,7 +43,6 @@ fn invalid_implicit_import_destination_is_usage_failure() {
         "alpine",
         &"a".repeat(64),
         &format!("sha256:{}", "a".repeat(64)),
-        "registry.example:5000/team/tool:latest",
     ] {
         let output = cli()
             .arg("--store")
@@ -60,17 +59,14 @@ fn invalid_implicit_import_destination_is_usage_failure() {
             .unwrap();
         assert_eq!(output.status.code(), Some(2));
         assert!(output.stdout.is_empty());
-        assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("an explicit destination ref is required")
-        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("invalid value"));
         assert!(!root.exists());
     }
 }
 
 #[test]
 fn command_help_describes_optional_destinations() {
-    for (action, positional) in [("import", "[LOCAL_REF]"), ("export", "[DESTINATION]")] {
+    for (action, positional) in [("import", "[DESTINATION]"), ("export", "[DESTINATION]")] {
         let output = cli().args([action, "--help"]).output().unwrap();
         assert!(output.status.success());
         let help = String::from_utf8(output.stdout).unwrap();
@@ -308,7 +304,7 @@ fn inventory_formats_and_digest_export_use_the_collected_identities() {
     }
     let output = fixture
         .command()
-        .args(["--json", "export", root])
+        .args(["--json", "export", &format!("tool:ignored@{root}")])
         .output()
         .unwrap();
     assert!(
@@ -318,10 +314,10 @@ fn inventory_formats_and_digest_export_use_the_collected_identities() {
     );
     let exported: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(exported["local_ref"], "tool:t");
-    assert_eq!(exported["destination"], root);
+    assert_eq!(exported["destination"], format!("tool:ignored@{root}"));
     let absent = fixture
         .command()
-        .args(["export", config, "output:tag"])
+        .args(["export", &format!("tool@{config}"), "output:tag"])
         .output()
         .unwrap();
     assert_eq!(absent.status.code(), Some(1));
@@ -516,7 +512,7 @@ fn cli_transfers_accept_transport_named_and_unqualified_images() {
         "oci:latest",
         "oci:path",
         "containers-storage:latest",
-        "alpine",
+        "registry.example:5000/team/tool:latest",
         "alpine:latest",
     ]
     .into_iter()
@@ -717,4 +713,87 @@ fn exercise_cleanup_warning() {
         let _: serde_json::Value = serde_json::from_slice(&exported.stdout).unwrap();
         assert!(exported.stderr.is_empty());
     }
+}
+
+#[test]
+fn import_digest_notices_keep_json_clean_and_invalid_naming_is_usage_failure() {
+    let fixture = InventoryFixture::new();
+    let digest = format!("sha256:{}", "b".repeat(64));
+    for (index, json) in [false, true].into_iter().enumerate() {
+        let destination = format!("renamed:release{index}@{digest}");
+        let mut command = fixture.command();
+        if json {
+            command.arg("--json");
+        }
+        let output = command
+            .args(["import", "source:tag", &destination])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let notice = String::from_utf8_lossy(&output.stderr);
+        assert!(notice.contains("ignoring import destination digest") && notice.contains(&digest));
+        if json {
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["ignored_destination_digest"], digest);
+            assert_eq!(report["local_ref"], format!("renamed:release{index}"));
+        }
+    }
+    let root = fixture.directory.path().join("invalid-store");
+    let output = cli()
+        .arg("--store")
+        .arg(&root)
+        .args([
+            "--podman",
+            "/unavailable/podman",
+            "--skopeo",
+            "/unavailable/skopeo",
+            "import",
+            "source:tag",
+            &format!("renamed@{digest}"),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("destination digest is ignored"));
+    assert!(!root.exists());
+}
+
+#[test]
+fn cli_digest_import_generates_source_tag_and_remove_rejects_digest_selectors() {
+    let fixture = InventoryFixture::new();
+    let digest = format!("sha256:{}", "b".repeat(64));
+    let source = format!("alpine@{digest}");
+    let output = fixture
+        .command()
+        .args(["--json", "import", &source])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["local_ref"], "alpine:bbbbbbbbbbbb");
+    assert!(report["ignored_destination_digest"].is_null());
+    for reference in [source, format!("alpine:bbbbbbbbbbbb@{digest}")] {
+        let output = fixture
+            .command()
+            .args(["remove", &reference])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+    }
+    let output = fixture
+        .command()
+        .args(["remove", "alpine:bbbbbbbbbbbb"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
 }

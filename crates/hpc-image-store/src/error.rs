@@ -23,13 +23,13 @@ impl std::fmt::Display for NamespaceChange {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("no committed ref selects stored-root digest {0}")]
-    DigestMissing(crate::Sha256Digest),
+    #[error("no committed ref selects stored root {0}")]
+    DigestMissing(crate::ImageSelector),
     #[error(
-        "cannot completely resolve stored-root digest {digest}; damaged or unreadable namespace entries remain"
+        "cannot completely resolve stored root {selector}; damaged or unreadable namespace entries remain"
     )]
     ResolutionIncomplete {
-        digest: crate::Sha256Digest,
+        selector: crate::ImageSelector,
         diagnostics: Vec<crate::ListDiagnostic>,
     },
     #[error("invalid OCI transfer JSON at {path}: {source}")]
@@ -40,6 +40,15 @@ pub enum Error {
     },
     #[error("invalid transfer argument: {0}")]
     InvalidTransfer(String),
+    #[error("invalid image selector {value:?}: {reason}")]
+    InvalidSelector { value: String, reason: &'static str },
+    #[error(
+        "import destination {destination} requires a tag because source {source_selector} has no explicit digest; the destination digest is ignored and cannot supply a generated tag"
+    )]
+    InvalidImportDestination {
+        source_selector: String,
+        destination: String,
+    },
     #[error("{executable} lacks required capability {capability}")]
     ToolCapability {
         executable: PathBuf,

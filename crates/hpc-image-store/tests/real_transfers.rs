@@ -20,6 +20,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn parse_selector(value: impl AsRef<str>) -> ImageSelector {
+    ImageSelector::new(value.as_ref()).unwrap()
+}
+
 fn run(command: &mut Command) -> Vec<u8> {
     let output = command.output().unwrap();
     assert!(
@@ -262,8 +266,8 @@ fn real_rootless_round_trip() {
     let reference = LocalRef::new("test/one:tag").unwrap();
     let report = store
         .import(
-            &source,
-            Some(&reference),
+            &parse_selector(&source),
+            Some(&parse_selector(reference.as_str())),
             &context,
             &ImportOptions::default(),
         )
@@ -288,8 +292,8 @@ fn real_rootless_round_trip() {
     );
     assert!(matches!(
         store.import(
-            &source,
-            Some(&reference),
+            &parse_selector(&source),
+            Some(&parse_selector(reference.as_str())),
             &context,
             &ImportOptions::default()
         ),
@@ -317,7 +321,12 @@ fn real_rootless_round_trip() {
     let age = fs::metadata(&shared_layer).unwrap().modified().unwrap();
     let second = LocalRef::new("test/two:tag").unwrap();
     store
-        .import(&other, Some(&second), &context, &ImportOptions::default())
+        .import(
+            &parse_selector(&other),
+            Some(&parse_selector(second.as_str())),
+            &context,
+            &ImportOptions::default(),
+        )
         .unwrap();
     assert_eq!(
         fs::read_dir(directory.join("store/tmp")).unwrap().count(),
@@ -329,9 +338,9 @@ fn real_rootless_round_trip() {
         age
     );
     store
-        .export_selected(
-            &ImageSelector::Digest(report.stored_root.clone()),
-            Some(&output),
+        .export(
+            &parse_selector(format!("test/one@{}", report.stored_root)),
+            Some(&parse_selector(&output)),
             &TransferContext {
                 podman: "/unavailable/podman".into(),
                 ..context.clone()
@@ -343,6 +352,45 @@ fn real_rootless_round_trip() {
         .arg(format!("containers-storage:{output}"))))
     .unwrap();
     assert_eq!(config["config"]["Env"][0], "MARKER=one");
+    // Select the actual containers-storage manifest, rather than the fixture's
+    // original representation. Import may change this digest through compression.
+    let source_digest = String::from_utf8(run(Command::new("skopeo")
+        .args(["inspect", "--format", "{{.Digest}}"])
+        .arg(format!("containers-storage:{source}"))))
+    .unwrap();
+    let source_digest = source_digest.trim();
+    let digest_source = parse_selector(format!("{prefix}:nonexistent@{source_digest}"));
+    let digested = store
+        .import(&digest_source, None, &context, &ImportOptions::default())
+        .unwrap();
+    assert_eq!(digested.local_ref.as_str(), format!("{prefix}:nonexistent"));
+    assert_eq!(digested.image_id, report.image_id);
+    assert!(digested.ignored_destination_digest.is_none());
+    let generated_source = parse_selector(format!("{prefix}@{source_digest}"));
+    let generated = store
+        .import(&generated_source, None, &context, &ImportOptions::default())
+        .unwrap();
+    assert_eq!(
+        generated.local_ref.as_str(),
+        format!("{prefix}:{}", &source_digest[7..19])
+    );
+    assert_eq!(generated.image_id, report.image_id);
+    let qualified = parse_selector(format!("test/one:ignored@{}", report.stored_root));
+    let matching = parse_selector(format!("{output}@{}", report.stored_root));
+    store.export(&qualified, Some(&matching), &context).unwrap();
+    let mismatch = parse_selector(format!(
+        "{prefix}:digest-mismatch@sha256:{}",
+        "f".repeat(64)
+    ));
+    let failed = store
+        .export(&qualified, Some(&mismatch), &context)
+        .unwrap_err();
+    assert!(
+        matches!(&failed, Error::ToolFailed { operation: "export image", stderr, .. }
+                     if stderr.contains("does not match expected digest")
+                         || stderr.contains("would not match destination reference")),
+        "{failed}"
+    );
     // Exercise the executable with real tools as well as the library API.
     let imported: Value =
         serde_json::from_slice(&run(Command::new(env!("CARGO_BIN_EXE_hpc-image-store"))
@@ -379,8 +427,8 @@ fn real_rootless_round_trip() {
     };
     store
         .import(
-            &source,
-            Some(&reference),
+            &parse_selector(&source),
+            Some(&parse_selector(reference.as_str())),
             &overridden,
             &ImportOptions {
                 replace: true,
@@ -395,8 +443,8 @@ fn real_rootless_round_trip() {
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
     let pinned = store
         .import(
-            &source,
-            Some(&reference),
+            &parse_selector(&source),
+            Some(&parse_selector(reference.as_str())),
             &TransferContext {
                 podman: wrapper,
                 ..context.clone()
@@ -413,7 +461,13 @@ fn real_rootless_round_trip() {
         fs::read_dir(directory.join("store/tmp")).unwrap().count(),
         0
     );
-    store.export(&reference, Some(&output), &context).unwrap();
+    store
+        .export(
+            &parse_selector(reference.as_str()),
+            Some(&parse_selector(&output)),
+            &context,
+        )
+        .unwrap();
     let config: Value = serde_json::from_slice(&run(Command::new("skopeo")
         .args(["inspect", "--config"])
         .arg(format!("containers-storage:{output}"))))
@@ -428,8 +482,8 @@ fn real_rootless_round_trip() {
         .count();
     assert!(matches!(
         store.import(
-            &other,
-            Some(&reference),
+            &parse_selector(&other),
+            Some(&parse_selector(reference.as_str())),
             &TransferContext {
                 podman: wrapper,
                 ..context.clone()
@@ -454,14 +508,27 @@ fn real_rootless_round_trip() {
         fs::read_dir(directory.join("store/tmp")).unwrap().count(),
         1
     );
-    store.export(&reference, Some(&output), &context).unwrap();
+    store
+        .export(
+            &parse_selector(reference.as_str()),
+            Some(&parse_selector(&output)),
+            &context,
+        )
+        .unwrap();
     // Empty the destination image cache first: otherwise Skopeo may legitimately
     // reuse its existing layer without reading the missing source blob.
-    run(Command::new("podman").args(["image", "rm", "--force", &output]));
-    run(Command::new("podman").args(["image", "rm", "--force", &format!("{prefix}:orphan")]));
+    // Digest destinations can retain additional names for the same image.
+    // This context is disposable: empty it completely before testing a missing
+    // source layer, then prove no cached image can satisfy the export.
+    run(Command::new("podman").args(["image", "rm", "--all", "--force"]));
+    assert!(run(Command::new("podman").args(["images", "--quiet"])).is_empty());
     // Missing content is detected by Skopeo on export, without a wrapper graph check.
     fs::remove_file(&shared_layer).unwrap();
-    let failed_export = store.export(&reference, Some(&format!("{prefix}:broken")), &context);
+    let failed_export = store.export(
+        &parse_selector(reference.as_str()),
+        Some(&parse_selector(format!("{prefix}:broken"))),
+        &context,
+    );
     assert!(
         matches!(
             failed_export,

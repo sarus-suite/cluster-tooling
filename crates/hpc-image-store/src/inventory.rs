@@ -196,9 +196,9 @@ pub(crate) fn select<'a>(
     guard: &'a StoreGuard<'a>,
     selector: &ImageSelector,
 ) -> Result<RefGuard<'a>> {
-    let digest = match selector {
-        ImageSelector::LocalRef(reference) => return guard.lock_ref(reference),
-        ImageSelector::Digest(digest) => digest,
+    let digest = match selector.digest() {
+        None => return guard.lock_ref(&LocalRef::new(selector.reference())?),
+        Some(digest) => digest,
     };
     let mut discovered = discovery::discover(guard)?;
     fsutil::checkpoint("selector.discovered", guard.layout().root())?;
@@ -207,6 +207,13 @@ pub(crate) fn select<'a>(
         .sort_by(|a, b| a.local_ref.cmp(&b.local_ref).then(a.path.cmp(&b.path)));
     let mut diagnostics = Vec::new();
     for item in discovered.entries {
+        if item
+            .local_ref
+            .as_ref()
+            .is_some_and(|reference| reference.name() != selector.name())
+        {
+            continue;
+        }
         if let Some(error) = item.diagnostic {
             diagnostics.push(ListDiagnostic::from_error(
                 &item.path,
@@ -245,10 +252,10 @@ pub(crate) fn select<'a>(
     }
     if !discovered.complete || !diagnostics.is_empty() {
         Err(Error::ResolutionIncomplete {
-            digest: digest.clone(),
+            selector: selector.clone(),
             diagnostics,
         })
     } else {
-        Err(Error::DigestMissing(digest.clone()))
+        Err(Error::DigestMissing(selector.clone()))
     }
 }

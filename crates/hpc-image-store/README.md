@@ -8,8 +8,8 @@ storage using Skopeo to copy the image data.
 
 The crate provides a synchronous Rust library and the `hpc-image-store` CLI.
 The library is private to this workspace and is not published as a package.
-Stages 1–4 provide import, export by name or stored-root digest, inventory, and
-explicit-name removal. Inventory formatting can match Podman's image table or
+Stages 1–4.1 provide import, export by name or repository-qualified stored-root
+digest, inventory, and explicit-name removal. Inventory formatting can match Podman's image table or
 show richer fields and JSON diagnostics. Pull, check, and prune remain future
 operations, and there is no `init` CLI action. Recorded validation results are
 listed below.
@@ -69,14 +69,42 @@ hpc-image-store --store /scratch/me/images --json export analysis/tool:release l
 hpc-image-store --store /scratch/me/images --platform linux/arm64/v8 import localhost/tool:latest analysis/tool:arm64
 ```
 
-The destination is optional for both operations and defaults to the source
-argument verbatim. An import source must be a valid store ref to use this
-default. Untagged names, image IDs, and registry names with ports require an
-explicit destination ref; no tag or name is inferred. Export defaults to its
-source selector, rather than the original import source recorded in metadata.
-Export also accepts a bare stored-root `sha256:…` digest. If its destination is
-omitted, that digest spelling is passed verbatim to containers-storage; tool
-failures are reported normally. Supply a destination name to restore under a tag.
+Import and export use `name[:tag][@digest]` selectors. A repository name and
+at least one of tag or digest are required; names with registry ports work too.
+Bare digests, image IDs, untagged names without digests, transport URLs, and
+embedded storage settings are rejected before accessing the store. Names such
+as `oci:latest` remain ordinary repository/tag pairs. No `latest` tag or registry
+prefix is inferred.
+
+For import, an omitted destination uses the source selector. Keep a tag in that
+effective destination; otherwise generate a tag from the first 12 hexadecimal
+characters of the explicit source digest. An explicit tagless destination is
+invalid when the source has no digest. Digests in explicit import destinations
+are ignored and reported, including when the operation succeeds. They neither
+supply generated tags nor assert the stored root. Generated tags can collide;
+collisions fail unless replacement is explicit, and no alternative tag is chosen.
+
+For example, importing `alpine@sha256:<D>` without a destination commits
+`alpine:<first12(D)>`. A destination `renamed@sha256:<E>` instead commits
+`renamed:<first12(D)>`, while `renamed:release@sha256:<E>` commits
+`renamed:release`; both explicit destination digests are ignored. Importing
+`alpine:latest` into `renamed@sha256:<E>` fails because no source digest supplies
+a generated tag. Here `D` and `E` stand for full lowercase hexadecimal digests.
+If import converts source root `D` into stored root `R`, subsequent lookup uses
+`alpine@sha256:<R>`; the generated tag still comes from `D`.
+
+Export defaults to the supplied source selector verbatim, including its tag and
+digest, rather than acquisition metadata or the ref chosen during lookup.
+Export destination digests are passed through to Skopeo for enforcement, and a
+digest mismatch fails the export.
+
+When exporting an image by digest or under a different tag, if an image with the
+same OCI image ID and content already exists in the destination containers-storage
+store, `podman images` continues to show the existing values. Use
+`podman image inspect` to see the added references in `RepoTags`, `RepoDigests`,
+and `NamesHistory`. The image is also runnable using the repository-qualified
+digest supplied as the export destination, such as
+`podman run repository@sha256:<digest>`.
 
 Import fails if the destination ref already exists, including a damaged ref,
 unless `--replace` is supplied. Use `--notes` to attach optional notes to the
@@ -84,15 +112,8 @@ import. `--skopeo PATH` and `--podman PATH` select the tool executables.
 `--platform` accepts `OS/ARCH[/VARIANT]`; without it, Skopeo uses its host
 selection. Selecting a platform does not convert the image's architecture.
 
-Source and destination arguments for containers-storage are image names or IDs.
-Unqualified names, including names without explicit tags, are passed to the
-tools unchanged, and the tools parse and resolve the full image reference.
-Names such as `docker:latest`, `oci:latest`, and `oci:path` are ordinary
-repository/tag pairs; the repository name does not select a transport. Explicit
-URLs such as `docker://example/image` and embedded storage settings are
-rejected. Names inside the persistent filesystem store still require an
-explicit tag. A persistent store path containing `:` receives an explicit
-error because Skopeo's OCI transport cannot address that path.
+A persistent store path containing `:` receives an explicit error because
+Skopeo's OCI transport cannot address that path.
 
 Exit status 0 means success, 1 means an operation failed, and 2 means invalid
 usage. With `--json`, results go to stdout; errors and warnings go to stderr.
@@ -139,13 +160,18 @@ Individual refs are read coherently under locks, without a store-wide snapshot.
 Non-UTF-8 paths use a quoted, byte-escaped representation in report strings;
 Rust reports retain the native `PathBuf` values.
 
-Digest selection scans committed OCI layout roots in local-name order. It uses
-a healthy matching ref despite unrelated damage. Without a match, damage or
-unreadable namespace entries produce incomplete resolution, rather than a claim
-that the digest is absent. Config digests and source provenance never act as
-lookup aliases. Unreferenced CAS content is not a retained digest-only image.
+Digest selection scans committed OCI layout roots in local-name order, limited
+to the selector's literal repository name. A supplied tag is ignored when a
+digest is present: `alpine:old@sha256:<R>` can select `alpine:new`, but never
+`docker.io/library/alpine:new`. A healthy matching ref remains usable despite
+other damage. Without a match, damage in that repository or unreadable namespace
+areas whose repository is unknown produce incomplete resolution. Known damage
+in other repositories does not hide a missing root in the requested repository.
+Config digests and source provenance never act as lookup aliases. Unreferenced
+CAS content is not a retained digest-only image.
 
-Remove requires an explicit local `name:tag`, including for damaged refs. It
+Remove requires an explicit local `name:tag`, including for damaged refs, and
+rejects every digest-bearing selector, including `name:tag@digest`. It
 unlinks that committed name without following its target, saves the namespace
 change, and leaves the retired raw image, shared content and lock files for
 future maintenance. Directories, special files and malformed namespace parents
@@ -155,10 +181,13 @@ missing; list and export never initialize stores.
 
 ### What transfers preserve and validate
 
-Import first runs one `podman image inspect --format '{{.Id}}'` lookup, then
-asks Skopeo to copy that complete image ID. If the source tag moves, the copy
-still uses the chosen ID. If the image is removed before the copy, the import
-fails without retrying by name. The stored metadata comes from the completed
+Import first runs one `podman image inspect --format '{{.Id}}'` lookup.
+For tag-only sources, Skopeo then copies that complete image ID, so moving the
+source tag cannot change the selected image. If the image disappears, import
+fails without retrying by name. For digest-bearing sources, both inspection and
+copy use `name@digest`, omitting any supplied tag. The requested digest remains
+part of Skopeo's argument, while inspection retains source image-ID reporting.
+The stored metadata comes from the completed
 OCI manifest and configuration, rather than from Podman inspection.
 
 Skopeo writes only into a private temporary directory during import, including
@@ -203,29 +232,36 @@ selection. The tools inherit the caller's existing storage context as described
 in the CLI section. Use `ImportOptions` to request replacement or supply notes:
 
 ```no_run
-use hpc_image_store::{ImportOptions, LocalRef, Store, StoreConfig, TransferContext};
+use hpc_image_store::{ImageSelector, ImportOptions, Store, StoreConfig, TransferContext};
 
 let store = Store::new(StoreConfig::new("/scratch/me/images")?);
-let reference = LocalRef::new("analysis/tool:release")?;
+let source = ImageSelector::new("localhost/tool:latest")?;
+let destination = ImageSelector::new("analysis/tool:release")?;
 let context = TransferContext::default();
-let imported = store.import("localhost/tool:latest", Some(&reference), &context,
+let imported = store.import(&source, Some(&destination), &context,
                             &ImportOptions::default())?;
-let exported = store.export(&reference, Some("localhost/restored:latest"), &context)?;
+let restored = ImageSelector::new("localhost/restored:latest")?;
+let exported = store.export(&destination, Some(&restored), &context)?;
 
-// None uses the source verbatim as the destination.
-let imported = store.import("analysis/other:release", None, &context,
-                            &ImportOptions::default())?;
-let exported = store.export(&imported.local_ref, None, &context)?;
+// None uses the source selector; a tagless import source supplies a digest tag.
+let other = ImageSelector::new("analysis/other:release")?;
+let imported = store.import(&other, None, &context, &ImportOptions::default())?;
+let exported = store.export(&other, None, &context)?;
 # Ok::<(), hpc_image_store::Error>(())
 ```
 
-The library accepts `Option<&LocalRef>` for the import destination and
-`Option<&str>` for the export destination. An invalid implicit import ref returns
-a typed validation error before store preparation or tool invocation. The CLI
-reports this as invalid usage with status 2 and asks for an explicit destination.
+Import and export take `&ImageSelector` sources and `Option<&ImageSelector>`
+destinations. `ImageSelector::new` and `FromStr` validate inputs; `as_str` and
+`Display` preserve the spelling. Its `reference`, `name`, `tag`, and `digest`
+accessors expose the components separately. `From<LocalRef>` produces a tagged
+selector; unqualified digest conversion is unsupported. Invalid import naming
+returns `Error::InvalidImportDestination` before store preparation or tool
+invocation, and the CLI reports status 2.
 
 `ImportReport` identifies the local ref, stored root digest, source `ImageId`,
-and content metadata, and includes any `cleanup_warnings`. `ExportReport`
+and content metadata, and includes any `cleanup_warnings`. Its
+`ignored_destination_digest` field identifies a digest ignored in an explicit
+import destination; it is `None` when the destination was omitted. `ExportReport`
 identifies the local ref, stored manifest digest, and destination. The CLI uses
 these reports for its JSON results.
 
@@ -243,11 +279,14 @@ let table_with_digests = format_list_podman(&report, true);
 let full_table = presentation::format_list_full(&report);
 // report.has_errors() includes damaged refs and incomplete enumeration.
 let selector: ImageSelector = "analysis/tool:release".parse()?;
-store.export_selected(&selector, Some("localhost/restored:latest"),
-                      &TransferContext::default())?;
-if let Some(root) = report.entries.iter().find_map(|entry| entry.stored_root.clone()) {
-    store.export_selected(&ImageSelector::Digest(root), Some("localhost/by-digest:latest"),
-                          &TransferContext::default())?;
+let destination = ImageSelector::new("localhost/restored:latest")?;
+store.export(&selector, Some(&destination), &TransferContext::default())?;
+if let Some(entry) = report.entries.iter().find(|entry| entry.stored_root.is_some()
+                                               && entry.local_ref.is_some()) {
+    let root = entry.stored_root.as_ref().unwrap();
+    let name = entry.local_ref.as_ref().unwrap().name();
+    let by_digest = ImageSelector::new(format!("{name}@{root}"))?;
+    store.export(&by_digest, Some(&destination), &TransferContext::default())?;
 }
 # Ok::<(), hpc_image_store::Error>(())
 ```
@@ -257,17 +296,19 @@ flag describes namespace enumeration, separately from damage. Store-level
 failures return `Err`; per-ref failures stay in the report. `ListEntry` preserves
 independently readable root and metadata fields when another wrapper file is
 damaged. `RemoveReport` identifies the removed name without estimating reclaimed
-space. `export_selected` returns the existing `ExportReport`, including the
-deterministically chosen local ref. The original named `export` API is retained.
+space. `export` returns `ExportReport`, including the deterministically chosen
+local ref. Stage 4.1 removes `export_selected` and replaces the earlier string
+and named-ref transfer arguments with selectors; callers must update explicitly.
 
 ### Names, digests, and metadata
 
-Local refs use lowercase OCI-style repository paths and explicit,
-case-sensitive tags. Names are limited to 255 ASCII bytes and tags to 128.
-The library does not parse registry domains, supply an implicit `latest` tag,
-or normalize names. The bare spelling `sha256:<64 hex digits>` is reserved for
-digest selectors, even if its hex digits are uppercase.
-`Sha256Digest` values accept only lowercase SHA-256 hex.
+Local refs use the upstream named-reference grammar with explicit, case-sensitive
+tags. Repository paths are lowercase; registry domains may retain uppercase
+letters and numeric ports. Names are limited to 255 ASCII bytes and tags to 128.
+No registry expansion, case normalization, or implicit `latest` is applied.
+The ambiguous bare spelling `sha256:<64 hex digits>` remains reserved and is
+rejected, even with uppercase hex. Ordinary `sha256:latest` names still work.
+`Sha256Digest` accepts only full lowercase SHA-256 hex values.
 
 `StoreMetadata` and `RefMetadata` serialize to JSON, and their `from_json`
 methods check the schema version. Identity values read from JSON undergo the
@@ -623,7 +664,7 @@ scaffolding, parent sync, and marker publication.
 Publication tests use complete zero-layer manifest and image-index fixtures.
 They exercise insertion races and replacement in separate processes,
 termination around the rename boundary, and test-only failure checkpoints at
-insertion and sync steps. Synthetic fixtures use version-2 ref metadata, but
+insertion and sync steps. Synthetic fixtures use version-3 ref metadata, but
 their placeholder acquisition fields do not represent real imports. Fault
 injection is thread-local and unavailable in production builds.
 
@@ -699,6 +740,24 @@ cargo test --locked -p hpc-image-store actual_skopeo_retains_locks_after_parent_
 ```
 
 ### Recorded results and outstanding qualification
+
+On 2026-10-20, stage 4.1 passed 103 tests, including three doctests and both
+real-tool tests, with five internal subprocess helpers ignored. Crate check,
+Clippy with warnings denied, formatting, and diff checks passed. Cargo checks
+used its configured build cache outside the sandbox, and real-tool tests used
+fresh disposable overlay storage with Podman 5.4.2 and Skopeo 1.18.0.
+
+Stage-4.1 coverage includes literal selector parsing and registry ports,
+repository-scoped lookup, deterministic duplicate-root selection, damaged and
+incomplete scans, lock retention during concurrent changes and orphaned copies,
+source-derived tag collisions and replacement, ignored import destination
+digests, and early CLI/library validation. Real acceptance verified imports by
+containers-storage manifest digest, source-derived tags, qualified stored-root
+exports, and matching and mismatching export destination digests. Skopeo may
+reject a mismatch before copying or during its destination digest check; both
+failures are propagated. The fixture empties its verified disposable image
+cache before the missing-content test because digest destinations can retain
+additional names. Store format 1 and ref metadata schema 3 are unchanged.
 
 On 2026-10-18, stage 4 passed the full crate suite: 96 tests passed, including
 three doctests and both real-tool tests, with five internal subprocess helpers
