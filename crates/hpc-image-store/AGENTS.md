@@ -9,9 +9,9 @@ to implement it.
 
 Before planning or changing storage behavior, read the relevant sections of:
 
-- [Filesystem OCI image store design](../../hpc-image-store-design.md): the
+- [Filesystem OCI image store design](docs/hpc-image-store-design.md): the
   agreed behavior, guarantees, and boundaries.
-- [Staged implementation plan](../../hpc-image-store-implementation-plan.md):
+- [Staged implementation plan](docs/hpc-image-store-implementation-plan.md):
   implementation order, stage requirements, and acceptance criteria.
 - [Crate README](README.md): current interfaces, storage layout, initialization,
   coordination, and validation commands.

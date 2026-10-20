@@ -14,9 +14,9 @@ show richer fields and JSON diagnostics. Pull, check, and prune remain future
 operations, and there is no `init` CLI action. Recorded validation results are
 listed below.
 
-The [filesystem image store design](../../hpc-image-store-design.md) describes
+The [filesystem image store design](docs/hpc-image-store-design.md) describes
 the agreed behavior and guarantees. The
-[staged implementation plan](../../hpc-image-store-implementation-plan.md)
+[staged implementation plan](docs/hpc-image-store-implementation-plan.md)
 describes the implementation order and acceptance criteria. These remain the
 primary references for the design and planned work.
 
