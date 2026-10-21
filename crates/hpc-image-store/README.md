@@ -12,8 +12,10 @@ Stages 1–5 provide import, export by name or repository-qualified stored-root
 digest, inventory, read-only graph checking, and explicit-name removal.
 Inventory formatting can match Podman's image table or show richer fields and
 JSON diagnostics. Stage 6.1 adds registry pull of one OCI image manifest with
-its original manifest digest. Prune remains future work, and there is no `init`
-CLI action. Recorded validation results are listed below.
+its original manifest digest. Stage 6.2 requires digest preservation for every
+export, including imported images. Prune remains future work.
+Store initialization is implicit on `import`, `pull` and `remove`, there is no
+`init` CLI action. Recorded validation results are listed below.
 
 Multi-platform stored images, complete-index storage, index-parent metadata
 and inventory, platform-selecting index export, and nested-index source
@@ -53,7 +55,7 @@ podman unshare hpc-image-store --store /scratch/me/images import localhost/tool:
 
 The library does not launch `podman unshare` itself. Before a transfer, it checks
 that Skopeo supports the required shared-blob option, platform flags when a
-platform is selected, and digest preservation when required by image metadata.
+platform is selected, and digest preservation for every export and registry pull.
 
 ### Import and export
 
@@ -103,7 +105,11 @@ If import converts source root `D` into stored root `R`, subsequent lookup uses
 Export defaults to the supplied source selector verbatim, including its tag and
 digest, rather than acquisition metadata or the ref chosen during lookup.
 Export destination digests are passed through to Skopeo for enforcement, and a
-digest mismatch fails the export.
+digest mismatch fails the export. Every export requests `--preserve-digests`,
+including existing imported refs. If Skopeo lacks this capability or cannot
+preserve the stored representation, export fails without retrying under a weaker
+policy. This is stricter than the export behavior before stage 6.2 and needs no
+metadata migration.
 
 When exporting an image by digest or under a different tag, if an image with the
 same OCI image ID and content already exists in the destination containers-storage
@@ -265,9 +271,13 @@ layers and preserves supported existing compression. A content digest identifies
 the exact bytes of an object. Import can change the manifest, layer
 representation, and their digests, so it does not claim to preserve the original
 registry identity. Pull instead preserves one platform-specific OCI image
-manifest and records `Acquisition::Pull` provenance. Its existing export branch
-requests digest preservation; stage 6.2 will qualify that containers-storage
-round trip.
+manifest and records `Acquisition::Pull` provenance. Every export requests
+preservation of the completed stored manifest, regardless of how it was acquired.
+This does not require import to preserve its source representation or promise
+that a later import reconstructs an earlier digest. Imported images receive no
+round-trip identity validation. The opt-in registry test qualifies the pulled
+manifest through containers-storage; production exports rely on Skopeo rather
+than performing post-export digest inspection.
 
 Export validates the small files and pointer that describe the selected ref,
 then relies on Skopeo to report content or transfer failures. Neither import
@@ -354,13 +364,13 @@ index `I` to manifest `A` records the requested selector and
 alias. Metadata and stored size describe the manifest, configuration, and
 unique layers. Store format 1 and ref metadata schema 3 are unchanged.
 
-Stage 6.2 will build on the existing export branch for pull metadata and qualify
-real registry-to-store-to-containers-storage digest preservation. Pulled content
-must preserve its manifest digest or fail. Existing import-acquired export
-behavior, source lookup, optional destinations, destination-digest enforcement,
-and manifest reporting will remain. Export will reject index roots and cannot
-choose another architecture from a single manifest. Persistent refs and metadata
-remain unchanged; partial destination data belongs to containers-storage.
+Stage 6.2 requires preservation of the stored manifest on every export, including
+imported images. Missing tool support or a preservation failure is an error, with
+no fallback copy. Source lookup, optional destinations, destination-digest
+enforcement, and manifest reporting remain unchanged. Export rejects index
+roots and cannot choose another architecture from a single manifest. Persistent
+refs and metadata remain unchanged; partial destination data belongs to
+containers-storage.
 
 Stage 7 will reuse the checker's authoritative graph reader. Any encountered
 index must be traversed completely or block destructive pruning; deferred public
@@ -441,7 +451,9 @@ invocation, and the CLI reports status 2.
 and content metadata, and includes any `cleanup_warnings`. Its
 `ignored_destination_digest` field identifies a digest ignored in an explicit
 import destination; it is `None` when the destination was omitted. `ExportReport`
-identifies the local ref, stored manifest digest, and destination. The CLI uses
+identifies the local ref, stored manifest digest, and destination. `Store::export`
+requires digest preservation for both import and pull provenance and propagates
+capability and transfer errors without fallback. The CLI uses
 these reports for its JSON results.
 
 Inventory and removal need no transfer context. Formatters only turn a collected
@@ -956,7 +968,11 @@ cargo test --locked -p hpc-image-store actual_skopeo_retains_locks_after_parent_
 Ordinary `cargo test` and CI do not contact Docker Hub. All registry edge cases
 use controlled Skopeo fixtures. The following single ignored test performs one
 CLI acquisition of `docker.io/library/alpine:3.23` for `linux/amd64` into a
-temporary store, then verifies metadata, inventory, and checking locally:
+temporary store, then verifies metadata, inventory, checking, and exports
+through real containers-storage. It checks exact manifest bytes and digests
+after named and qualified-digest exports through the library and JSON CLI,
+including omitted and explicit destinations, matching and mismatching destination
+digests, separate configuration image IDs, and unchanged persistent-store state:
 
 ```sh
 cargo test --locked -p hpc-image-store --test registry_pull dockerhub_alpine_smoke -- --ignored --exact --nocapture
@@ -967,14 +983,42 @@ no preliminary registry probe, additional library pull, automatic retry, or
 fallback to another image. Network, authentication, rate-limit, and unsupported
 representation failures remain failures and leave live acquisition qualification
 incomplete. Existing caller authentication may be inherited without modifying
-it. The temporary store is discarded when the test exits. This test does not
-qualify registry-to-containers-storage export; that belongs to stage 6.2.
+it. The test uses the same disposable overlay-storage preparation as the local
+real-transfer test, with an empty-storage check and cleanup even after failure.
+It accepts the same explicit disposable-storage override; caller-supplied storage
+is never reset. The temporary image store is discarded when the test exits.
+Imported images gain no round-trip digest comparisons.
 
 The six ignored subprocess helpers, including `pull_worker`, are invoked only
 by their owning tests. The Docker Hub smoke test is separately ignored for its
 network access. Never use an unfiltered `--ignored` invocation.
 
 ### Recorded results and outstanding qualification
+
+On 2026-10-21, stage 6.2 passed 142 ordinary tests, including five doctests
+and both existing real-tool tests. Six internal subprocess helpers and the
+Docker Hub smoke test were ignored in that run. Crate check, Clippy with warnings
+denied, formatting, and diff checks passed. Controlled export tests cover both
+acquisition kinds, genuinely pulled refs, required capabilities, preservation
+failures without fallback, selector and destination semantics, CLI failures,
+stored-index rejection, and unchanged persistent-store snapshots. Import still
+works without preservation capability, and no imported-image round-trip digest
+comparisons were added.
+
+The extended Docker Hub test was explicitly run once and passed using Podman
+5.4.2 and Skopeo 1.18.0 in fresh disposable overlay storage. Its single
+`docker.io/library/alpine:3.23` acquisition for `linux/amd64` retained manifest
+`sha256:1f3591b8a02ea153f41c5bba878ad477f63ab3d19349762cb77504db02a23e15`
+through four exports using library and JSON CLI calls, named and qualified-digest
+sources, and omitted and explicit destinations. Exact manifest bytes and digest
+matched after each export. A matching destination digest succeeded, a mismatching
+digest failed, and Podman's image ID matched the separately recorded OCI
+configuration digest. Persistent-store snapshots and caller configuration
+remained unchanged. There were no registry probes, retries, or additional pulls;
+test-owned storage was cleaned up. Stage 6.3 availability, pruning, broader
+stage-8 qualification, and Lustre/VAST site testing remain pending. Store format 1
+and ref metadata schema 3 are unchanged. The records below describe earlier stages
+and retain their historical qualification limits.
 
 On 2026-10-21, stage 6.1 passed 138 ordinary tests, including five doctests and
 both existing real-tool tests. Six internal subprocess helpers and the Docker

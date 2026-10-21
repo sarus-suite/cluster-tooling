@@ -1,6 +1,6 @@
 use crate::{
-    Acquisition, ContentMetadata, Error, ImageId, ImageSelector, LocalRef, Platform, RefMetadata,
-    Result, Sha256Digest, Store, fsutil,
+    ContentMetadata, Error, ImageId, ImageSelector, LocalRef, Platform, RefMetadata, Result,
+    Sha256Digest, Store, fsutil,
     initialization::require_directory,
     locks::Operation,
     oci::{self, Descriptor},
@@ -281,6 +281,11 @@ impl Store {
 
     /// Export a committed name or repository-qualified root. An omitted destination
     /// uses the selector verbatim, including its digest spelling.
+    ///
+    /// Every export requires Skopeo to preserve the stored manifest digest,
+    /// including images whose representation changed during import. Missing
+    /// tool support or an inability to preserve that representation is an error;
+    /// the operation never retries without preservation.
     pub fn export(
         &self,
         selector: &ImageSelector,
@@ -294,13 +299,10 @@ impl Store {
         let ref_guard = crate::inventory::select(&store_guard, selector)?;
         let resolved = refs::read(&ref_guard)?;
         require_manifest(&resolved.root, &resolved.raw_image)?;
-        let preserve = matches!(resolved.metadata.acquisition, Acquisition::Pull { .. });
-        context.check_capabilities("--src-shared-blob-dir", preserve)?;
+        context.check_capabilities("--src-shared-blob-dir", true)?;
         let mut command = context.copy_command();
-        if preserve {
-            command.arg("--preserve-digests");
-        }
         command
+            .arg("--preserve-digests")
             .arg("--src-shared-blob-dir")
             .arg(self.layout.blobs().parent().unwrap())
             .arg(oci_argument(&resolved.raw_image)?)

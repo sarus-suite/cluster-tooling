@@ -1,19 +1,44 @@
 # Staged implementation of the HPC OCI image store
 
-Status: stages 1–5 and 6.1 are implemented in `crates/hpc-image-store`.
+Status: stages 1–5, 6.1, and 6.2 are implemented in `crates/hpc-image-store`.
 The crate provides single-platform containers-storage import and export,
 registry pull preserving one OCI manifest digest, inventory, read-only graph
 checking, and explicit-name removal. Stage 4.1 supplies common selectors and
 repository-scoped stored-root lookup; stage 5 checks complete supported OCI
 graphs, including nested indexes. Stage 6.1 adds raw registry resolution,
 bounded platform selection, and separate registry configuration while retaining
-store format 1 and ref metadata schema 3. Stage 6.2 export qualification,
-stage 6.3 library image availability, and stages 7–8 remain planned.
+store format 1 and ref metadata schema 3. Stage 6.2 requires digest preservation
+on every export, including imported images, and qualifies the registry round
+trip. Stage 6.3 library image availability and stages 7–8 remain planned.
 Stage 8 completes the first proof of concept (PoC).
 Multi-platform stored images and complete-index storage remain outside that
 PoC. Lustre/VAST behavior remains unqualified pending site tests.
 
-Design baseline: [Filesystem OCI Image Store Design](hpc-image-store-design.md), version 1.7.
+Design baseline: [Filesystem OCI Image Store Design](hpc-image-store-design.md), version 1.8.
+
+Implementation update, 2026-10-21: stage 6.2 passed 142 ordinary tests,
+including five doctests and both existing real-tool tests. Six internal
+subprocess helpers and the Docker Hub smoke test were ignored. Crate check,
+Clippy with warnings denied, formatting, and diff checks passed. Every export
+now requires `--preserve-digests`, including existing imported refs, and returns
+capability or preservation failures without fallback. Import acquisition still
+permits representation changes; no imported-image round-trip digest comparisons
+were added. Controlled tests cover both acquisition kinds, genuine pull results,
+selectors and destination digests, CLI failures, stored-index rejection, and
+persistent-store snapshots across successful and failed exports.
+
+The extended Docker Hub smoke test passed on its only attempt using Podman 5.4.2
+and Skopeo 1.18.0 with fresh disposable overlay storage. One acquisition of
+`docker.io/library/alpine:3.23` for `linux/amd64` supplied named and qualified-digest
+exports through the library and JSON CLI, with omitted and explicit destinations.
+Exact manifest bytes and digest were preserved. Matching destination digests
+succeeded, a mismatch failed, the configuration image ID was checked separately,
+and persistent-store snapshots and caller configuration remained unchanged.
+No registry probes, retries, or additional pulls were performed.
+Test-owned storage was cleaned up. Store format 1 and ref metadata schema 3 remain
+unchanged. Stage 6.3, pruning, broader stage-8 qualification, and Lustre/VAST site
+testing remain pending.
+Earlier planning revisions and validation results below are historical records.
 
 Planning revision, 2026-10-21: add library-only image availability in stage 6.3
 to help callers decide whether to acquire an image. Stages 7 and 8 retain
@@ -196,7 +221,7 @@ metadata. Explicit destinations retain their existing behavior.
 - Use OCI compression defaults: compress uncompressed layers and preserve supported existing compression. Accept representation and digest changes.
 - Import one platform, defaulting to Skopeo's host selection; allow an explicit OS/architecture/variant override. Reject an unexpected index root before publication.
 - Construct metadata from the completed root, manifest/config, acquisition timestamp, optional image creation time, platform, unique stored-content size, containers-storage source information, and optional notes.
-- Keep the metadata schema versioned. Separate cached fields derived from OCI content from operational metadata. Record acquisition kind as import or pull so export can apply the required digest-preservation policy; do not introduce alternate digest lookup keys.
+- Keep the metadata schema versioned. Separate cached fields derived from OCI content from operational metadata. Record acquisition kind as import or pull for provenance; stage 6.2 requires digest preservation on every export; do not introduce alternate digest lookup keys.
 - Fail when the destination exists unless replacement is explicit. Export performs the small ref validation and lets Skopeo detect transfer/content failures.
 - After successful durable import publication, remove only that operation's private staging tree without following symlinks, then sync `tmp/` while both locks remain held. Return removal or cleanup-sync failures as structured cleanup warnings on a successful import report; the CLI reports them on stderr and in JSON with status 0. This cleanup is brought forward from stage 7. Failed, interrupted, or publication-durability-error operations retain staging; export creates none.
 - Hold locks throughout transfers, including when the parent terminates while Skopeo remains running. Do not independently hash layers or run the full checker around copies.
@@ -302,7 +327,7 @@ never generate an alternative tag.
 #### Export and later-stage alignment
 
 - Default an omitted export destination to the supplied source selector, preserving its spelling rather than using acquisition metadata or the ref selected during lookup.
-- Pass export destination digests through to Skopeo and report digest-mismatch failures; never silently discard them. Follow the upstream [destination digest check](https://github.com/containers/image/blob/main/storage/storage_dest.go). Retain the preservation policy based on acquisition kind.
+- Pass export destination digests through to Skopeo and report digest-mismatch failures; never silently discard them. Follow the upstream [destination digest check](https://github.com/containers/image/blob/main/storage/storage_dest.go). Stage 6.2 requires preservation of the stored manifest on every export.
 - Use this selector for stage-5 single-image checking. Align stage-6.1 pull with the same selector, optional destination, and source-derived fallback naming rules, while retaining digest-preserving registry acquisition. Pull implementation remains in stage 6.1.
 - Keep store format 1 and ref metadata schema 3; no storage migration is required. The README, CLI help, library examples, and implementation status now describe the verified stage-4.1 interfaces.
 
@@ -374,19 +399,21 @@ The tool interfaces are described in [Skopeo copy documentation](https://github.
 - Common selectors, optional destinations, source-derived fallback tags, ignored-destination-digest notices, CLI/library parity, provenance, inventory, checking, and stored-root equality.
 - Authentication and incompatible-representation failures, preservation failures, interrupted pulls preserving prior refs, shared-content insertion races, and cleanup. Include real registry acquisition of a selected single-platform manifest; retain existing import/export regression coverage.
 
-#### 6.2. Extend and qualify digest-preserving export
+#### 6.2. Extend and qualify digest-preserving export (implemented)
 
-Extend and qualify export for the single-manifest images acquired in stage 6.1.
-The existing `Acquisition::Pull` branch already requests digest preservation;
-its presence does not establish completed qualification of registry round trips.
+Extend export preservation to all stored single-manifest images, including
+those acquired by import. Qualify the real registry-to-store-to-containers-storage
+round trip using the single opt-in Docker Hub acquisition. Import may change
+representation during acquisition; do not add imported-image round-trip identity
+validation or runtime post-export digest inspection.
 
-- Require `--preserve-digests` for pulled content and report failure if containers-storage cannot honor it. Preserve existing import-acquired export behavior.
+- Require `--preserve-digests` and its tool capability for every export, regardless of acquisition kind. Report failure if containers-storage cannot honor it, without retrying under a weaker policy. Existing imported refs receive this stricter behavior without migration; import acquisition itself still permits representation changes.
 - Retain repository-scoped stored-root selection, optional destinations, destination-digest enforcement, and stored-manifest digest reporting. No parent-index or selected-child digest reporting is needed.
 - Continue rejecting stored index roots. Export cannot select a different architecture from one stored manifest.
 - Leave persistent refs and metadata unchanged during export. Partial destination data remains managed by containers-storage.
 - Keep containers-storage image IDs distinct from stored manifest digests. A later import still cannot promise reconstruction of the original registry representation.
 
-**Acceptance:** real registry-to-store-to-containers-storage digest preservation; export by name and qualified manifest digest; omitted and explicit destinations; matching and mismatching destination digests; capability and preservation failures; persistent-store contents unchanged by export; stored-index rejection; existing import/export regressions.
+**Acceptance:** real registry-to-store-to-containers-storage manifest-byte and digest preservation from one opt-in acquisition; universal export preservation and capability/failure handling for imported and genuinely pulled refs; export by name and qualified manifest digest; omitted and explicit destinations; matching and mismatching destination digests; no fallback copies; persistent-store snapshots unchanged by successful or failed export; stored-index rejection; existing import/export and lock regressions. Add no imported-image round-trip digest assertions.
 
 #### 6.3. Library image availability for acquisition decisions
 
@@ -474,7 +501,8 @@ remain an operational convention.
 
 This section describes the target contract after the relevant stages. Stage
 4.1 implements the common selectors and containers-storage transfer arguments;
-stage 6.1 implements pull and stage 6.2 will qualify digest-preserving export.
+stage 6.1 implements pull and stage 6.2 requires universal export preservation
+and qualifies the registry round trip.
 Stage 6.3 will add library-only availability. Prune also remains planned,
 while stage 5 implements checking. Earlier interfaces and their historical
 validation are recorded above.
@@ -505,9 +533,9 @@ Import accepts explicit replacement, optional platform selection, and optional
 notes. Pull accepts a registry source by tag or manifest digest, explicit
 replacement, optional notes, registry configuration, and optional platform
 selection using stage 6.1's library defaults and verification policy. It accepts
-no caller-supplied provenance aliases. Export reports the stored manifest digest
-and rejects stored indexes; it cannot choose another architecture from one
-manifest. Prune accepts dry-run and a grace-period override.
+no caller-supplied provenance aliases. Export requires preservation of the stored
+manifest for every acquisition kind, reports that digest, and rejects stored
+indexes; it cannot choose another architecture from one manifest. Prune accepts dry-run and a grace-period override.
 
 Metadata records the acquisition kind and a cached stored root checked against
 the OCI layout. Pull additionally records the requested registry reference and

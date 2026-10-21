@@ -30,7 +30,7 @@ a = sys.argv[1:]
 with open(c['log'], 'a') as f:
     f.write(json.dumps({'args':a, 'environment':os.getenv('HPC_PULL_TEST_ENV')}) + '\n')
 if '--help' in a:
-    print(c.get('help', '--raw --retry-times --dest-shared-blob-dir --preserve-digests --authfile --cert-dir --src-cert-dir --tls-verify --src-tls-verify --policy'))
+    print(c.get('help', '--raw --retry-times --dest-shared-blob-dir --src-shared-blob-dir --preserve-digests --authfile --cert-dir --src-cert-dir --tls-verify --src-tls-verify --policy'))
     sys.exit(0)
 if 'inspect' in a:
     if c.get('inspect_failure'):
@@ -49,6 +49,15 @@ if 'inspect' in a:
 assert 'copy' in a
 assert '--preserve-digests' in a
 assert '--all' not in a and '--format' not in a
+if a[-1].startswith('containers-storage:'):
+    assert '--src-shared-blob-dir' in a
+    source = pathlib.Path(a[-2][len('oci:'):])
+    root = json.loads((source / 'index.json').read_text())['manifests'][0]['digest']
+    if c.get('export_failure') or ('@' in a[-1] and a[-1].rsplit('@', 1)[1] != root):
+        sys.stderr.write(c.get('export_failure', 'manifest does not match expected digest'))
+        sys.exit(18)
+    print('export progress stays out of result JSON')
+    sys.exit(0)
 if c.get('pause'):
     pathlib.Path(c['ready']).write_text(str(os.getpid()))
     with open(c['release'], 'r') as f: f.read()

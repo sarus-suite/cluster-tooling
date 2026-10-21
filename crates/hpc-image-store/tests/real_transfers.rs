@@ -24,16 +24,10 @@ fn parse_selector(value: impl AsRef<str>) -> ImageSelector {
     ImageSelector::new(value.as_ref()).unwrap()
 }
 
-fn run(command: &mut Command) -> Vec<u8> {
-    let output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "{:?}: {}",
-        command,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output.stdout
-}
+#[path = "support/storage.rs"]
+mod storage;
+use storage::run;
+
 fn digest(path: &Path) -> String {
     let output = run(Command::new("sha256sum").arg(path));
     String::from_utf8(output)
@@ -157,61 +151,11 @@ fn orphaned_export(directory: &Path, config: &Path, destination: &str) {
     assert_eq!(restored["config"]["Env"][0], "MARKER=one");
 }
 
-fn run_in_disposable_storage() {
-    let temporary = tempfile::Builder::new()
-        .prefix("hpc-rootless-")
-        .tempdir()
-        .unwrap();
-    let directory = temporary.path();
-    let graphroot = directory.join("storage");
-    let configuration = directory.join("storage.conf");
-    fs::write(
-        &configuration,
-        format!(
-            "[storage]\ndriver = \"overlay\"\nrunroot = {}\ngraphroot = {}\nrootless_storage_path = {}\n",
-            serde_json::to_string(&directory.join("run")).unwrap(),
-            serde_json::to_string(&graphroot).unwrap(),
-            serde_json::to_string(&graphroot).unwrap(),
-        ),
-    )
-    .unwrap();
-    // Verify Podman's effective root before running a destructive test or reset.
-    // Older rootless Podman versions need rootless_storage_path as well as
-    // graphroot to select the same store as Skopeo.
-    let selected = run(Command::new("podman")
-        .env("CONTAINERS_STORAGE_CONF", &configuration)
-        .args(["info", "--format", "{{.Store.GraphRoot}}"]));
-    assert_eq!(
-        Path::new(String::from_utf8_lossy(&selected).trim()),
-        graphroot
-    );
-    // A separate process gives every tool the same environment without mutating
-    // the test runner's environment while other Cargo tests may be running.
-    let status = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "real_rootless_round_trip", "--nocapture"])
-        .env("CONTAINERS_STORAGE_CONF", &configuration)
-        .env("HPC_IMAGE_STORE_TEST_DISPOSABLE", "1")
-        .status()
-        .unwrap();
-    // Release overlay mounts even when acceptance fails, before TempDir removes
-    // the test-owned files. Never reset caller-supplied storage.
-    run(Command::new("podman")
-        .env("CONTAINERS_STORAGE_CONF", &configuration)
-        .args(["system", "reset", "--force"]));
-    assert!(status.success(), "real-tool acceptance failed: {status}");
-}
-
 #[test]
 fn real_rootless_round_trip() {
-    if std::env::var_os("HPC_IMAGE_STORE_TEST_DISPOSABLE").is_none() {
-        run_in_disposable_storage();
+    if storage::run_if_needed("real_rootless_round_trip", false) {
         return;
     }
-    assert_eq!(
-        std::env::var("HPC_IMAGE_STORE_TEST_DISPOSABLE").as_deref(),
-        Ok("1"),
-        "select disposable storage and explicitly opt in; see README"
-    );
     let configuration = PathBuf::from(
         std::env::var_os("CONTAINERS_STORAGE_CONF")
             .expect("caller must supply disposable storage configuration"),
@@ -224,10 +168,6 @@ fn real_rootless_round_trip() {
             String::from_utf8_lossy(&run(Command::new(executable).arg("--version")))
         );
     }
-    assert!(
-        run(Command::new("podman").args(["images", "--quiet"])).is_empty(),
-        "acceptance needs empty disposable storage; cached layers can mask failed exports"
-    );
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path();
     fs::create_dir(directory.join("payload")).unwrap();

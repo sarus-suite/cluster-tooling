@@ -1,5 +1,7 @@
 //! Controlled CLI coverage plus one explicitly enabled Docker Hub smoke test.
-use hpc_image_store::{Acquisition, CheckScope, ImageSelector, Store, StoreConfig};
+use hpc_image_store::{
+    Acquisition, CheckScope, ImageId, ImageSelector, Store, StoreConfig, TransferContext,
+};
 use serde_json::{Value, json};
 use std::{fs, process::Command};
 
@@ -7,6 +9,13 @@ use std::{fs, process::Command};
 #[path = "support/registry.rs"]
 mod support;
 use support::{DESTINATION, Fixture, SOURCE, descriptor, selector};
+
+#[path = "support/snapshot.rs"]
+mod snapshots;
+use snapshots::snapshot;
+
+#[path = "support/storage.rs"]
+mod storage;
 
 const CLI: &str = env!("CARGO_BIN_EXE_hpc-image-store");
 
@@ -175,11 +184,117 @@ fn pull_cli_operation_failure_preserves_ref_and_returns_status_one() {
     assert_eq!(fs::read_link(fixture.pointer()).unwrap(), pointer);
 }
 
+#[test]
+fn pulled_export_cli_preserves_identity_and_reports_failures_without_modification() {
+    let mut fixture = Fixture::new();
+    fixture.pull(false).unwrap();
+    let qualified = format!("cached/image:ignored@{}", fixture.root);
+    let matching = format!("localhost/output:tag@{}", fixture.root);
+    let mismatch = format!("localhost/output:tag@sha256:{}", "f".repeat(64));
+    let before = snapshot(fixture.store.config().root());
+    for (source, destination) in [
+        (DESTINATION, None),
+        (qualified.as_str(), None),
+        (qualified.as_str(), Some(matching.as_str())),
+    ] {
+        let mut command = fixture.cli(CLI);
+        command.args([
+            "--json",
+            "--podman",
+            "/unavailable/podman",
+            "export",
+            source,
+        ]);
+        if let Some(destination) = destination {
+            command.arg(destination);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["local_ref"], DESTINATION);
+        assert_eq!(report["stored_manifest"], json!(fixture.root));
+        assert_eq!(report["destination"], destination.unwrap_or(source));
+        assert!(
+            fixture.calls().last().unwrap()["args"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("--preserve-digests"))
+        );
+        assert_eq!(snapshot(fixture.store.config().root()), before);
+    }
+    for (key, value, destination, diagnostic, expected_calls) in [
+        (
+            "help",
+            "--src-shared-blob-dir",
+            DESTINATION,
+            "--preserve-digests",
+            1,
+        ),
+        (
+            "help",
+            "--preserve-digests",
+            DESTINATION,
+            "--src-shared-blob-dir",
+            1,
+        ),
+        (
+            "export_failure",
+            "cannot preserve manifest",
+            DESTINATION,
+            "cannot preserve manifest",
+            2,
+        ),
+        (
+            "unused",
+            "",
+            mismatch.as_str(),
+            "does not match expected digest",
+            2,
+        ),
+    ] {
+        fixture.config.as_object_mut().unwrap().remove("help");
+        fixture
+            .config
+            .as_object_mut()
+            .unwrap()
+            .remove("export_failure");
+        fixture.config[key] = json!(value);
+        fixture.save();
+        let calls = fixture.calls().len();
+        let output = fixture
+            .cli(CLI)
+            .args(["--json", "export", &qualified, destination])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(diagnostic));
+        assert_eq!(fixture.calls().len() - calls, expected_calls);
+        assert_eq!(snapshot(fixture.store.config().root()), before);
+    }
+}
+
 /// One acquisition only. Never run as part of ordinary tests or a CI matrix.
 /// Failures are reported directly; there are no retries or substitute images.
 #[test]
 #[ignore = "contacts Docker Hub once; run only by this exact test name"]
 fn dockerhub_alpine_smoke() {
+    if storage::run_if_needed("dockerhub_alpine_smoke", true) {
+        return;
+    }
+    let configuration = std::env::var_os("CONTAINERS_STORAGE_CONF").unwrap();
+    let configuration_before = fs::read(&configuration).unwrap();
+    for tool in ["podman", "skopeo"] {
+        println!(
+            "{}",
+            String::from_utf8_lossy(&storage::run(Command::new(tool).arg("--version")))
+        );
+    }
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("store");
     let output = Command::new(CLI)
@@ -224,5 +339,102 @@ fn dockerhub_alpine_smoke() {
         );
     }
     assert!(report["cleanup_warnings"].as_array().unwrap().is_empty());
-    println!("Pulled Docker Hub Alpine once: {}", metadata.stored_root);
+
+    let stored_manifest = fs::read(
+        store
+            .config()
+            .root()
+            .join("blobs/sha256")
+            .join(metadata.stored_root.hex()),
+    )
+    .unwrap();
+    assert_eq!(support::digest(&stored_manifest), metadata.stored_root);
+    let before = snapshot(store.config().root());
+    let named = selector("docker.io/library/alpine:3.23");
+    let qualified = selector(format!("docker.io/library/alpine@{}", metadata.stored_root));
+    let combined = selector(format!(
+        "docker.io/library/alpine:ignored@{}",
+        metadata.stored_root
+    ));
+    let matching = selector(format!(
+        "localhost/hpc-export:matching@{}",
+        metadata.stored_root
+    ));
+    let plain = selector("localhost/hpc-export:plain");
+    for (source, destination, cli) in [
+        (&named, None, false),
+        (&qualified, None, false),
+        (&combined, Some(&matching), true),
+        (&named, Some(&plain), true),
+    ] {
+        let effective = destination.unwrap_or(source);
+        if cli {
+            let mut command = Command::new(CLI);
+            command.arg("--store").arg(store.config().root()).args([
+                "--json",
+                "export",
+                source.as_str(),
+            ]);
+            if let Some(destination) = destination {
+                command.arg(destination.as_str());
+            }
+            let exported: Value = serde_json::from_slice(&storage::run(&mut command)).unwrap();
+            assert_eq!(exported["stored_manifest"], json!(metadata.stored_root));
+            assert_eq!(exported["local_ref"], named.as_str());
+            assert_eq!(exported["destination"], effective.as_str());
+        } else {
+            let exported = store
+                .export(source, destination, &TransferContext::default())
+                .unwrap();
+            assert_eq!(exported.stored_manifest, metadata.stored_root);
+            assert_eq!(exported.local_ref.as_str(), named.as_str());
+            assert_eq!(exported.destination, effective.as_str());
+        }
+        let raw = storage::run(
+            Command::new("skopeo")
+                .args(["inspect", "--raw"])
+                .arg(format!("containers-storage:{effective}")),
+        );
+        assert_eq!(
+            raw, stored_manifest,
+            "export must preserve exact manifest bytes"
+        );
+        assert_eq!(support::digest(&raw), metadata.stored_root);
+        let image_id = storage::run(Command::new("podman").args([
+            "image",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            "--",
+            effective.as_str(),
+        ]));
+        assert_eq!(
+            ImageId::new(String::from_utf8(image_id).unwrap().trim())
+                .unwrap()
+                .as_str(),
+            metadata.content.config_digest.hex()
+        );
+        assert_eq!(snapshot(store.config().root()), before);
+    }
+    let mismatch = format!("localhost/hpc-export:mismatch@sha256:{}", "f".repeat(64));
+    let failed = Command::new(CLI)
+        .arg("--store")
+        .arg(store.config().root())
+        .args(["--json", "export", qualified.as_str(), &mismatch])
+        .output()
+        .unwrap();
+    assert_eq!(failed.status.code(), Some(1));
+    assert!(failed.stdout.is_empty());
+    let diagnostic = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        diagnostic.contains("does not match expected digest")
+            || diagnostic.contains("would not match destination reference"),
+        "{diagnostic}"
+    );
+    assert_eq!(snapshot(store.config().root()), before);
+    assert_eq!(fs::read(&configuration).unwrap(), configuration_before);
+    println!(
+        "Pulled Docker Hub Alpine once and preserved manifest {} through library and CLI exports; config ID {}",
+        metadata.stored_root, metadata.content.config_digest
+    );
 }
