@@ -1,6 +1,10 @@
 //! Read-only OCI dependency traversal. Callers retain the store lock; this
 //! module does not acquire ref locks and can also serve an exclusive prune scan.
-use crate::{Sha256Digest, fsutil, oci::Descriptor};
+use crate::{
+    Sha256Digest, fsutil,
+    inspection::{FailureKind, Finding},
+    oci::Descriptor,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
@@ -39,9 +43,8 @@ impl Role {
 
 #[derive(Clone)]
 pub(crate) struct GraphDiagnostic {
-    pub path: PathBuf,
     pub digest: Sha256Digest,
-    pub message: String,
+    pub finding: Finding,
 }
 
 pub(crate) struct GraphReport {
@@ -52,11 +55,14 @@ pub(crate) struct GraphReport {
 }
 impl GraphReport {
     fn error(&mut self, path: &Path, digest: &Sha256Digest, message: String) {
+        self.finding(digest, Finding::graph(path, FailureKind::Damage, message));
+    }
+
+    fn finding(&mut self, digest: &Sha256Digest, finding: Finding) {
         self.complete = false;
         self.diagnostics.push(GraphDiagnostic {
-            path: path.to_owned(),
             digest: digest.clone(),
-            message,
+            finding,
         });
     }
 }
@@ -64,7 +70,7 @@ impl GraphReport {
 struct Observation {
     size: Option<u64>,
     children: Vec<(Descriptor, Role)>,
-    errors: Vec<String>,
+    errors: Vec<Finding>,
 }
 
 /// Cached file observations and JSON parsing last only for this operation.
@@ -110,8 +116,8 @@ impl GraphReader {
             let digest = &descriptor.digest;
             let path = self.blobs.join(digest.hex());
             report.reachable.insert(digest.clone());
-            if let Err(reason) = validate_descriptor(&descriptor) {
-                report.error(&path, digest, reason);
+            if let Err(finding) = inspect_descriptor(&descriptor, &path) {
+                report.finding(digest, finding);
             }
             let declaration = (descriptor.media_type.clone(), descriptor.size);
             if let Some(previous) = self.declarations.get(digest) {
@@ -129,12 +135,15 @@ impl GraphReader {
                 self.declarations.insert(digest.clone(), declaration);
             }
             if !role.accepts(&descriptor.media_type) {
-                report.error(
-                    &path,
+                report.finding(
                     digest,
-                    format!(
-                        "unsupported media type {} for this dependency",
-                        descriptor.media_type
+                    Finding::graph(
+                        &path,
+                        FailureKind::Unsupported,
+                        format!(
+                            "unsupported media type {} for this dependency",
+                            descriptor.media_type
+                        ),
                     ),
                 );
                 continue;
@@ -161,7 +170,7 @@ impl GraphReader {
                 continue;
             }
             for error in &observation.errors {
-                report.error(&path, digest, error.clone());
+                report.finding(digest, error.clone());
             }
             active.insert(digest.clone());
             work.push(Work::Leave(digest.clone()));
@@ -174,33 +183,53 @@ impl GraphReader {
 }
 
 pub(crate) fn validate_descriptor(descriptor: &Descriptor) -> Result<(), String> {
+    inspect_descriptor(descriptor, Path::new("")).map_err(|finding| finding.message)
+}
+
+fn inspect_descriptor(descriptor: &Descriptor, path: &Path) -> Result<(), Finding> {
     let extra = &descriptor.extra;
     if extra.contains_key("artifactType") || extra.contains_key("subject") {
-        return Err("artifact and subject-bearing descriptors are unsupported".into());
+        return Err(Finding::graph(
+            path,
+            FailureKind::Unsupported,
+            "artifact and subject-bearing descriptors are unsupported",
+        ));
     }
     if let Some(value) = extra.get("urls")
         && !value
             .as_array()
             .is_some_and(|values| values.iter().all(Value::is_string))
     {
-        return Err("descriptor urls must be an array of strings".into());
+        return Err(Finding::graph(
+            path,
+            FailureKind::Damage,
+            "descriptor urls must be an array of strings",
+        ));
     }
     if let Some(value) = extra.get("data")
         && !value.is_string()
     {
-        return Err("descriptor data must be a string".into());
+        return Err(Finding::graph(
+            path,
+            FailureKind::Damage,
+            "descriptor data must be a string",
+        ));
     }
     if let Some(value) = extra.get("annotations")
         && !value
             .as_object()
             .is_some_and(|values| values.values().all(Value::is_string))
     {
-        return Err("descriptor annotations must map strings to strings".into());
+        return Err(Finding::graph(
+            path,
+            FailureKind::Damage,
+            "descriptor annotations must map strings to strings",
+        ));
     }
     if let Some(value) = extra.get("platform") {
-        let platform: PlatformFields =
-            serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
-        platform.validate()?;
+        let platform: PlatformFields = serde_json::from_value(value.clone())
+            .map_err(|source| Finding::graph_json(path, source, ""))?;
+        platform.validate(path)?;
     }
     Ok(())
 }
@@ -221,9 +250,13 @@ struct PlatformFields {
     _created: Option<String>,
 }
 impl PlatformFields {
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self, path: &Path) -> Result<(), Finding> {
         if self.os.is_empty() || self.architecture.is_empty() {
-            return Err("image platform must specify nonempty OS and architecture".into());
+            return Err(Finding::graph(
+                path,
+                FailureKind::Damage,
+                "image platform must specify nonempty OS and architecture",
+            ));
         }
         Ok(())
     }
@@ -241,41 +274,72 @@ fn observe(path: &Path, media_type: &str) -> Observation {
     observation
 }
 
-fn read_object(path: &Path, media_type: &str, observation: &mut Observation) -> Result<(), String> {
-    fsutil::checkpoint("graph.observe", path).map_err(|error| error.to_string())?;
-    let mut file = fsutil::open_regular(path).map_err(|error| error.to_string())?;
-    observation.size = Some(file.metadata().map_err(|error| error.to_string())?.len());
+fn read_object(
+    path: &Path,
+    media_type: &str,
+    observation: &mut Observation,
+) -> Result<(), Finding> {
+    fsutil::checkpoint("graph.observe", path).map_err(|error| Finding::graph_error(path, error))?;
+    let mut file = fsutil::open_regular(path).map_err(|error| Finding::graph_error(path, error))?;
+    observation.size = Some(
+        file.metadata()
+            .map_err(|source| Finding::graph_io(path, "inspect OCI object", source))?
+            .len(),
+    );
     if LAYERS.contains(&media_type) {
         return Ok(());
     }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
-        .map_err(|error| error.to_string())?;
-    let value: Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-    let object = value.as_object().ok_or("OCI JSON must be an object")?;
+        .map_err(|source| Finding::graph_io(path, "read OCI object", source))?;
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|source| Finding::graph_json(path, source, ""))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| Finding::graph(path, FailureKind::Damage, "OCI JSON must be an object"))?;
     if media_type == CONFIG {
-        let fields: PlatformFields =
-            serde_json::from_value(value).map_err(|error| error.to_string())?;
-        return fields.validate();
+        let fields: PlatformFields = serde_json::from_value(value)
+            .map_err(|source| Finding::graph_json(path, source, ""))?;
+        return fields.validate(path);
     }
-    if object.get("schemaVersion").and_then(Value::as_u64) != Some(2) {
-        return Err("unsupported or missing OCI schemaVersion (expected 2)".into());
+    let version = object.get("schemaVersion").and_then(Value::as_u64);
+    if version != Some(2) {
+        let kind = if version.is_some() {
+            FailureKind::Unsupported
+        } else {
+            FailureKind::Damage
+        };
+        return Err(Finding::graph(
+            path,
+            kind,
+            "unsupported or missing OCI schemaVersion (expected 2)",
+        ));
     }
     if object
         .get("mediaType")
         .is_some_and(|value| value.as_str() != Some(media_type))
     {
-        observation
-            .errors
-            .push("object mediaType disagrees with its descriptor".into());
+        observation.errors.push(Finding::graph(
+            path,
+            FailureKind::Damage,
+            "object mediaType disagrees with its descriptor",
+        ));
     }
     if object.contains_key("artifactType") || object.contains_key("subject") {
-        observation
-            .errors
-            .push("artifact and subject-bearing objects are unsupported".into());
+        observation.errors.push(Finding::graph(
+            path,
+            FailureKind::Unsupported,
+            "artifact and subject-bearing objects are unsupported",
+        ));
     }
     if media_type == MANIFEST {
-        child(object.get("config"), Role::Config, "config", observation);
+        child(
+            object.get("config"),
+            Role::Config,
+            "config",
+            path,
+            observation,
+        );
     }
     let (key, role) = if media_type == INDEX {
         ("manifests", Role::Image)
@@ -285,25 +349,45 @@ fn read_object(path: &Path, media_type: &str, observation: &mut Observation) -> 
     match object.get(key).and_then(Value::as_array) {
         Some(values) => {
             for (index, value) in values.iter().enumerate() {
-                child(Some(value), role, &format!("{key}[{index}]"), observation);
+                child(
+                    Some(value),
+                    role,
+                    &format!("{key}[{index}]"),
+                    path,
+                    observation,
+                );
             }
         }
-        None => observation.errors.push(format!("{key} must be an array")),
+        None => observation.errors.push(Finding::graph(
+            path,
+            FailureKind::Damage,
+            format!("{key} must be an array"),
+        )),
     }
     Ok(())
 }
 
-fn child(value: Option<&Value>, role: Role, field: &str, observation: &mut Observation) {
+fn child(
+    value: Option<&Value>,
+    role: Role,
+    field: &str,
+    path: &Path,
+    observation: &mut Observation,
+) {
     match value {
         Some(value) => match serde_json::from_value(value.clone()) {
             Ok(descriptor) => observation.children.push((descriptor, role)),
-            Err(error) => observation
-                .errors
-                .push(format!("invalid {field} descriptor: {error}")),
+            Err(source) => observation.errors.push(Finding::graph_json(
+                path,
+                source,
+                &format!("invalid {field} descriptor: "),
+            )),
         },
-        None => observation
-            .errors
-            .push(format!("missing {field} descriptor")),
+        None => observation.errors.push(Finding::graph(
+            path,
+            FailureKind::Damage,
+            format!("missing {field} descriptor"),
+        )),
     }
 }
 

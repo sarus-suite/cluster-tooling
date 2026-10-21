@@ -160,7 +160,7 @@ impl Store {
                             report.diagnostics.push(ListDiagnostic::from_error(
                                 &entry.path,
                                 Some(reference),
-                                &error,
+                                &error.cause,
                             ));
                         }
                     }

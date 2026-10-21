@@ -568,6 +568,41 @@ fn failures_preserve_previous_ref_and_successful_replacement_reuses_content() {
 }
 
 #[test]
+fn availability_observations_do_not_reserve_pull_destinations_or_contact_registry() {
+    use crate::{ImageAvailability, locks::Operation, test_snapshot::snapshot};
+    let fixture = Fixture::new();
+    drop(fixture.store.prepare(Operation::Pull).unwrap());
+    let selected = selector(DESTINATION);
+    assert!(matches!(
+        fixture.store.availability(&selected),
+        Ok(ImageAvailability::Missing)
+    ));
+    fixture.pull(false).unwrap();
+    let before = snapshot(fixture.store.config().root());
+    let calls = fixture.calls().len();
+    for selected in [
+        selected.clone(),
+        selector(format!("{}@{}", selected.name(), fixture.root)),
+    ] {
+        assert!(matches!(
+            fixture.store.availability(&selected),
+            Ok(ImageAvailability::Ready)
+        ));
+    }
+    assert!(matches!(fixture.pull(false), Err(Error::RefExists(_))));
+    assert_eq!(fixture.calls().len(), calls);
+    assert_eq!(snapshot(fixture.store.config().root()), before);
+    fixture.pull(true).unwrap();
+    let calls = fixture.calls().len();
+    fs::remove_file(&fixture.context.skopeo).unwrap();
+    assert!(matches!(
+        fixture.store.availability(&selected),
+        Ok(ImageAvailability::Ready)
+    ));
+    assert_eq!(fixture.calls().len(), calls);
+}
+
+#[test]
 fn pull_publication_and_cleanup_keep_existing_failure_semantics() {
     let fixture = Fixture::new();
     fixture.pull(false).unwrap();

@@ -17,6 +17,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "availability/tests.rs"]
+mod availability_tests;
+
 // Precomputed SHA-256 identities for complete, zero-layer OCI fixtures. Runtime
 // publication deliberately does not hash content; these bytes are fixture inputs.
 const CONFIG: &[u8] =
@@ -920,6 +923,11 @@ fn publication_worker() {
     let action = std::env::var("HPC_PUBLICATION_ACTION").unwrap();
     println!("PUBLICATION_STARTED");
     std::io::stdout().flush().unwrap();
+    if action.starts_with("availability-") {
+        availability_tests::worker(&handle, &reference, &action);
+        println!("PUBLICATION_READY");
+        return;
+    }
     if action == "check-exclusive" {
         let _guard = handle.prepare(Operation::Prune).unwrap();
         println!("PUBLICATION_READY");
@@ -1119,7 +1127,12 @@ struct Worker {
 }
 impl Worker {
     fn start(root: &Path, reference: &LocalRef, action: &str) -> Self {
-        let mut child = Command::new(std::env::current_exe().unwrap())
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        if action == "availability-permissions" && unsafe { libc::geteuid() } == 0 {
+            use std::os::unix::process::CommandExt;
+            command.uid(65534).gid(65534);
+        }
+        let mut child = command
             .args([
                 "--ignored",
                 "--exact",

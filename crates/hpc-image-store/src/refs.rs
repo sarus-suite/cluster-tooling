@@ -3,6 +3,7 @@ use crate::{
     error::io_error,
     fsutil,
     initialization::{create_directory, require_directory},
+    inspection::Finding,
     layout::valid_raw_image_id,
     locks::RefGuard,
     oci::{self, Descriptor},
@@ -195,7 +196,7 @@ pub(crate) fn read<'a>(guard: &'a RefGuard<'a>) -> Result<ResolvedRef<'a>> {
 pub(crate) fn read_small<'a>(guard: &'a RefGuard<'a>) -> Result<ResolvedRef<'a>> {
     let mut inspected = inspect_small(guard)?;
     if !inspected.errors.is_empty() {
-        return Err(inspected.errors.remove(0));
+        return Err(inspected.errors.remove(0).into_error());
     }
     Ok(ResolvedRef {
         _guard: guard,
@@ -209,7 +210,7 @@ pub(crate) struct RefInspection {
     pub raw_image: PathBuf,
     pub root: Option<Descriptor>,
     pub metadata: Option<RefMetadata>,
-    pub errors: Vec<Error>,
+    pub errors: Vec<Finding>,
 }
 
 /// Keep independently readable fields available when another wrapper file is
@@ -218,9 +219,9 @@ pub(crate) fn inspect_small(guard: &RefGuard<'_>) -> Result<RefInspection> {
     let raw_image = raw_image_path(guard)?;
     let mut errors = Vec::new();
     if let Err(error) = require_directory(&raw_image.join("blobs")) {
-        errors.push(error);
+        errors.push(Finding::wrapper(&raw_image.join("blobs"), error));
     }
-    let root = match oci::single_root(&raw_image) {
+    let root = match oci::inspect_single_root(&raw_image) {
         Ok(root) => Some(root),
         Err(error) => {
             errors.push(error);
@@ -228,7 +229,8 @@ pub(crate) fn inspect_small(guard: &RefGuard<'_>) -> Result<RefInspection> {
         }
     };
     let metadata_path = raw_image.join("metadata.json");
-    let metadata = match fsutil::read_regular(&metadata_path)
+    let metadata = match fsutil::checkpoint("refs.metadata-read", &metadata_path)
+        .and_then(|()| fsutil::read_regular(&metadata_path))
         .and_then(|bytes| RefMetadata::from_json(&bytes))
     {
         Ok(metadata) => {
@@ -237,15 +239,18 @@ pub(crate) fn inspect_small(guard: &RefGuard<'_>) -> Result<RefInspection> {
                     .as_ref()
                     .is_some_and(|root| metadata.stored_root != root.digest)
             {
-                errors.push(Error::InvalidObject {
-                    path: metadata_path,
-                    reason: "metadata disagrees with logical ref or layout root".into(),
-                });
+                errors.push(Finding::wrapper(
+                    &metadata_path,
+                    Error::InvalidObject {
+                        path: metadata_path.clone(),
+                        reason: "metadata disagrees with logical ref or layout root".into(),
+                    },
+                ));
             }
             Some(metadata)
         }
         Err(error) => {
-            errors.push(error);
+            errors.push(Finding::wrapper(&metadata_path, error));
             None
         }
     };

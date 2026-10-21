@@ -48,7 +48,7 @@ fn messages(report: &GraphReport) -> String {
     report
         .diagnostics
         .iter()
-        .map(|diagnostic| diagnostic.message.as_str())
+        .map(|diagnostic| diagnostic.finding.message.as_str())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -102,9 +102,21 @@ fn failures_are_cached_and_each_incoming_size_and_media_type_is_checked() {
     assert!(messages(&reader.scan(&wrong_type)).contains("conflicting descriptors"));
 
     let mut reader = GraphReader::new(fixture.directory.path());
-    assert!(!reader.scan(&root).complete);
+    let missing = reader.scan(&root);
+    assert!(!missing.complete);
+    let finding = &missing.diagnostics[0].finding;
+    assert_eq!(finding.kind, FailureKind::Damage);
+    assert!(
+        matches!(finding.cause.as_ref(), crate::Error::Io { source, .. }
+        if source.kind() == std::io::ErrorKind::NotFound)
+    );
     fs::write(fixture.path(&root), b"{}").unwrap();
-    assert!(!reader.scan(&root).complete);
+    let cached = reader.scan(&root);
+    assert!(!cached.complete);
+    assert!(std::sync::Arc::ptr_eq(
+        &finding.cause,
+        &cached.diagnostics[0].finding.cause
+    ));
     assert!(messages(&reader.scan(&root)).contains("open regular file"));
 }
 
@@ -181,7 +193,12 @@ fn malformed_and_unsupported_objects_are_unresolved() {
     }
     for bytes in [b"{".as_slice(), b"[]", b"null"] {
         let root = fixture.bytes(MANIFEST, bytes);
-        assert!(!fixture.scan(&root).complete);
+        let report = fixture.scan(&root);
+        assert!(!report.complete);
+        if bytes == b"{" {
+            assert!(matches!(report.diagnostics[0].finding.cause.as_ref(),
+                crate::Error::ContentJson { source, .. } if source.is_syntax() || source.is_eof()));
+        }
     }
 }
 
