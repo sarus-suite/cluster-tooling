@@ -1,4 +1,4 @@
-//! String formatting for collected inventory reports. No store access or
+//! String formatting for collected operation reports. No store access or
 //! external tools are needed. Display caches remain content-unverified.
 use crate::{ListEntry, ListReport, ListStatus, inventory::display_path};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -255,6 +255,48 @@ pub fn format_check(report: &crate::CheckReport) -> String {
     )
     .expect("writing to a String cannot fail");
     text
+}
+
+/// Eligible and visibly removed logical bytes, not estimated filesystem savings.
+pub fn format_prune(report: &crate::PruneReport) -> String {
+    let mut rows = vec![vec![
+        "KIND".into(),
+        "ELIGIBLE".into(),
+        "ELIGIBLE BYTES".into(),
+        "REMOVED".into(),
+        "REMOVED BYTES".into(),
+    ]];
+    for (kind, summary) in &report.summaries {
+        let name = match kind {
+            crate::PruneKind::Staging => "staging",
+            crate::PruneKind::RawImage => "raw images",
+            crate::PruneKind::Blob => "blobs",
+            crate::PruneKind::RefLock => "unused ref locks",
+            crate::PruneKind::RefLockDirectory => "empty lock directories",
+            crate::PruneKind::RefDirectory => "empty ref directories",
+        };
+        rows.push(vec![
+            name.into(),
+            summary.eligible_count.to_string(),
+            summary.eligible_bytes.to_string(),
+            summary.removed_count.to_string(),
+            summary.removed_bytes.to_string(),
+        ]);
+    }
+    let status = if !report.scan_complete {
+        "Pruning blocked: the scan or ref namespace durability check failed; nothing was removed."
+    } else if report.has_errors() {
+        "Pruning stopped after an error; reported removals may be partial."
+    } else if report.dry_run {
+        "Dry run: nothing was removed."
+    } else {
+        "Pruning complete."
+    };
+    format!(
+        "{}{status}\n{} preserved unknown entries. Byte counts are logical file lengths.\n",
+        table(rows),
+        report.skipped.len()
+    )
 }
 
 #[cfg(test)]

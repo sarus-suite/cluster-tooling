@@ -1175,6 +1175,14 @@ fn orphaned_transfer_retains_store_and_ref_locks_and_inherits_environment() {
     for operation in ["import", "export", "digest-export"] {
         let mut fixture = Fixture::new();
         fixture.import(false).unwrap();
+        let unused_ref = LocalRef::new("unused:tag").unwrap();
+        fixture
+            .store
+            .availability(&parse_selector(unused_ref.as_str()))
+            .unwrap();
+        let unused_lock = fixture.store.layout.ref_lock(&unused_ref);
+        let committed_lock = fixture.store.layout.ref_lock(&fixture.reference);
+        let committed_inode = fs::metadata(&committed_lock).unwrap().ino();
         let root = fixture.temporary.path();
         let release = root.join("release");
         let ready = root.join("ready");
@@ -1205,6 +1213,14 @@ fn orphaned_transfer_retains_store_and_ref_locks_and_inherits_environment() {
         assert!(!try_exclusive(
             &fixture.store.layout.ref_lock(&fixture.reference)
         ));
+        {
+            let _short = crate::locks::short_test_waits();
+            assert!(matches!(
+                fixture.store.prune(&crate::PruneOptions::default()),
+                Err(Error::LockTimeout { .. })
+            ));
+        }
+        assert!(unused_lock.exists());
         assert!(
             fixture
                 .log()
@@ -1235,6 +1251,16 @@ fn orphaned_transfer_retains_store_and_ref_locks_and_inherits_environment() {
                 .unwrap()
                 .count(),
             1
+        );
+        let report = fixture
+            .store
+            .prune(&crate::PruneOptions::default())
+            .unwrap();
+        assert!(!report.has_errors(), "{report:?}");
+        assert!(!unused_lock.exists());
+        assert_eq!(
+            fs::metadata(&committed_lock).unwrap().ino(),
+            committed_inode
         );
     }
 }
@@ -1432,4 +1458,49 @@ fn export_forwards_combined_destination_and_propagates_tool_failure() {
         &format!("containers-storage:{destination}")
     );
     assert!(!fixture.store.list().unwrap().has_errors());
+}
+
+#[test]
+fn prune_reclaims_abandoned_import_and_cleanup_warning_remnants_without_tools() {
+    for point in ["ref.rename", "staging.cleanup-remove"] {
+        let fixture = Fixture::new();
+        fixture.import(false).unwrap();
+        fsutil::fail_once(point, libc::EIO);
+        let result = fixture.import(true);
+        if point == "ref.rename" {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result.unwrap().cleanup_warnings.len(), 1);
+        }
+        let calls = fixture.log().len();
+        let report = fixture
+            .store
+            .prune(&crate::PruneOptions {
+                dry_run: false,
+                grace_period: Duration::ZERO,
+            })
+            .unwrap();
+        assert!(!report.has_errors(), "{report:?}");
+        assert!(report.summaries[&crate::PruneKind::Staging].removed_count > 0);
+        assert_eq!(
+            fs::read_dir(fixture.store.layout.staging())
+                .unwrap()
+                .count(),
+            0
+        );
+        assert_eq!(
+            fs::read_dir(fixture.store.layout.raw_images())
+                .unwrap()
+                .count(),
+            1
+        );
+        assert_eq!(fixture.log().len(), calls);
+        assert!(
+            !fixture
+                .store
+                .check(&crate::CheckScope::All)
+                .unwrap()
+                .has_errors()
+        );
+    }
 }

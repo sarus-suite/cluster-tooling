@@ -116,11 +116,7 @@ fn help_is_successful_and_lists_implemented_commands() {
     assert!(help.contains("list") && help.contains("remove"));
     assert!(help.contains("check"));
     assert!(help.contains("pull"));
-    assert!(
-        !help
-            .lines()
-            .any(|line| line.split_whitespace().next() == Some("prune"))
-    );
+    assert!(help.contains("prune"));
     assert!(!help.contains("--storage-driver"));
     assert!(output.stderr.is_empty());
 }
@@ -931,4 +927,346 @@ fn cli_digest_import_generates_source_tag_and_remove_rejects_digest_selectors() 
         .output()
         .unwrap();
     assert!(output.status.success());
+}
+
+#[test]
+fn prune_duration_usage_and_missing_store_preserve_the_filesystem() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("store");
+    for duration in [
+        "-1",
+        "+1",
+        "1.5h",
+        "",
+        "h",
+        "1H",
+        "1h30m",
+        "18446744073709551616",
+        "18446744073709551615d",
+    ] {
+        let output = cli()
+            .arg("--store")
+            .arg(&root)
+            .args(["prune", &format!("--grace-period={duration}")])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{duration}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!root.exists());
+    }
+    for duration in ["0", "5", "1s", "2m", "24h", "7d", "18446744073709551615s"] {
+        let output = cli()
+            .arg("--store")
+            .arg(&root)
+            .args(["prune", "--dry-run", "--grace-period", duration])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{duration}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("not initialized"));
+        assert!(!root.exists());
+    }
+}
+
+#[test]
+fn prune_cli_json_reports_eligibility_skips_and_blocked_scans_without_tools() {
+    use hpc_image_store::{PruneOptions, Store, StoreConfig};
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path();
+    let config = directory.join("storage.conf");
+    fs::write(&config, "caller configuration sentinel\n").unwrap();
+    let podman = directory.join("podman");
+    let skopeo = directory.join("skopeo");
+    for executable in [&podman, &skopeo] {
+        fs::write(executable, PRODUCER).unwrap();
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    // Use the CLI producer in its child environment, never change process env.
+    let root = directory.join("store");
+    let acquired = cli()
+        .arg("--store")
+        .arg(&root)
+        .arg("--podman")
+        .arg(&podman)
+        .arg("--skopeo")
+        .arg(&skopeo)
+        .args(["import", "source:tag", "stored:tag"])
+        .env("CONTAINERS_STORAGE_CONF", &config)
+        .output()
+        .unwrap();
+    assert!(
+        acquired.status.success(),
+        "{}",
+        String::from_utf8_lossy(&acquired.stderr)
+    );
+    let handle = Store::new(StoreConfig::new(&root).unwrap());
+    let orphan = root.join("blobs/sha256").join("f".repeat(64));
+    fs::write(&orphan, b"extra bytes").unwrap();
+    fs::write(root.join("tmp/unknown"), b"preserve").unwrap();
+    let run = |args: &[&str]| {
+        cli()
+            .arg("--store")
+            .arg(&root)
+            .args([
+                "--skopeo",
+                "/unavailable/skopeo",
+                "--podman",
+                "/unavailable/podman",
+            ])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let output = run(&["--json", "prune", "--dry-run", "--grace-period", "0"]);
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let library = handle
+        .prune(&PruneOptions {
+            dry_run: true,
+            grace_period: std::time::Duration::ZERO,
+        })
+        .unwrap();
+    assert_eq!(serde_json::to_value(library).unwrap(), report);
+    assert_eq!(report["scan_complete"], true);
+    assert_eq!(report["summaries"]["blob"]["eligible_bytes"], 11);
+    assert_eq!(report["summaries"]["blob"]["removed_count"], 0);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("skipped"));
+    assert!(orphan.exists());
+    let output = run(&["prune", "--grace-period", "0"]);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Pruning complete"));
+    assert!(!orphan.exists());
+    fs::write(&orphan, b"extra bytes").unwrap();
+    fs::write(root.join("refs/unknown"), b"damage").unwrap();
+    let output = run(&["prune", "--json", "--grace-period", "0"]);
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["scan_complete"], false);
+    assert_eq!(report["summaries"]["blob"]["eligible_count"], 0);
+    assert!(!report["diagnostics"].as_array().unwrap().is_empty());
+    assert!(orphan.exists());
+}
+
+#[path = "support/snapshot.rs"]
+mod snapshots;
+
+// Deny only fsync in this command's child, allowing the real CLI to scan and
+// then receive EIO at the namespace barrier. No production fault hook or runtime
+// option is introduced. The parent and subsequent retry remain unaffected.
+fn fail_child_fsync(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the pre-exec closure uses stack data and libc prctl only. It does
+    // not allocate or acquire locks. The BPF program is valid for this native
+    // Linux child; seccomp copies it before prctl returns.
+    unsafe {
+        command.pre_exec(|| {
+            let mut filter = [
+                libc::sock_filter {
+                    code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+                    jt: 0,
+                    jf: 0,
+                    k: 0,
+                },
+                libc::sock_filter {
+                    code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+                    jt: 0,
+                    jf: 1,
+                    k: libc::SYS_fsync as u32,
+                },
+                libc::sock_filter {
+                    code: (libc::BPF_RET | libc::BPF_K) as u16,
+                    jt: 0,
+                    jf: 0,
+                    k: libc::SECCOMP_RET_ERRNO | libc::EIO as u32,
+                },
+                libc::sock_filter {
+                    code: (libc::BPF_RET | libc::BPF_K) as u16,
+                    jt: 0,
+                    jf: 0,
+                    k: libc::SECCOMP_RET_ALLOW,
+                },
+            ];
+            let program = libc::sock_fprog {
+                len: filter.len() as u16,
+                filter: filter.as_mut_ptr(),
+            };
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[test]
+fn prune_namespace_sync_failure_has_human_and_json_reports_without_deletion() {
+    use std::fs;
+    let fixture = InventoryFixture::new();
+    let removed = fixture
+        .command()
+        .args(["remove", "tool:t"])
+        .output()
+        .unwrap();
+    assert!(removed.status.success());
+    let root = fixture.root();
+    let stage = root.join("tmp/operation-aaaaaaaaaaaa");
+    fs::create_dir(&stage).unwrap();
+    let before = snapshots::snapshot(&root);
+    for json in [false, true] {
+        let mut command = fixture.command();
+        if json {
+            command.arg("--json");
+        }
+        command.args(["prune", "--grace-period", "0"]);
+        fail_child_fsync(&mut command);
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("sync ref namespace before pruning"),
+            "{stderr}"
+        );
+        if json {
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["scan_complete"], false);
+            assert_eq!(report["diagnostics"][0]["phase"], "sync");
+            assert!(
+                report["diagnostics"][0]["path"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(root.join("refs").to_str().unwrap())
+            );
+            for summary in report["summaries"].as_object().unwrap().values() {
+                for field in [
+                    "eligible_count",
+                    "eligible_bytes",
+                    "removed_count",
+                    "removed_bytes",
+                ] {
+                    assert_eq!(summary[field], 0);
+                }
+            }
+            assert!(report["candidates"].as_array().unwrap().iter().all(
+                |candidate| candidate["eligible"] == false && candidate["removed_entries"] == 0
+            ));
+        } else {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("Pruning blocked") && stdout.contains("nothing was removed"),
+                "{stdout}"
+            );
+        }
+        assert_eq!(snapshots::snapshot(&root), before);
+    }
+    let mut dry = fixture.command();
+    dry.args(["--json", "prune", "--dry-run", "--grace-period", "0"]);
+    fail_child_fsync(&mut dry);
+    assert!(dry.output().unwrap().status.success());
+    assert_eq!(snapshots::snapshot(&root), before);
+    let retry = fixture
+        .command()
+        .args(["--json", "prune", "--grace-period", "0"])
+        .output()
+        .unwrap();
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&retry.stdout).unwrap();
+    assert_eq!(report["summaries"]["raw_image"]["removed_count"], 1);
+    assert_eq!(report["summaries"]["blob"]["removed_count"], 2);
+    assert_eq!(report["summaries"]["staging"]["removed_count"], 1);
+    assert!(!stage.exists());
+    let mut empty = fixture.command();
+    empty.args(["prune", "--grace-period", "0"]);
+    fail_child_fsync(&mut empty);
+    assert!(empty.output().unwrap().status.success());
+}
+
+#[test]
+fn prune_cli_cleans_bookkeeping_with_default_grace_and_matches_library_reports() {
+    use hpc_image_store::{LocalRef, PruneOptions, Store, StoreConfig};
+    use std::{fs, os::unix::fs::MetadataExt};
+    let fixture = InventoryFixture::new();
+    fixture.import("unused:tag");
+    assert!(
+        fixture
+            .command()
+            .args(["remove", "unused:tag"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let root = fixture.root();
+    let live = LocalRef::new("tool:t").unwrap();
+    let dead = LocalRef::new("unused:tag").unwrap();
+    let live_lock = root
+        .join("locks/refs")
+        .join(live.encoded_path())
+        .join("ref.lock");
+    let inode = fs::metadata(&live_lock).unwrap().ino();
+    let before = snapshots::snapshot(&root);
+    let output = fixture
+        .command()
+        .args(["--json", "prune", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let store = Store::new(StoreConfig::new(&root).unwrap());
+    let library = store
+        .prune(&PruneOptions {
+            dry_run: true,
+            ..PruneOptions::default()
+        })
+        .unwrap();
+    assert_eq!(serde_json::to_value(library).unwrap(), json);
+    for kind in ["ref_lock", "ref_lock_directory", "ref_directory"] {
+        assert_eq!(json["summaries"][kind]["eligible_count"], 1);
+        assert_eq!(json["summaries"][kind]["eligible_bytes"], 0);
+    }
+    for kind in ["blob", "raw_image", "staging"] {
+        assert_eq!(json["summaries"][kind]["eligible_count"], 0);
+    }
+    let human = fixture
+        .command()
+        .args(["prune", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    let text = String::from_utf8(human.stdout).unwrap();
+    for label in [
+        "unused ref locks",
+        "empty lock directories",
+        "empty ref directories",
+    ] {
+        assert!(text.contains(label));
+    }
+    assert_eq!(snapshots::snapshot(&root), before);
+    let actual = fixture
+        .command()
+        .args(["--json", "prune"])
+        .output()
+        .unwrap();
+    assert!(
+        actual.status.success(),
+        "{}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&actual.stdout).unwrap();
+    for kind in ["ref_lock", "ref_lock_directory", "ref_directory"] {
+        assert_eq!(json["summaries"][kind]["removed_count"], 1);
+    }
+    assert!(!root.join("refs").join(dead.encoded_path()).exists());
+    assert!(!root.join("locks/refs").join(dead.encoded_path()).exists());
+    assert_eq!(fs::metadata(&live_lock).unwrap().ino(), inode);
 }

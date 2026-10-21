@@ -1,13 +1,13 @@
 use clap::CommandFactory;
 use clap::{Parser, Subcommand, ValueEnum};
 use hpc_image_store::{
-    CheckScope, ImageSelector, ImportOptions, LocalRef, Platform, PullContext, PullOptions, Store,
-    StoreConfig, TransferContext, presentation,
+    CheckScope, ImageSelector, ImportOptions, LocalRef, Platform, PruneOptions, PullContext,
+    PullOptions, Store, StoreConfig, TransferContext, presentation,
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 #[derive(Parser)]
-#[command(about = "Import, pull, export, list, check and remove images in a filesystem OCI store")]
+#[command(about = "Import, pull, export, list, check, remove and prune a filesystem OCI store")]
 struct Cli {
     #[arg(long)]
     store: PathBuf,
@@ -73,6 +73,15 @@ enum Action {
         #[arg(long)]
         digests: bool,
     },
+    /// Reclaim recognized unreferenced content in an initialized store.
+    Prune {
+        /// Report eligible objects without changing the store.
+        #[arg(long)]
+        dry_run: bool,
+        /// Object age: integer seconds, optionally suffixed with s, m, h or d.
+        #[arg(long, default_value = "24h", value_parser = parse_duration)]
+        grace_period: Duration,
+    },
     /// Remove one named ref, leaving its content for future pruning.
     Remove { local_ref: LocalRef },
     /// Check metadata and all supported local OCI dependencies, without hashing.
@@ -109,6 +118,27 @@ fn parse_platform(value: &str) -> Result<Platform, String> {
         variant: fields.get(2).map(|field| (*field).into()),
     })
 }
+fn parse_duration(value: &str) -> Result<Duration, String> {
+    let (digits, multiplier) = match value.as_bytes().last() {
+        Some(b's') => (&value[..value.len() - 1], 1),
+        Some(b'm') => (&value[..value.len() - 1], 60),
+        Some(b'h') => (&value[..value.len() - 1], 60 * 60),
+        Some(b'd') => (&value[..value.len() - 1], 24 * 60 * 60),
+        _ => (value, 1),
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(
+            "expected nonnegative integer seconds, optionally suffixed with s, m, h or d".into(),
+        );
+    }
+    digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|amount| amount.checked_mul(multiplier))
+        .map(Duration::from_secs)
+        .ok_or_else(|| "grace period exceeds u64 seconds".into())
+}
+
 fn execute(cli: Cli) -> hpc_image_store::Result<bool> {
     let store = Store::new(StoreConfig::new(cli.store)?);
     let context = TransferContext {
@@ -117,6 +147,39 @@ fn execute(cli: Cli) -> hpc_image_store::Result<bool> {
         platform: cli.platform,
     };
     match cli.command {
+        Action::Prune {
+            dry_run,
+            grace_period,
+        } => {
+            let report = store.prune(&PruneOptions {
+                dry_run,
+                grace_period,
+            })?;
+            for diagnostic in &report.diagnostics {
+                eprintln!(
+                    "hpc-image-store: {:?}: {}: {}",
+                    diagnostic.phase,
+                    diagnostic.path.display(),
+                    diagnostic.message
+                );
+            }
+            for skipped in &report.skipped {
+                eprintln!(
+                    "hpc-image-store: skipped {}: {}",
+                    skipped.path.display(),
+                    skipped.reason
+                );
+            }
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).expect("report serialization")
+                );
+            } else {
+                print!("{}", presentation::format_prune(&report));
+            }
+            return Ok(!report.has_errors());
+        }
         Action::Check { selector, all: _ } => {
             let scope = selector.map_or(CheckScope::All, CheckScope::Image);
             let report = store.check(&scope)?;

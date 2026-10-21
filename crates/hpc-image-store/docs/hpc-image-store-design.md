@@ -1,6 +1,6 @@
 # Filesystem OCI Image Store Design
 
-Version 1.8 · 21 October 2026 · Conceptual design baseline
+Version 1.10 · 22 October 2026 · Conceptual design baseline
 
 ## 1 Purpose and scope
 
@@ -59,7 +59,7 @@ store/
 ├── tmp/operation-<id>/             # Unpublished acquisition work
 │   ├── layout/
 │   └── blobs/sha256/
-└── locks/                         # Stable coordination identities
+└── locks/                         # Store and per-ref coordination
     ├── store.lock
     └── refs/<encoded-key>/ref.lock
 ```
@@ -184,7 +184,7 @@ Always sync the immediate parent for an unmarked store, including retries and ex
 
 After interruption, a retry reuses only recognized empty setup directories and the reserved temporary marker. It preserves the store directory and lock identity, rejects unexpected contents, and never automatically deletes them. No recovery record or history of directory creation is needed.
 
-For an already marked store, mutating preparation validates it under the store lock and syncs the marker and store directory again, without opening its parent or other ancestors. This completes a save interrupted after marker publication; seeing the marker alone is not proof that the final sync succeeded. Read operations use the existing lock-and-validation behavior and do not initialize missing stores. Image operations use the lock modes in section 4 after initialization.
+For an already marked store, import/pull/remove preparation validates it under the store lock and syncs the marker and store directory again, without opening its parent or other ancestors. This completes a save interrupted after marker publication; seeing the marker alone is not proof that the final sync succeeded. Read operations use the existing lock-and-validation behavior and do not initialize missing stores. Image operations use the lock modes in section 4 after initialization.
 
 ## 3 Skopeo and the wrapper
 
@@ -232,7 +232,17 @@ Acquire the store lock before a ref lock. Hold locks for the operation's use of 
 
 This allows work on different refs to proceed concurrently while preventing prune from deleting content used by an active operation. Concurrent insertion of the same digest must also be safe; ref locks alone do not protect shared blobs.
 
-Lock identities remain stable across ref replacement and removal. Lock behavior must work across nodes on the actual parallel filesystem. These locks coordinate the persistent store; Skopeo and containers-storage retain their own storage coordination.
+The store lock identity is permanent. Ref-lock identities remain stable across
+ordinary replacement and removal, while their ref is committed, and while any
+process holds or waits for the lock. Only prune under the exclusive store lock
+may reclaim a recognized unused ref lock. Every holder, waiter, and transfer
+child must retain its shared store lock until all its ref-lock descriptors close;
+there must be no cached ref-lock descriptors outside that lifetime. This lets
+prune remove unused lock files without leaving old and recreated locks active
+for the same name. Later operations can recreate the bookkeeping for an absent
+ref. Lock behavior must work across nodes on the actual parallel filesystem.
+These locks coordinate the persistent store; Skopeo and containers-storage retain
+their own storage coordination.
 
 List and check need coherent observations of individual refs, but do not promise a single snapshot of the entire store.
 
@@ -489,13 +499,15 @@ selectors are intentionally unsupported, including `name:tag@digest`; removal
 does not perform digest resolution. Under its locks, make that ref absent
 from the committed namespace as one logical change. Retire its associated raw
 image, including layout and metadata, for later pruning. Leave shared blobs,
-namespace directories, and stable lock identities untouched.
+namespace directories, and lock identities untouched for later explicit prune.
 
 Other refs and containers-storage are unaffected. A damaged ref can be explicitly removed; discovering damage is never itself a reason to remove it.
 
 ### Prune
 
-Prune is explicit maintenance, with an optional dry-run mode.
+Prune is explicit maintenance, with an optional dry-run mode. Both modes require
+an initialized store and never create setup or ref-lock files. Prune does not
+resume initialization.
 
 Under the exclusive store lock:
 
@@ -518,6 +530,46 @@ block destructive pruning. Excluding index acquisition and export from scope
 never justifies ignoring dependencies.
 
 The grace period provides a recovery margin, not concurrency protection. Prune cleans only recognized internal data and must not delete active lock identities or silently discard broken committed refs.
+
+The default grace period is 24 hours, with an explicit duration override including
+zero. Use blob modification times and staging/raw-image root directory modification
+times, measured against one time captured after locking. This measures object age,
+not time since removal. Future timestamps remain ineligible, even with zero grace,
+and CAS reuse must preserve blob age.
+
+Recognize only current internal names and structures. Missing expected entries
+and partial writes can be cleaned, but any unknown name or unexpected entry type
+preserves the entire cleanup directory. Preserve unknown tool temporary files,
+never follow symlinks, and report these skips without failing the operation.
+Enumeration or metadata-access failures instead block all deletion.
+
+Before any destructive cleanup, persist the namespace used by the completed
+scan. While holding the exclusive store lock, sync every scanned ref directory
+from children to parents through `refs/`, including empty directories and
+intermediate encoded-name directories. A visible removal or replacement may have
+outlived a failed parent sync or interrupted publisher; its older ref must not
+reappear after pruning reclaims that ref's content. Any namespace sync failure
+blocks every deletion, including staging cleanup. Report the failing directory
+as a sync diagnostic and leave eligible and removed totals at zero. Dry-run skips
+this barrier and makes no promise that it would succeed; destructive prune also
+skips it when there are no eligible candidates.
+
+Unused ref bookkeeping is eligible immediately, independently of the content
+grace period. Reclaim only empty single-link regular `ref.lock` files for absent
+refs with valid encoded identities. Preserve malformed identities, unexpected
+files and types, and lock subtrees containing unknown contents. Never follow
+symlinks. Plan empty-directory cleanup from children to parents beneath `refs/`
+and `locks/refs`, retaining ancestors needed by remaining entries and both roots.
+Operational inspection failures block all deletion. The namespace durability
+barrier also applies when bookkeeping is the only eligible cleanup.
+
+After completing the scan, delete eligible staging, retired raw images, and CAS
+files in that order, followed by unused ref lock files, empty lock directories,
+and empty ref directories. Remove children before parents and sync affected parent
+directories. Stop at the first removal or sync failure, report partial progress
+and any visible change whose durability is uncertain, and do not roll back.
+Reports use actual regular-file lengths of candidate entries, counting hard links
+separately, rather than cached image sizes or estimates of physical space reclaimed.
 
 Removing a ref and pruning its content are intentionally separate. The ref's cached image size is not an estimate of space that prune will reclaim.
 

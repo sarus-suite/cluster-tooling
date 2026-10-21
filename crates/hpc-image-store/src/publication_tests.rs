@@ -20,6 +20,11 @@ use std::{
 #[path = "availability/tests.rs"]
 mod availability_tests;
 
+#[path = "prune/bookkeeping_tests.rs"]
+mod bookkeeping_tests;
+#[path = "prune/tests.rs"]
+mod prune_tests;
+
 // Precomputed SHA-256 identities for complete, zero-layer OCI fixtures. Runtime
 // publication deliberately does not hash content; these bytes are fixture inputs.
 const CONFIG: &[u8] =
@@ -923,6 +928,16 @@ fn publication_worker() {
     let action = std::env::var("HPC_PUBLICATION_ACTION").unwrap();
     println!("PUBLICATION_STARTED");
     std::io::stdout().flush().unwrap();
+    if action.starts_with("bookkeeping-") {
+        bookkeeping_tests::worker(&handle, &reference);
+        println!("PUBLICATION_READY");
+        return;
+    }
+    if action.starts_with("prune-") {
+        prune_tests::worker(&handle, &action);
+        println!("PUBLICATION_READY");
+        return;
+    }
     if action.starts_with("availability-") {
         availability_tests::worker(&handle, &reference, &action);
         println!("PUBLICATION_READY");
@@ -1128,7 +1143,7 @@ struct Worker {
 impl Worker {
     fn start(root: &Path, reference: &LocalRef, action: &str) -> Self {
         let mut command = Command::new(std::env::current_exe().unwrap());
-        if action == "availability-permissions" && unsafe { libc::geteuid() } == 0 {
+        if action.ends_with("-permissions") && unsafe { libc::geteuid() } == 0 {
             use std::os::unix::process::CommandExt;
             command.uid(65534).gid(65534);
         }

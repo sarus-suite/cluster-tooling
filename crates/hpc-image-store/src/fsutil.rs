@@ -112,6 +112,12 @@ pub(crate) fn fault(_point: &'static str) -> io::Result<()> {
         let failure = FAILURE.with(|slot| {
             let mut value = slot.borrow_mut();
             if value.as_ref().is_some_and(|(point, _)| *point == _point) {
+                if let Some((_, FaultAction::FailAfter { remaining, .. })) = value.as_mut()
+                    && *remaining > 0
+                {
+                    *remaining -= 1;
+                    return None;
+                }
                 if let Some((point, FaultAction::Persistent(errno))) = *value {
                     Some((point, FaultAction::Persistent(errno)))
                 } else {
@@ -123,7 +129,9 @@ pub(crate) fn fault(_point: &'static str) -> io::Result<()> {
         });
         if let Some((_, action)) = failure {
             match action {
-                FaultAction::Fail(errno) | FaultAction::Persistent(errno) => {
+                FaultAction::Fail(errno)
+                | FaultAction::Persistent(errno)
+                | FaultAction::FailAfter { errno, .. } => {
                     return Err(io::Error::from_raw_os_error(errno));
                 }
                 FaultAction::Pause => {
@@ -146,6 +154,7 @@ thread_local! {
 #[cfg(test)]
 #[derive(Clone, Copy)]
 enum FaultAction {
+    FailAfter { remaining: usize, errno: i32 },
     Persistent(i32),
     Fail(i32),
     Pause,
@@ -177,4 +186,11 @@ pub(crate) fn fail_persistently(point: &'static str, errno: i32) {
 #[cfg(test)]
 pub(crate) fn clear_failure() {
     FAILURE.with(|slot| *slot.borrow_mut() = None);
+}
+
+#[cfg(test)]
+pub(crate) fn fail_after(point: &'static str, remaining: usize, errno: i32) {
+    FAILURE.with(|slot| {
+        *slot.borrow_mut() = Some((point, FaultAction::FailAfter { remaining, errno }))
+    });
 }

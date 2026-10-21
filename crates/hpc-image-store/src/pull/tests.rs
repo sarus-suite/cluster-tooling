@@ -696,6 +696,12 @@ fn try_exclusive(path: &Path) -> bool {
 fn terminated_pull_keeps_prior_ref_and_orphan_copy_locks() {
     let mut fixture = Fixture::new();
     fixture.pull(false).unwrap();
+    let unused = crate::LocalRef::new("unused:tag").unwrap();
+    fixture
+        .store
+        .availability(&selector(unused.as_str()))
+        .unwrap();
+    let unused_lock = fixture.store.layout.ref_lock(&unused);
     let pointer = fs::read_link(fixture.pointer()).unwrap();
     let directory = fixture.temporary.path();
     let release = directory.join("release");
@@ -739,6 +745,14 @@ fn terminated_pull_keeps_prior_ref_and_orphan_copy_locks() {
         .join("ref.lock");
     assert!(!try_exclusive(&store_lock));
     assert!(!try_exclusive(&ref_lock));
+    {
+        let _short = crate::locks::short_test_waits();
+        assert!(matches!(
+            fixture.store.prune(&crate::PruneOptions::default()),
+            Err(Error::LockTimeout { .. })
+        ));
+    }
+    assert!(unused_lock.exists());
     assert_eq!(fs::read_link(fixture.pointer()).unwrap(), pointer);
     assert!(
         fixture
@@ -759,4 +773,63 @@ fn terminated_pull_keeps_prior_ref_and_orphan_copy_locks() {
             .count(),
         1
     );
+    let inode = fs::metadata(&ref_lock).unwrap().ino();
+    let report = fixture
+        .store
+        .prune(&crate::PruneOptions::default())
+        .unwrap();
+    assert!(!report.has_errors(), "{report:?}");
+    assert!(!unused_lock.exists());
+    assert_eq!(fs::metadata(&ref_lock).unwrap().ino(), inode);
+}
+
+#[test]
+fn prune_reclaims_failed_pull_and_cleanup_warning_remnants_without_tools() {
+    for case in ["copy-failure", "ref.rename", "staging.cleanup-remove"] {
+        let mut fixture = Fixture::new();
+        fixture.pull(false).unwrap();
+        if case == "copy-failure" {
+            fixture.config["copy_failure"] = json!("controlled failure");
+            fixture.save();
+        } else {
+            fsutil::fail_once(
+                if case == "ref.rename" {
+                    "ref.rename"
+                } else {
+                    "staging.cleanup-remove"
+                },
+                libc::EIO,
+            );
+        }
+        let result = fixture.pull(true);
+        if case == "staging.cleanup-remove" {
+            assert_eq!(result.unwrap().cleanup_warnings.len(), 1);
+        } else {
+            assert!(result.is_err());
+        }
+        let calls = fixture.calls().len();
+        let report = fixture
+            .store
+            .prune(&crate::PruneOptions {
+                dry_run: false,
+                grace_period: Duration::ZERO,
+            })
+            .unwrap();
+        assert!(!report.has_errors(), "{report:?}");
+        assert!(report.summaries[&crate::PruneKind::Staging].removed_count > 0);
+        assert_eq!(
+            fs::read_dir(fixture.store.config().root().join("tmp"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert_eq!(
+            fs::read_dir(fixture.store.config().root().join("raw_images"))
+                .unwrap()
+                .count(),
+            1
+        );
+        assert_eq!(fixture.calls().len(), calls);
+        assert!(!fixture.store.check(&CheckScope::All).unwrap().has_errors());
+    }
 }
