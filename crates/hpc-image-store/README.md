@@ -14,6 +14,12 @@ Inventory formatting can match Podman's image table or show richer fields and
 JSON diagnostics. Pull and prune remain future operations, and there is no
 `init` CLI action. Recorded validation results are listed below.
 
+Multi-platform stored images, complete-index storage, index-parent metadata
+and inventory, platform-selecting index export, and nested-index source
+resolution are unsupported and deferred beyond that PoC. A planned tag pull
+may use a registry index to select one image manifest, without retaining the
+index or other platforms. See [Planned registry acquisition](#planned-registry-acquisition).
+
 The [filesystem image store design](docs/hpc-image-store-design.md) describes
 the agreed behavior and guarantees. The
 [staged implementation plan](docs/hpc-image-store-implementation-plan.md)
@@ -209,8 +215,9 @@ architecture, with correctly typed optional platform and creation fields.
 Layers must exist locally even when their descriptors include URLs or embedded
 data. Docker-specific media types, unknown schemas and media types, artifacts,
 and `subject`-bearing content are reported as unresolved. Stage 5 can inspect
-index graphs through internal fixtures; public index acquisition and export,
-and metadata that describes an index parent, remain stage-6 work.
+index graphs through internal fixtures. This capability and its tests remain
+in place, but public index acquisition and export, and metadata that describes
+an index parent, are deferred beyond the current PoC.
 
 `CheckReport` contains `entries`, structured `diagnostics`, and `complete`.
 Each entry includes its path, optional local ref and authoritative root, and
@@ -257,8 +264,8 @@ layers and preserves supported existing compression. A content digest identifies
 the exact bytes of an object. Import can change the manifest, layer
 representation, and their digests, so it does not claim to preserve the original
 registry identity. The `pull` acquisition kind in
-metadata establishes a future policy for exports that preserve digests, but
-there is no pull operation or image-index export yet.
+metadata establishes the policy for exports that preserve digests. Registry
+pull and preservation qualification implementation is upcoming.
 
 Export validates the small files and pointer that describe the selected ref,
 then relies on Skopeo to report content or transfer failures. Neither import
@@ -266,6 +273,81 @@ nor export hashes layers or checks the entire graph of referenced image
 objects. Export leaves the persistent ref unchanged, and any partial data at
 the destination belongs to containers-storage. Export creates no temporary
 staging directory in the filesystem store.
+
+### Planned registry acquisition
+
+The following contract describes planned imlementation, not available
+commands or new validation results. Pull will require Skopeo, not Podman, and
+will not populate containers-storage. It will accept the common image selector,
+an optional destination, replacement, notes, and registry configuration separate
+from containers-storage settings. Destination naming will follow import's
+existing rules, including source-derived fallback tags and notices for ignored
+explicit destination digests.
+
+Before transferring layers, the library will use `skopeo inspect --raw` to
+resolve one supported platform-specific image manifest:
+
+- A digest source must identify the manifest itself. An explicit digest takes
+  precedence over any source tag. Index and manifest-list digests, including
+  single-entry indexes, will be rejected without selecting a child.
+- A tag source will be inspected once. For a direct manifest, its digest will
+  be calculated from the exact raw response bytes, without reserializing JSON.
+  For an OCI index or Docker manifest list, the library will select one supported
+  manifest descriptor and inspect that child by digest, verifying its type,
+  digest, and descriptor size before copying. It will not look up the mutable
+  tag again or retain the source index and other platforms.
+- Malformed objects, unsupported schemas or representations, and resolution
+  requiring nested-index traversal will fail. Reading a Docker manifest-list
+  envelope will not add support for storing Docker-specific image content.
+
+The registry pull context will accept an optional `Platform`, exposed through
+CLI `--platform OS/ARCH[/VARIANT]`. Unlike current containers-storage transfers,
+planned pull will use these bounded library rules rather than Skopeo's default
+selection and compatibility fallbacks:
+
+| Input | Planned pull behavior |
+| --- | --- |
+| Index tag, no explicit platform | Select `linux/amd64` for an `x86_64` library target or `linux/arm64` for an `aarch64` target; other targets require an explicit platform. Do not detect CPU variants. |
+| Index tag, explicit platform | Match descriptor OS and architecture, and variant when supplied. Without a supplied variant, do not filter by variant. |
+| Direct manifest, no explicit platform | Accept its actual platform without host selection. |
+| Any source, explicit platform | Verify completed configuration OS, architecture, and any supplied variant before publication; missing or mismatching required values fail. |
+
+Index selection will require one distinct matching manifest digest. Consistent
+duplicate descriptors may collapse to one candidate. No match or multiple
+distinct matches will fail with actionable diagnostics, rather than selecting
+by descriptor order. These rules can differ from Skopeo's selection. Repository
+names will not enforce one architecture across all tags; that remains an
+operational convention.
+
+Skopeo will copy the pinned `repository@manifest-digest` into private staging
+with `--preserve-digests`, without `--all`, forced conversion, recompression, or
+fallback to another digest. The completed root must be that single supported
+manifest. The library will reuse existing CAS publication, locks, durability,
+replacement, and cleanup. Consistent authentication, certificate, trust-policy,
+and environment configuration will apply across inspection and copying;
+credentials will not be recorded in metadata. Layer validation remains Skopeo's
+responsibility, without another full checker pass or layer hashing.
+
+Requested source and stored identity will remain distinct. For example, a tag
+that resolves through index `I` to manifest `A` records the requested tag and
+`resolved_digest == stored_root == A`; index `I` is neither stored nor a lookup
+alias. Metadata and stored size describe the manifest, configuration, and unique
+layers. Store format 1 and ref metadata schema 3 will remain unchanged.
+
+Stage 6.2 will build on the existing export branch for pull metadata and qualify
+real registry-to-store-to-containers-storage digest preservation. Pulled content
+must preserve its manifest digest or fail. Existing import-acquired export
+behavior, source lookup, optional destinations, destination-digest enforcement,
+and manifest reporting will remain. Export will reject index roots and cannot
+choose another architecture from a single manifest. Persistent refs and metadata
+remain unchanged; partial destination data belongs to containers-storage.
+
+Stage 7 will reuse the checker's authoritative graph reader. Any encountered
+index must be traversed completely or block destructive pruning; deferred public
+index support does not permit ignoring dependencies. Stage 8 will qualify the
+single-platform workflows, using index fixtures for tag selection and
+digest-source rejection. Complete-index round trips and related qualification
+remain deferred, and local PoC completion will not qualify Lustre or VAST.
 
 ## Using the Rust library
 
@@ -570,9 +652,9 @@ complete new layout, with its matching metadata. Updating `index.json` and
 states, and an ordinary directory rename cannot replace an existing nonempty
 directory.
 
-The internal storage primitives described here also support behavior reserved
-for later stages. Registry pulls and image-index transfers remain future public
-operations.
+The internal storage primitives described here also support future behavior.
+Registry pull is planned and upcoming; image-index acquisition and export are
+deferred for future work and are not supported public operations in the PoC.
 
 ### Preparing and saving the image
 

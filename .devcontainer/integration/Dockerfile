@@ -61,5 +61,7 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o /tmp/integrati
     && rustup component add rustfmt clippy \
     && mkdir -p "$CARGO_TARGET_DIR"
 
+RUN curl -fsSL https://opencode.ai/v2/install | bash
+
 WORKDIR /workspaces/cluster-tooling
 CMD ["sleep", "infinity"]
