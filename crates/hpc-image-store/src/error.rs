@@ -49,6 +49,15 @@ pub enum Error {
         source_selector: String,
         destination: String,
     },
+    #[error(
+        "pull destination {destination} requires a tag because source {source_selector} has no explicit digest; the destination digest is ignored and cannot supply a generated tag"
+    )]
+    InvalidPullDestination {
+        source_selector: String,
+        destination: String,
+    },
+    #[error("cannot resolve registry source {reference}: {reason}")]
+    RegistryResolution { reference: String, reason: String },
     #[error("{executable} lacks required capability {capability}")]
     ToolCapability {
         executable: PathBuf,

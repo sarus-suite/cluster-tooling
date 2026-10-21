@@ -108,20 +108,19 @@ fn invalid_cli_usage_does_not_initialize_a_store() {
     }
 }
 #[test]
-fn help_is_successful_and_lists_stage_five_commands() {
+fn help_is_successful_and_lists_implemented_commands() {
     let output = cli().arg("--help").output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("import") && help.contains("export"));
     assert!(help.contains("list") && help.contains("remove"));
     assert!(help.contains("check"));
-    for command in ["prune", "pull"] {
-        assert!(
-            !help
-                .lines()
-                .any(|line| line.split_whitespace().next() == Some(command))
-        );
-    }
+    assert!(help.contains("pull"));
+    assert!(
+        !help
+            .lines()
+            .any(|line| line.split_whitespace().next() == Some("prune"))
+    );
     assert!(!help.contains("--storage-driver"));
     assert!(output.stderr.is_empty());
 }

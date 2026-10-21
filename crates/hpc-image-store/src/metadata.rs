@@ -57,6 +57,26 @@ pub struct Platform {
     pub variant: Option<String>,
 }
 
+impl Platform {
+    pub(crate) fn validate(&self) -> Result<()> {
+        for value in [&self.os, &self.architecture]
+            .into_iter()
+            .chain(self.variant.iter())
+        {
+            if value.is_empty()
+                || !value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+            {
+                return Err(Error::InvalidTransfer(
+                    "platform fields must be nonempty identifiers".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Display caches derived from completed OCI content, not operational provenance.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ContentMetadata {
@@ -74,8 +94,7 @@ pub enum Acquisition {
         source: String,
         image_id: ImageId,
     },
-    // No pull operation is exposed yet. This discriminator establishes
-    // the export policy; registry acquisition and index support come later.
+    /// Registry provenance describes the single stored manifest, never an index.
     Pull {
         requested_reference: String,
         resolved_digest: Sha256Digest,
@@ -110,6 +129,28 @@ impl RefMetadata {
             content,
             acquired_at_unix_seconds,
             acquisition: Acquisition::Import { source, image_id },
+            notes,
+        }
+    }
+    /// Construct provenance from the stored manifest identity, without a second alias.
+    pub fn new_pull(
+        local_ref: LocalRef,
+        stored_root: Sha256Digest,
+        content: ContentMetadata,
+        acquired_at_unix_seconds: u64,
+        requested_reference: String,
+        notes: Option<String>,
+    ) -> Self {
+        Self {
+            version: 3,
+            local_ref,
+            acquisition: Acquisition::Pull {
+                requested_reference,
+                resolved_digest: stored_root.clone(),
+            },
+            stored_root,
+            content,
+            acquired_at_unix_seconds,
             notes,
         }
     }

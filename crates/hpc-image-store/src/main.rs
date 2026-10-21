@@ -1,13 +1,13 @@
 use clap::CommandFactory;
 use clap::{Parser, Subcommand, ValueEnum};
 use hpc_image_store::{
-    CheckScope, ImageSelector, ImportOptions, LocalRef, Platform, Store, StoreConfig,
-    TransferContext, presentation,
+    CheckScope, ImageSelector, ImportOptions, LocalRef, Platform, PullContext, PullOptions, Store,
+    StoreConfig, TransferContext, presentation,
 };
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(about = "Import, export, list, check and remove images in a filesystem OCI store")]
+#[command(about = "Import, pull, export, list, check and remove images in a filesystem OCI store")]
 struct Cli {
     #[arg(long)]
     store: PathBuf,
@@ -15,7 +15,7 @@ struct Cli {
     skopeo: PathBuf,
     #[arg(long, global = true, default_value = "podman")]
     podman: PathBuf,
-    /// Optional OS/ARCH[/VARIANT] selection; otherwise use Skopeo's host default.
+    /// OS/ARCH[/VARIANT]. Pull uses library index defaults; import/export use Skopeo defaults.
     #[arg(long, global = true, value_parser = parse_platform)]
     platform: Option<Platform>,
     #[arg(long, global = true)]
@@ -34,6 +34,29 @@ enum Action {
         replace: bool,
         #[arg(long)]
         notes: Option<String>,
+    },
+    /// Pull one registry OCI manifest, preserving its digest
+    Pull {
+        /// Registry name[:tag][@sha256:digest]; if a digest is provided, it must point to a manifest.
+        source: ImageSelector,
+        /// Destination defaults to the source; retain its tag or use the source digest's first 12 hex digits. Explicit destination digests are ignored.
+        destination: Option<ImageSelector>,
+        #[arg(long)]
+        replace: bool,
+        #[arg(long)]
+        notes: Option<String>,
+        /// Skopeo authentication file; defaults to inherited configuration.
+        #[arg(long)]
+        authfile: Option<PathBuf>,
+        /// Registry certificate directory.
+        #[arg(long)]
+        cert_dir: Option<PathBuf>,
+        /// Skopeo trust-policy file.
+        #[arg(long)]
+        policy: Option<PathBuf>,
+        /// Override registry TLS verification; omit to inherit registry configuration.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+        tls_verify: Option<bool>,
     },
     Export {
         /// Stored name[:tag][@sha256:digest]; a digest overrides the tag within this repository.
@@ -151,6 +174,55 @@ fn execute(cli: Cli) -> hpc_image_store::Result<bool> {
                 );
             }
         }
+        Action::Pull {
+            source,
+            destination,
+            replace,
+            notes,
+            authfile,
+            cert_dir,
+            policy,
+            tls_verify,
+        } => {
+            let context = PullContext {
+                skopeo: context.skopeo,
+                platform: context.platform,
+                auth_file: authfile,
+                cert_dir,
+                policy,
+                tls_verify,
+            };
+            let report = store.pull(
+                &source,
+                destination.as_ref(),
+                &context,
+                &PullOptions { replace, notes },
+            )?;
+            if let Some(digest) = &report.ignored_destination_digest {
+                eprintln!(
+                    "hpc-image-store: notice: ignoring pull destination digest {digest}; {} names the completed stored root {}",
+                    report.local_ref, report.stored_root
+                );
+            }
+            for warning in &report.cleanup_warnings {
+                eprintln!(
+                    "hpc-image-store: warning: {}: {}",
+                    warning.staging_path.display(),
+                    warning.message
+                );
+            }
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).expect("report serialization")
+                );
+            } else {
+                println!(
+                    "Pulled {} as {} ({} bytes)",
+                    report.local_ref, report.stored_root, report.content.size_bytes
+                );
+            }
+        }
         Action::Export {
             selector,
             destination,
@@ -230,6 +302,7 @@ fn main() {
             if matches!(
                 error,
                 hpc_image_store::Error::InvalidImportDestination { .. }
+                    | hpc_image_store::Error::InvalidPullDestination { .. }
             ) {
                 usage_error(error);
             }

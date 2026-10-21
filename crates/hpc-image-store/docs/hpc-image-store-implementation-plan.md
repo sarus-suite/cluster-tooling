@@ -1,18 +1,35 @@
 # Staged implementation of the HPC OCI image store
 
-Status: stages 1–5 are implemented in `crates/hpc-image-store`. The crate
-provides single-platform containers-storage import and export, inventory,
-read-only graph checking, and explicit-name removal. Stage 4.1 adds common
-selectors, repository-scoped stored-root lookup, and digest-aware transfer
-arguments without changing store format 1 or ref metadata schema 3. Stage 5
-checks complete supported OCI image
-graphs, including nested indexes, without changing those formats. Stages 6–8
-remain planned, with stage 6 split into pull (6.1) and digest-preserving export
-(6.2). Stage 8 completes the first proof of concept (PoC). Multi-platform stored
-images and complete-index storage remain outside that PoC. Lustre/VAST behavior
-remains unqualified pending site tests.
+Status: stages 1–5 and 6.1 are implemented in `crates/hpc-image-store`.
+The crate provides single-platform containers-storage import and export,
+registry pull preserving one OCI manifest digest, inventory, read-only graph
+checking, and explicit-name removal. Stage 4.1 supplies common selectors and
+repository-scoped stored-root lookup; stage 5 checks complete supported OCI
+graphs, including nested indexes. Stage 6.1 adds raw registry resolution,
+bounded platform selection, and separate registry configuration while retaining
+store format 1 and ref metadata schema 3. Stage 6.2 export qualification and
+stages 7–8 remain planned. Stage 8 completes the first proof of concept (PoC).
+Multi-platform stored images and complete-index storage remain outside that
+PoC. Lustre/VAST behavior remains unqualified pending site tests.
 
 Design baseline: [Filesystem OCI Image Store Design](hpc-image-store-design.md), version 1.6.
+
+Implementation update, 2026-10-21: stage 6.1 passed 138 ordinary tests,
+including five doctests and both existing real-tool tests, with six internal
+subprocess helpers and the Docker Hub smoke test ignored. Crate check, Clippy
+with warnings denied, formatting, and diff checks passed. Real local acceptance
+used Podman 5.4.2 and Skopeo 1.18.0 with fresh disposable overlay storage.
+The explicitly selected Docker Hub smoke test then passed on its only attempt,
+pulling `docker.io/library/alpine:3.23` for `linux/amd64` and checking the result
+locally. It stored manifest
+`sha256:1f3591b8a02ea153f41c5bba878ad477f63ab3d19349762cb77504db02a23e15`.
+Ordinary tests and CI do not contact Docker Hub. Controlled fixtures cover raw
+identity, index selection, tag movement, configuration forwarding, replacement,
+publication failures, cleanup, concurrent content insertion, and orphaned-copy
+locks. Store format 1 and ref metadata schema 3 are unchanged. Stage 6.2,
+pruning, broader stage-8 qualification, and Lustre/VAST site testing remain
+pending. The earlier planning revision and implementation results below are
+historical records.
 
 Planning revision, 2026-10-21: stage 6 now targets single-platform registry
 acquisition and manifest-preserving export. Tag sources may use a registry index
@@ -313,7 +330,7 @@ Implement the two sub-stages below in order. Each acquired ref selects one
 platform-specific OCI image manifest. Complete-index storage and index export
 are explicit PoC limitations, deferred beyond stage 8.
 
-#### 6.1. Add registry pull in the library and CLI
+#### 6.1. Add registry pull in the library and CLI (implemented)
 
 Add library `pull` and its CLI command. Pull does not populate containers-storage
 and requires Skopeo, not Podman.
@@ -405,8 +422,8 @@ remain an operational convention.
 
 This section describes the target contract after the relevant stages. Stage
 4.1 implements the common selectors and containers-storage transfer arguments;
-stage 6.1 adds pull and stage 6.2 qualifies digest-preserving export, both still
-planned. Prune also remains planned, while stage 5 implements checking. Earlier
+stage 6.1 implements pull and stage 6.2 will qualify digest-preserving export.
+Prune also remains planned, while stage 5 implements checking. Earlier
 interfaces and their historical validation are recorded above.
 
 The library exposes a store handle, a common `ImageSelector`, tagged `LocalRef` namespace identities, separate containers-storage transfer and registry pull options, operation reports, and typed failures. Its seven operations are `import`, `pull`, `export`, `list`, `remove`, `check`, and `prune`. Storage semantics and diagnostics belong to the library; argument parsing and presentation belong to the executable.

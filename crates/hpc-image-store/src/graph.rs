@@ -11,8 +11,8 @@ use std::{
 
 pub(crate) const MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 pub(crate) const INDEX: &str = "application/vnd.oci.image.index.v1+json";
-const CONFIG: &str = "application/vnd.oci.image.config.v1+json";
-const LAYERS: [&str; 6] = [
+pub(crate) const CONFIG: &str = "application/vnd.oci.image.config.v1+json";
+pub(crate) const LAYERS: [&str; 6] = [
     "application/vnd.oci.image.layer.v1.tar",
     "application/vnd.oci.image.layer.v1.tar+gzip",
     "application/vnd.oci.image.layer.v1.tar+zstd",
@@ -173,7 +173,7 @@ impl GraphReader {
     }
 }
 
-fn validate_descriptor(descriptor: &Descriptor) -> Result<(), String> {
+pub(crate) fn validate_descriptor(descriptor: &Descriptor) -> Result<(), String> {
     let extra = &descriptor.extra;
     if extra.contains_key("artifactType") || extra.contains_key("subject") {
         return Err("artifact and subject-bearing descriptors are unsupported".into());
