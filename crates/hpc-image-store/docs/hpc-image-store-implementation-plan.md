@@ -7,9 +7,20 @@ selectors, repository-scoped stored-root lookup, and digest-aware transfer
 arguments without changing store format 1 or ref metadata schema 3. Stage 5
 checks complete supported OCI image
 graphs, including nested indexes, without changing those formats. Stages 6–8
-remain planned. Lustre/VAST behavior remains unqualified pending site tests.
+remain planned, with stage 6 split into pull (6.1) and digest-preserving export
+(6.2). Stage 8 completes the first proof of concept (PoC). Multi-platform stored
+images and complete-index storage remain outside that PoC. Lustre/VAST behavior
+remains unqualified pending site tests.
 
-Design baseline: [Filesystem OCI Image Store Design](hpc-image-store-design.md), version 1.5.
+Design baseline: [Filesystem OCI Image Store Design](hpc-image-store-design.md), version 1.6.
+
+Planning revision, 2026-10-21: stage 6 now targets single-platform registry
+acquisition and manifest-preserving export. Tag sources may use a registry index
+to select one manifest, but digest sources must identify that manifest directly.
+Source resolution uses raw registry JSON and the bounded library platform policy
+below. This revision changes documentation only; stages 6.1, 6.2, 7, and 8 are
+not implemented or newly validated. Dated implementation results below are
+historical records.
 
 Implementation update, 2026-10-20: stage 5 passed 120 tests, including four
 doctests and both real-tool tests, with the five existing subprocess helpers
@@ -52,7 +63,15 @@ future work. The README records the interfaces and validation details.
 
 Create a workspace-private `hpc-image-store` crate containing a synchronous library and a thin development CLI. The CLI supports development and debugging; the library owns all storage behavior and can later become a dependency of `sarusctl` and Skybox.
 
-Implement the stages below in order, with each stage independently reviewable. Support single-platform containers-storage imports and digest-preserving registry pulls of manifests or complete multi-platform indexes. Application integration, Parallax cache management, and group-writable stores remain future work. Early stages provide plumbing and need not expose CLI-usable features.
+Implement the stages below in order, with each stage independently reviewable.
+The first PoC ends at stage 8 and supports single-platform containers-storage
+imports and digest-preserving registry pulls of one platform-specific OCI image
+manifest per ref. Tag pulls may select that manifest from an OCI index or Docker
+manifest list; the parent and other platforms are not retained. Complete-index
+storage, multi-platform stored images, nested-index source resolution, and related
+features are deferred beyond the PoC. Application integration, Parallax cache
+management, and group-writable stores also remain future work. Early stages
+provide plumbing and need not expose CLI-usable features.
 
 ## Implementation stages
 
@@ -202,7 +221,7 @@ print collected results and exit 1. Size remains stored-content size.
 - Use a healthy matching ref even if other entries are damaged. If no healthy match exists and damage prevents a complete root scan, report incomplete resolution rather than asserting that the digest is absent.
 - Do not accept qualified registry-provenance selectors or caller-supplied digest aliases. Imported images are selected only by their actual stored roots.
 - Permit explicit removal of damaged refs without following their pointers or touching shared blobs.
-- When index storage becomes available in stage 6, present index roots as multi-platform; do not assign the host platform to the parent root.
+- Index-parent inventory is deferred beyond stage 8. The PoC displays the single platform and config digest of each acquired manifest; it does not assign a host platform to an index parent.
 - Add human-readable and JSON results, keeping CLI formatting outside library operations.
 
 **Acceptance:** stored-root lookup for imported and pulled images; duplicate refs to identical roots; obsolete registry digests never resolve through metadata; damaged layouts and metadata; concurrent replacement/removal; structured diagnostics.
@@ -258,7 +277,7 @@ never generate an alternative tag.
 
 - Default an omitted export destination to the supplied source selector, preserving its spelling rather than using acquisition metadata or the ref selected during lookup.
 - Pass export destination digests through to Skopeo and report digest-mismatch failures; never silently discard them. Follow the upstream [destination digest check](https://github.com/containers/image/blob/main/storage/storage_dest.go). Retain the preservation policy based on acquisition kind.
-- Use this selector for stage-5 single-image checking. Align stage-6 pull with the same selector, optional destination, and source-derived fallback naming rules, while retaining digest-preserving registry acquisition. Pull implementation remains in stage 6.
+- Use this selector for stage-5 single-image checking. Align stage-6.1 pull with the same selector, optional destination, and source-derived fallback naming rules, while retaining digest-preserving registry acquisition. Pull implementation remains in stage 6.1.
 - Keep store format 1 and ref metadata schema 3; no storage migration is required. The README, CLI help, library examples, and implementation status now describe the verified stage-4.1 interfaces.
 
 **Acceptance:**
@@ -285,58 +304,110 @@ stored-root resolution, including its selected-ref lock and diagnostics.
 
 **Acceptance:** named and repository-qualified digest selection; complete multi-platform and nested-index fixtures; missing children and blobs; size mismatches; malformed JSON; unsupported roots; cycles and conflicting descriptors; shared objects; all-ref checks continuing after individual failures. Document that same-size byte corruption may remain undetected.
 
-### 6. Registry pulls and index export
+Preserve this implemented graph traversal and its tests. Internal index-reading
+capability does not imply supported index acquisition, parent metadata, or export.
 
-Add library `pull` and its CLI command after complete graph support is available. Extend export to stored indexes and digest-preserving pulled content.
+### 6. Single-platform registry acquisition and digest-preserving export
 
-- Expose `pull <source-selector> [destination-selector]` using the common `ImageSelector` in both library and CLI, with explicit replacement and optional notes. Default the destination to the supplied source selector. Reuse stage 4.1's source-derived fallback tags, ignored explicit destination digests and notices, and early validation; a source selected by tag cannot supply a generated destination tag. Pull does not populate containers-storage.
-- Separate registry pull options from containers-storage transfer options. Pull has no platform-selection option because it retains the complete root identity.
-- Resolve the requested source's top-level manifest or index digest using Skopeo, giving an explicit source digest priority over any tag, then copy from the pinned `repository@digest`. A tag change after resolution must not change the copied content.
-- Run Skopeo in private staging with `--preserve-digests` and `--all`. Do not force conversion, recompression, or host-platform selection. If the OCI destination cannot preserve the source representation, fail without publishing a ref or falling back to a different digest.
-- After successful copy, compare the completed layout's selected root digest with the resolved source digest before publication. Rely on Skopeo's transfer validation rather than invoking the full checker or rehashing layers.
+Implement the two sub-stages below in order. Each acquired ref selects one
+platform-specific OCI image manifest. Complete-index storage and index export
+are explicit PoC limitations, deferred beyond stage 8.
+
+#### 6.1. Add registry pull in the library and CLI
+
+Add library `pull` and its CLI command. Pull does not populate containers-storage
+and requires Skopeo, not Podman.
+
+- Expose `pull <source-selector> [destination-selector]` using the common `ImageSelector` in both library and CLI, with explicit replacement and optional notes. Default the destination to the supplied source selector. Reuse stage 4.1's source-derived fallback tags, ignored explicit destination digests and notices, and early validation; a source selected by tag cannot supply a generated destination tag.
+- Keep registry pull configuration separate from containers-storage settings. Add optional `Platform` selection to the registry pull context and reuse CLI `--platform OS/ARCH[/VARIANT]`, following the library policy below.
+- Resolve sources before layer transfer with `skopeo inspect --raw`, using consistent registry configuration across inspection and copying. Parse and validate the raw object's schema and media type. Normal `skopeo inspect` reports the top-level digest; its `Digest` field alone cannot identify a selected child manifest.
+- For a digest-bearing source, ignore any supplied source tag and inspect exactly `repository@digest`. Require a supported image manifest and verify its SHA-256 identity from the original response bytes. Reject indexes and manifest lists, including single-entry indexes, without selecting a child or falling back to a tag.
+- For a tag-only source, inspect the tag once. If it identifies a supported image manifest, calculate its SHA-256 digest from the exact raw bytes, without reserializing JSON. If it identifies an OCI index or Docker manifest list, select one supported image-manifest descriptor using the policy below. Inspect that child by digest and verify its type, digest, and descriptor size before copying. Never resolve the mutable tag again.
+- Reject malformed objects, unsupported schemas or representations, and resolution requiring nested-index traversal. Reading a Docker manifest-list envelope does not add support for storing Docker-specific image representations. Do not retain the source index or acquire its other platforms.
+- Copy only from the resolved `repository@manifest-digest`, using private staging and `--preserve-digests`, without `--all`, forced conversion, recompression, or fallback to another digest. If the OCI destination cannot preserve the representation, fail without publishing a ref.
+- Require the completed layout to select exactly one supported image manifest whose digest equals the resolved manifest digest. When a platform is explicit, check its completed configuration as specified below before publication. Rely on Skopeo's transfer validation rather than invoking the full checker or rehashing layers.
 - Reuse import's immutable CAS insertion, destination-ref policy, locks, sync ordering, atomic publication, and best-effort successful-staging cleanup, including protection while an orphaned Skopeo process is still running.
-- Record the requested registry reference and resolved digest as pull provenance. Require the resolved digest to equal the actual stored root; it is descriptive provenance and an identity invariant, never an alternate lookup key.
-- Build index metadata without claiming a single creation time or host platform for the parent root. Cache the unique stored-content size across the completed transferred graph, including index objects, without a separate full validation pass.
+- Record the requested registry reference separately from the resolved platform-specific manifest digest. Keep `resolved_digest == stored_root`; provenance and index digests never become lookup aliases. Retain store format 1 and ref metadata schema 3.
+- Derive config digest, actual platform, optional image creation time, and unique stored-content size from the completed manifest, configuration, and layers, without a separate full validation pass. Metadata describes one image, not an index parent.
 - Delegate registry authentication and trust to Skopeo, with consistent configuration for resolution and copying. Support its authentication-file, certificate, trust-policy, and environment configuration without storing credentials in ref metadata.
-- Export pulled content with `--preserve-digests` and report failure if containers-storage cannot honor it. For an index root, default to the host platform, permit an explicit OS/architecture/variant override, and report both parent-root and selected-manifest digests. Preserve the selected manifest identity and retain the complete parent index in the CAS.
-- Keep containers-storage image IDs distinct from manifest/index digests. A later import still cannot promise reconstruction of the original registry representation.
 
-The copy policy follows [Skopeo's digest-preservation and complete-index options](https://github.com/podman-container-tools/skopeo/blob/main/docs/skopeo-copy.1.md). Source resolution must identify the top-level root, rather than a host-selected child; see [Skopeo inspect documentation](https://github.com/podman-container-tools/skopeo/blob/main/docs/skopeo-inspect.1.md).
+**Library platform policy:**
 
-**Acceptance:** pull by tag and digest; common selectors and optional destinations with source-derived fallback tags and ignored-destination-digest notices; tag movement between resolution and copy; preserved manifest and complete-index roots; non-host and nested-index dependencies; root mismatch; incompatible source representations; authentication and preservation failures; interrupted pulls preserving previous refs; shared-content insertion races; host-default export and overrides; selected-manifest digest reporting; export preservation failures.
+- An explicit `Platform` supplies OS, architecture, and optional variant. For index selection without an explicit platform, default to `linux/amd64` for an `x86_64` library target and `linux/arm64` for an `aarch64` target. Other targets require an explicit platform for index selection. Perform no CPU-variant detection.
+- Match descriptor OS and architecture. Require the variant when one is supplied; otherwise do not filter by variant. Require one distinct matching manifest digest. Consistent duplicate descriptors may collapse to one candidate. No match or multiple distinct matches fails with actionable diagnostics; descriptor order never breaks a tie.
+- Direct-manifest sources need no host selection. Without an explicit platform, accept their actual platform. With an explicit platform, require the completed configuration's OS, architecture, and any supplied variant to match; missing or mismatching required values fail before publication.
+- Document that these are library defaults and can differ from Skopeo's platform preferences and compatibility fallbacks. Repository-wide architecture enforcement remains outside scope.
+
+The tool interfaces are described in [Skopeo copy documentation](https://github.com/podman-container-tools/skopeo/blob/main/docs/skopeo-copy.1.md) and [Skopeo inspect documentation](https://github.com/podman-container-tools/skopeo/blob/main/docs/skopeo-inspect.1.md). Source resolution hashes small raw JSON objects; it does not introduce layer hashing or another full graph check.
+
+**Acceptance:**
+
+- Direct-manifest tags, index tags, and explicit manifest digests; reject index and manifest-list digests, including single-entry indexes and combined tag/digest selectors. Unsupported nested-index resolution fails clearly.
+- Exact raw-byte digest calculation, child type/digest/size verification, pre-transfer manifest pinning, tag movement during resolution and copy, and completed-root mismatch.
+- Library defaults, explicit platforms, variants, consistent duplicates, ambiguous candidates, missing platforms, and completed-configuration mismatches, including direct-manifest sources.
+- Common selectors, optional destinations, source-derived fallback tags, ignored-destination-digest notices, CLI/library parity, provenance, inventory, checking, and stored-root equality.
+- Authentication and incompatible-representation failures, preservation failures, interrupted pulls preserving prior refs, shared-content insertion races, and cleanup. Include real registry acquisition of a selected single-platform manifest; retain existing import/export regression coverage.
+
+#### 6.2. Extend and qualify digest-preserving export
+
+Extend and qualify export for the single-manifest images acquired in stage 6.1.
+The existing `Acquisition::Pull` branch already requests digest preservation;
+its presence does not establish completed qualification of registry round trips.
+
+- Require `--preserve-digests` for pulled content and report failure if containers-storage cannot honor it. Preserve existing import-acquired export behavior.
+- Retain repository-scoped stored-root selection, optional destinations, destination-digest enforcement, and stored-manifest digest reporting. No parent-index or selected-child digest reporting is needed.
+- Continue rejecting stored index roots. Export cannot select a different architecture from one stored manifest.
+- Leave persistent refs and metadata unchanged during export. Partial destination data remains managed by containers-storage.
+- Keep containers-storage image IDs distinct from stored manifest digests. A later import still cannot promise reconstruction of the original registry representation.
+
+**Acceptance:** real registry-to-store-to-containers-storage digest preservation; export by name and qualified manifest digest; omitted and explicit destinations; matching and mismatching destination digests; capability and preservation failures; persistent-store contents unchanged by export; stored-index rejection; existing import/export regressions.
 
 ### 7. Conservative pruning
 
 Add `prune`, using the checker's authoritative graph traversal.
 
 - Hold the exclusive store lock for enumeration, reachability analysis, and deletion.
-- Complete the scan before deletion, including every dependency of stored indexes and nested indexes across all platforms. Any unresolved committed-ref error or incomplete enumeration blocks destructive pruning.
+- Complete the scan before deletion. Reuse stage 5's authoritative reader, including its existing index traversal: any encountered index must be traversed completely or block destructive pruning. Never treat deferred public index support as permission to ignore dependencies. Any unresolved committed-ref error or incomplete enumeration blocks destructive pruning.
 - Reclaim recognized unreferenced CAS objects, abandoned import/pull staging and cleanup remnants, and unreferenced raw images. Successful operations normally clean their own staging immediately; stage 7 handles what remains. Preserve active raw images, lock identities, broken committed refs, and unknown files.
 - Apply a default 24-hour grace period, with an explicit duration override including zero. Use blob modification time and staging/raw-image directory modification time; preserve blob age on reuse. Document that this measures object age, not time since removal.
 - Provide dry-run reports with eligible counts and bytes; report scan and deletion failures clearly.
 - Do not use cached image sizes or past check results as a substitute for the current reachability scan. Report actual candidate bytes rather than estimating reclaimed space from removed refs.
 
-**Acceptance:** shared layers and all index dependencies survive, including non-host platforms; missing children, unsupported graphs, inconsistent descriptors, and damaged refs block deletion; dry-run changes nothing; grace boundaries; abandoned import/pull cleanup; unknown files remain; active imports, pulls, and exports block prune.
+**Acceptance:** shared layers survive; internal index fixtures retain every reachable dependency or block deletion on incomplete traversal; missing children, unsupported graphs, inconsistent descriptors, and damaged refs block deletion; dry-run changes nothing; grace boundaries; abandoned import/pull cleanup; unknown files remain; active imports, pulls, and exports block prune. These safety fixtures do not qualify public index acquisition or export.
 
 ### 8. Qualification and developer documentation
 
-Complete local verification and prepare external filesystem acceptance procedures.
+Complete local verification of the first PoC and prepare external filesystem
+acceptance procedures. Stage 8 is the PoC completion point; complete-index and
+multi-platform stored-image workflows are not acceptance requirements.
 
 - Run crate checks, formatting checks, unit tests, subprocess concurrency tests, and opt-in real Podman/Skopeo integration tests.
-- Add registry integration tests using a disposable test registry, with manifest, multi-platform index, nested-index, mutable-tag, and authentication fixtures. Exercise acquisition, export, checking, and pruning together.
-- Provide a two-node test procedure for Lustre and VAST covering concurrent initialization of the same store beneath a prepared parent, interrupted initialization and retry, lock exclusion, concurrent imports and pulls, shared index content, publication visibility, interrupted transfers, replacement/removal, and pruning.
+- Add registry integration tests using a disposable test registry, with direct manifests, indexes for tag selection and digest-source rejection, mutable tags, and authentication fixtures. Exercise single-platform acquisition, digest-preserving export, checking, and pruning together. Complete-index round trips and nested-index acquisition qualification remain deferred.
+- Provide a two-node test procedure for Lustre and VAST covering concurrent initialization of the same store beneath a prepared parent, interrupted initialization and retry, lock exclusion, concurrent imports and pulls, shared single-platform content, publication visibility, interrupted transfers, replacement/removal, and pruning.
 - Document sync ordering and distinguish locally tested behavior from filesystem durability guarantees requiring site validation.
-- Document CLI examples, library usage, temporary-space costs, metadata/provenance semantics, supported digest-preserving registry representations, and external-tool versions. Explain that incompatible representations fail rather than undergo conversion during pull.
-- Review the document for obsolete registry-alias behavior, six-action API claims, and blanket exclusions of index storage or remote acquisition.
+- Document CLI examples, library usage, temporary-space costs, requested-source versus stored-identity semantics, supported digest-preserving registry representations, and external-tool versions. Explain library platform defaults, explicit platform checks, manifest-only digest sources, and preservation failures without conversion.
+- Review summaries, stage references, API contracts, assumptions, and future-work statements for consistency. Explicitly document the lack of multi-platform stored images and index acquisition/export, while distinguishing index-based tag selection and internal graph traversal. Preserve historical validation records.
 
 **Acceptance:** local checks pass; external procedures are reproducible; Lustre/VAST support remains explicitly unqualified until site tests are completed. These filesystems cannot be validated in the current development environment.
+
+## Deferred beyond the first PoC
+
+The following work is outside stages 1-8 planned in this document: complete-index
+acquisition and storage; multi-platform stored images; index-parent metadata and
+inventory; platform-selecting export from stored indexes; nested-index source
+resolution; complete-index round trips and related qualification. Existing
+stage-5 graph traversal and tests remain in place as storage safety foundations,
+without promising these public workflows. Repository-wide architecture
+enforcement is also outside the PoC; architecture-specific repository names
+remain an operational convention.
 
 ## Library and CLI contract
 
 This section describes the target contract after the relevant stages. Stage
 4.1 implements the common selectors and containers-storage transfer arguments;
-pull and prune remain planned; stage 5 implements checking. Earlier interfaces
-and their historical validation are recorded above.
+stage 6.1 adds pull and stage 6.2 qualifies digest-preserving export, both still
+planned. Prune also remains planned, while stage 5 implements checking. Earlier
+interfaces and their historical validation are recorded above.
 
 The library exposes a store handle, a common `ImageSelector`, tagged `LocalRef` namespace identities, separate containers-storage transfer and registry pull options, operation reports, and typed failures. Its seven operations are `import`, `pull`, `export`, `list`, `remove`, `check`, and `prune`. Storage semantics and diagnostics belong to the library; argument parsing and presentation belong to the executable.
 
@@ -353,21 +424,37 @@ digests through to Skopeo for validation. Import's source digest may differ from
 the completed stored root; only that actual root serves as the store digest
 identity.
 
-Import accepts explicit replacement, optional platform selection, and optional notes. Pull accepts a registry source by tag or digest, explicit replacement, optional notes, and registry configuration; it has no platform-selection option or caller-supplied provenance aliases. Export defaults to the host platform for index roots, accepts an override, and reports parent-root and selected-manifest digests. Prune accepts dry-run and a grace-period override.
+Import accepts explicit replacement, optional platform selection, and optional
+notes. Pull accepts a registry source by tag or manifest digest, explicit
+replacement, optional notes, registry configuration, and optional platform
+selection using stage 6.1's library defaults and verification policy. It accepts
+no caller-supplied provenance aliases. Export reports the stored manifest digest
+and rejects stored indexes; it cannot choose another architecture from one
+manifest. Prune accepts dry-run and a grace-period override.
 
-Metadata records the acquisition kind and a cached stored root checked against the OCI layout. Pull additionally records the requested registry reference and resolved digest, which must equal that stored root. Imported-image registry digest collections and alternate lookup keys are absent.
+Metadata records the acquisition kind and a cached stored root checked against
+the OCI layout. Pull additionally records the requested registry reference and
+resolved platform-specific manifest digest, which must equal that stored root.
+Index-source digests are rejected, and an index used for tag selection never
+becomes a retained identity or lookup alias. Imported-image registry digest
+collections and alternate lookup keys are absent. Store format 1 and ref
+metadata schema 3 remain unchanged.
 
 Diagnostics go to stderr; JSON operation results go to stdout. Exit statuses distinguish success, operation/check failure, and invalid CLI usage. Listing returns collected entries and diagnostics even when some refs are damaged, and reports incomplete or damaged inventory as failure.
 
-The stored-content size is the sum of unique index, manifest, config, and layer object sizes across the complete stored graph, excluding wrapper metadata. It is neither Podman's unpacked size nor an estimate of what removal will reclaim; ref sizes cannot be summed to calculate total store usage.
+The stored-content size is the sum of unique manifest, config, and layer object
+sizes in the acquired image, excluding wrapper metadata. Registry indexes used
+only for selection are not stored or counted. This size is neither Podman's
+unpacked size nor an estimate of what removal will reclaim; ref sizes cannot be
+summed to calculate total store usage.
 
 ## Assumptions and boundaries
 
-- Linux, user-owned stores, concurrent processes across nodes, single-platform containers-storage imports, complete-index registry pulls, and SHA-256 content.
+- Linux, user-owned stores, concurrent processes across nodes, single-platform containers-storage imports and registry pulls, and SHA-256 content. Stage 8 completes the first PoC; multi-platform stored images and complete-index storage remain unsupported beyond that completion point.
 - The site's or user's prepared parent directory already exists and can be opened and synced during initialization. The library creates no missing ancestors, supports no stores inside other stores, and does not inspect ancestors to prove preparation or detect nesting.
-- All content selection and reachability derive from committed OCI layouts. Pull preserves the resolved registry root; import may convert or recompress and therefore cannot promise that root identity. Pull provenance is descriptive and must agree with the stored root, never act as an alias.
+- All stored-content selection and reachability derive from committed OCI layouts. Pull preserves the resolved platform-specific registry manifest; import may convert or recompress and therefore cannot promise that identity. Pull provenance is descriptive and must agree with the stored root, never act as an alias.
 - Stage 4.1's selector and transfer contracts are implemented before stage 5. They preserve literal names, use only qualified stored-root digests for lookup, and retain explicit tagged-ref-only removal. Generated tags use an explicit source digest; ignored acquisition-destination digests never become identities or naming inputs. Store format 1 and ref metadata schema 3 remain unchanged, with no stage-4.1 migration.
-- Exporting a platform from a pulled index preserves the selected manifest identity, not the parent index identity; the parent and its complete graph remain in the CAS.
+- Tag pulls may resolve a manifest through a registry index, but retain only that manifest and its dependencies. Digest pulls require the manifest itself. Library platform defaults may differ from Skopeo; explicit platform selection requires a matching completed configuration. Stored indexes cannot be exported.
 - Successful mutations sync before returning; post-publication sync errors explicitly report potentially committed state.
 - File locks, hard-link insertion, atomic rename, publication visibility, and sync behavior require validation on the actual Lustre and VAST deployments. Do not silently downgrade these guarantees if a primitive is unavailable.
 - No hosted registry service, registry push action, automatic repair, deep checking, global catalog, or migration of existing Parallax stores.

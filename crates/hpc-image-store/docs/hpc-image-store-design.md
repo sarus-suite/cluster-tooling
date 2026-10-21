@@ -1,6 +1,6 @@
 # Filesystem OCI Image Store Design
 
-Version 1.5 · 20 October 2026 · Conceptual design baseline
+Version 1.6 · 21 October 2026 · Conceptual design baseline
 
 ## 1 Purpose and scope
 
@@ -8,14 +8,16 @@ Provide persistent, user-owned image storage on an HPC parallel filesystem. Each
 
 The architecture consists of a **shared immutable blob CAS, small per-ref OCI layouts, per-ref JSON metadata, and a thin wrapper around Skopeo**. Filesystem locks coordinate access. Removing a reference and reclaiming its content are separate operations.
 
-This document fixes the general design for subsequent in-project planning with Codex. Directory encoding, schemas, lock primitives, publication mechanisms, and exact CLI syntax remain implementation choices.
+This document defines the architecture, behavior, guarantees, and boundaries
+of the store. Concrete interfaces and data representations must preserve these
+requirements.
 
 The external API has seven actions:
 
 | Action | Purpose |
 | --- | --- |
 | `import` | Copy an image from containers-storage into the persistent store |
-| `pull` | Copy an image directly from a remote registry into the persistent store, preserving its manifest or index digest |
+| `pull` | Copy one platform-specific image directly from a remote registry into the persistent store, preserving its manifest digest |
 | `export` | Copy a persistent image into containers-storage |
 | `list` | List committed refs and report obvious metadata damage |
 | `remove` | Remove one logical persistent ref |
@@ -23,6 +25,14 @@ The external API has seven actions:
 | `check` | Check metadata and the reachable image graph |
 
 Import and export are named relative to the persistent store. Pull adds direct registry-to-store transfers so users can retain the original registry image identity without first unpacking and recompressing it through containers-storage. There is no hosted registry service, registry push action, SQLite dependency, automatic repair, or deep check functionality.
+
+Acquisition supports one platform-specific OCI image manifest per ref.
+Tag pulls may select it through a registry index, but do not retain the parent
+index or other platforms. Multi-platform stored images, complete-index storage,
+index-parent metadata and inventory, platform-selecting index export,
+nested-index source resolution, and their qualification are future extensions
+outside this design's acquisition and export scope. Graph checking and pruning
+must still account for every dependency of any encountered index.
 
 ## 2 Storage organization
 
@@ -64,7 +74,13 @@ Skopeo handles image serialization, conversion, and transfer validation. The wra
 
 ### Per-ref OCI layouts
 
-Each logical name and tag selects one image root through its own small OCI layout. That root may be a manifest or a supported image index. The OCI layout is authoritative for the mapping from ref to image content; there is no store-wide mutable `index.json`.
+Each logical name and tag selects one image root through its own small OCI
+layout. Acquisition selects a single image manifest; acquiring or exporting
+indexes and describing index parents are outside scope. Checking and pruning must nevertheless
+handle encountered index graphs completely or report an incomplete inspection.
+The OCI layout is authoritative for the mapping from ref to image content;
+there is no store-wide mutable `index.json`. The per-ref layout entry point
+is distinct from a registry image index used only for source selection.
 
 Skopeo's shared-blob options connect these layouts to the common content pool. A ref depends on that pool and is not independently portable unless its required content is materialized with it.
 
@@ -78,7 +94,13 @@ Each ref has a `metadata.json` containing the small amount of information needed
 - Platform and cached stored content size.
 - Optional provenance from containers-storage or the source registry, and user notes.
 
-For pulled images, record the requested registry reference and its resolved manifest or index digest. The selected stored root must match that digest. Registry tags are mutable, so the recorded digest identifies the content actually pulled. Distinguish this root digest from both the per-ref layout's `index.json` and a containers-storage image ID.
+For pulled images, record the requested registry reference separately from the
+resolved platform-specific manifest digest. That resolved digest must equal
+the stored image's root digest. Registry tags are mutable, so the digest
+identifies the image actually pulled. An index used for tag selection is not
+stored and never supplies a lookup alias. Digest sources must identify the image manifest
+directly. Distinguish the stored root from the per-ref layout's `index.json`
+and a containers-storage image ID.
 
 Export and single-image check use a tagged logical ref or a repository name
 qualified by its stored root digest, as specified below. This allows users to
@@ -86,11 +108,10 @@ reuse a pulled image's original registry digest with the matching stored name.
 Digest selection resolves committed content in this store; it does not trigger
 another registry lookup or use acquisition provenance as an alias.
 
-Config digests identify image configuration JSON, while manifest/index root
-digests identify the stored image representation. Config digests and acquisition
-source IDs are display/provenance fields, not alternate selection keys. The
-stage-4 metadata schema is version 3 and requires the cached config digest;
-older development metadata is rejected without migration.
+Config digests identify image configuration JSON, while root digests identify
+the stored image representation. Cache the config digest for display.
+Config digests and acquisition source IDs provide display information or
+provenance, not alternate selection keys.
 
 The OCI layout determines reachability. JSON fields derived from OCI content are display caches; import records and user notes may be irreplaceable operational metadata. Commit metadata with the ref and give its schema a version.
 
@@ -100,11 +121,10 @@ No global catalog is necessary initially. Listing reads the small per-ref files 
 
 ### Image selectors
 
-Use one validated `ImageSelector` for image arguments to import, export, pull,
-and single-image check. Its string form is `name[:tag][@digest]`, with a mandatory
-repository name and at least one of tag or digest. Parsing exposes both the
-reference component (`name[:tag]`) and optional digest, with access to the
-repository name and optional tag. Display preserves the supplied spelling.
+Use a common validated image selector for import, export, pull, and single-image
+check. Its string form is `name[:tag][@digest]`, with a mandatory repository
+name and at least one of tag or digest. Keep the repository name, optional tag,
+and optional digest distinct, and preserve the supplied spelling for display.
 Bare digests, image IDs, untagged names without digests, malformed suffixes, and
 unsupported algorithms are rejected. Digests remain full canonical lowercase
 SHA-256 values.
@@ -131,7 +151,7 @@ or incomplete enumeration prevents establishing absence in the requested
 repository, report incomplete resolution rather than declaring the digest
 missing. This requires no global catalog.
 
-Stored namespace identities remain explicitly tagged `LocalRef` values, with
+Stored namespace identities remain explicitly tagged references, with
 registry-port parsing consistent with selectors. Removal is the intentional
 exception to the common selector API: it accepts only an explicit `name:tag`
 and rejects every digest-bearing selector. It can therefore remove a damaged
@@ -154,7 +174,7 @@ Initialization follows this order:
 5. Sync the temporary marker, lock file, internal directories from children to parents, store directory, and immediate parent before publishing `store.json`.
 6. Rename the temporary marker to `store.json`, then sync the store directory before reporting success. A failure after marker publication reports that the marker may already be visible.
 
-Always sync the immediate parent for an unmarked store, including retries and existing empty roots. This saves the store's name even if another process created it. It deliberately replaces the earlier requirement to sync only parents known to have changed. No directory above the immediate parent is opened for syncing.
+Always sync the immediate parent for an unmarked store, including retries and existing empty roots. This saves the store's name even if another process created it. No directory above the immediate parent is opened for syncing.
 
 After interruption, a retry reuses only recognized empty setup directories and the reserved temporary marker. It preserves the store directory and lock identity, rejects unexpected contents, and never automatically deletes them. No recovery record or history of directory creation is needed.
 
@@ -166,7 +186,13 @@ Use Skopeo for copies between `containers-storage:` and `oci:`, and from registr
 
 For imports and pulls, run Skopeo into private staging and confine `--dest-shared-blob-dir` to that staging area. After a successful copy, the library publishes completed objects into the store's shared blob directory without overwriting existing objects. Skopeo never writes directly into the live shared content pool. For exports, use `skopeo copy --src-shared-blob-dir <shared-blob-directory>` to read from the store's shared pool.
 
-Pull uses `--preserve-digests` and copies from the resolved registry digest. For a multi-platform index, use `--all` to retain the index and its complete image graph; copying only a selected platform would select a different root identity. Do not force manifest conversion or recompression. If the source representation cannot be preserved by the OCI destination, fail the pull rather than silently storing a different digest. Registry authentication and trust configuration remain Skopeo's responsibility; credentials do not belong in per-ref metadata.
+Pull resolves a single manifest before layer transfer using
+`skopeo inspect --raw`, then uses `--preserve-digests` to copy from that manifest's pinned
+registry digest. It does not use `--all`, force manifest conversion or
+recompression, or fall back to another digest. If the representation cannot be
+preserved by the OCI destination, fail the pull. Registry authentication and
+trust configuration remain Skopeo's responsibility; use the same configuration
+for resolution and copying, and never put credentials in per-ref metadata.
 
 **Rely on Skopeo's own transfer validation rather than repeating a complete graph check before and after every copy.** The wrapper checks the selected ref and its own metadata, coordinates access, and publishes completed results. A separate graph traversal is needed for `check` and `prune`, not routinely around imports, pulls, and exports.
 
@@ -174,7 +200,12 @@ A successful copy is the normal basis for accepting the transferred image. The w
 
 Skopeo does not supply a transaction covering the wrapper's ref and metadata. The wrapper remains responsible for private staging, immutable object insertion, and atomic publication of the completed ref and metadata.
 
-Importing from containers-storage may convert representations or recompress layers, changing digests. Import therefore cannot guarantee the original registry manifest digest; recording it as provenance does not restore that identity. Pull is the digest-preserving acquisition path. Any supported image index must be stored with its required local dependencies.
+Importing from containers-storage may convert representations or recompress
+layers, changing digests. Import therefore cannot guarantee the original
+registry manifest digest; recording it as provenance does not restore that
+identity. Pull preserves the selected image manifest. Acquisition does not
+retain indexes; checking and pruning must nevertheless account for every
+dependency of any encountered index or report incomplete traversal.
 
 ## 4 Locking
 
@@ -202,10 +233,9 @@ List and check need coherent observations of individual refs, but do not promise
 
 ### Import
 
-Import accepts a source `ImageSelector` and an optional destination of the same
-type in both the library and CLI. Default an omitted destination to the source
-selector, then derive an explicitly tagged committed ref from that effective
-destination.
+Import accepts a source image selector and an optional destination selector.
+Default an omitted destination to the source selector, then derive an explicitly
+tagged committed ref from that effective destination.
 
 Keep a tag supplied in the effective destination. If it is tagless, generate the
 tag from the first 12 hexadecimal characters of the explicit **source digest**,
@@ -215,8 +245,9 @@ resolve a source tag to obtain a digest merely for naming.
 
 Ignore digests in explicit import destination arguments: they cannot be enforced,
 do not supply generated tags, and do not create lookup aliases. Communicate this
-through the library report and CLI stderr, and explain it in relevant validation
-errors. Such a notice alone does not make a successful import fail.
+through operation results and user-facing diagnostics, and explain it in
+relevant validation errors. Such a notice alone does not make a successful
+import fail.
 
 The examples below use `D` and `E` as placeholders for full SHA-256 digests:
 
@@ -228,8 +259,8 @@ The examples below use `D` and `E` as placeholders for full SHA-256 digests:
 | `alpine:latest` | `renamed@E` | Reject; require a destination tag |
 
 Pass a digest-bearing source to Skopeo as `name@digest`, omitting any supplied
-tag so that it cannot override the digest. Retain existing image-ID pinning for
-sources selected by tag, and retain acquisition metadata without losing the
+tag so that it cannot override the digest. Pin tag-selected sources by image
+ID for the transfer, and retain acquisition metadata without losing the
 requested digest from Skopeo's source argument.
 
 Import can change the digest through conversion or compression. The completed
@@ -254,33 +285,86 @@ Only publish after Skopeo succeeds and the wrapper's required metadata is comple
 
 By default, import fails if the destination ref already exists. Explicit replacement is a mode of import. Replacement switches readers from one complete raw-image layout to another and leaves the old content for prune.
 
-A completed new directory may be published by atomic rename. Replacing an existing ref requires a mechanism that commits the OCI layout and metadata together. The implementation uses a relative ref symlink into `raw_images/`, replaced by one atomic rename after the new layout and metadata have been saved.
+A completed new directory may be published by atomic rename. Replacing an
+existing ref must commit the OCI layout and metadata together. A relative ref
+symlink into the raw-image area provides this indirection: replace it by one
+atomic rename after the new layout and metadata have been saved.
 
 ### Pull
 
-Pull remains planned for stage 6. Use the common `ImageSelector` for its registry
-source and optional destination. Default the destination to the supplied source
-selector and reuse import's naming rules: keep an effective destination tag or
+Pull uses the common image selector for its registry source and optional
+destination. Default the destination to the supplied source selector and follow
+import's naming rules: keep an effective destination tag or
 generate one from an explicit source digest, ignore and report explicit
 destination digests, and reject a tagless destination without a source digest
 before preparation or tool invocation. A digest resolved from a source tag does
 not supply a generated destination tag.
 
-Resolve the requested source to an immutable top-level manifest or index digest,
-giving an explicit source digest priority over any tag. Let Skopeo copy directly
-into the persistent store with digest preservation enabled. For an index, retain
-the complete graph rather than selecting only the current host platform.
+Keep registry pull configuration separate from containers-storage settings.
+Allow optional target-platform selection by OS, architecture, and variant,
+with `--platform OS/ARCH[/VARIANT]` as the command-line form. Pull requires
+Skopeo, not Podman.
 
-Reuse import's staging, shared CAS insertion, locks, metadata creation, existing-ref policy, atomic publication, and best-effort cleanup after successful publication. The differences are source resolution, registry provenance, and the digest-preserving copy policy. After Skopeo succeeds, reconcile the resulting selected root digest with the resolved source digest as part of preparing metadata; this is a small identity check, not another full image validation pass.
+Resolve the source before layer transfer with `skopeo inspect --raw`:
+
+1. For a digest source, ignore any supplied tag and inspect exactly
+   `repository@digest`. Require a supported image manifest and verify its
+   SHA-256 digest from the original response bytes. Reject index and
+   manifest-list digests, even when they contain just one image; never select
+   a child or fall back to a tag for these sources.
+2. For a tag source, inspect the tag once. A direct image manifest supplies
+   its digest through SHA-256 of the exact raw bytes, without reserializing
+   JSON. For an OCI index or Docker manifest list, select one supported image
+   manifest using the platform policy below. Inspect that child by digest,
+   verifying its type, digest, and descriptor size. Do not look up the mutable
+   tag again.
+3. Reject malformed objects, unsupported schemas or representations, and
+   resolution requiring nested-index traversal. Reading a Docker manifest-list
+   envelope does not add support for storing Docker-specific image content.
+4. Copy from `repository@manifest-digest` into private staging with digest
+   preservation. The completed layout must select exactly one supported image
+   manifest with that resolved digest. Publish only it and its dependencies;
+   do not retain a source index or its other platforms.
+
+Normal `skopeo inspect` reports the top-level digest, so its `Digest` field alone
+cannot resolve the selected child. Raw response hashing applies to small JSON
+objects, not layers or the complete image graph.
+
+Acquisition uses a bounded platform policy, rather than promising Skopeo's
+defaults or compatibility fallbacks:
+
+- An explicit target platform supplies OS, architecture, and optional variant.
+  Without it, index selection follows the acquiring process's architecture:
+  `linux/amd64` on AMD64 and `linux/arm64` on ARM64. Other architectures need
+  an explicit platform for index selection. Do not detect CPU variants.
+- Match descriptor OS and architecture; filter by variant only when one is
+  supplied. Require one distinct matching manifest digest. Consistent
+  duplicate descriptors may collapse to one candidate. No match or multiple
+  distinct matches fails with actionable diagnostics; never use descriptor
+  order to break a tie.
+- Direct manifests need no host selection. Without an explicit platform,
+  accept the actual image platform. With an explicit platform, verify the
+  completed configuration's OS, architecture, and any supplied variant before
+  publication. Missing or mismatching required values fail.
+
+Repository-wide architecture enforcement is outside scope. Architecture-specific
+repository names remain an operational convention, not a store-enforced policy.
+
+Pull follows the same requirements as import for private staging, immutable
+content insertion, locks, metadata, destination conflicts, atomic publication,
+and best-effort cleanup after successful publication. Its differences are
+source resolution, registry provenance, and the digest-preserving copy policy.
+After Skopeo succeeds, require the completed root digest to equal the resolved
+manifest digest before publication. This is a small identity check, not another
+full image validation pass.
 
 A failed pull preserves any previous committed ref. Explicit replacement follows the same policy as import. Pull does not populate containers-storage; export remains the action that restores a cached image for job use.
 
 ### Export
 
-Both source and optional destination
-use `ImageSelector`. The destination defaults to the supplied source selector
-verbatim, rather than acquisition metadata or the ref chosen during digest
-lookup.
+Both source and optional destination use the common image selector. The
+destination defaults to the supplied source selector verbatim, rather than
+acquisition metadata or the ref chosen during digest lookup.
 
 Pass export destination digests through to Skopeo and report digest-mismatch
 failures. Follow the upstream [destination digest check](https://github.com/containers/image/blob/main/storage/storage_dest.go);
@@ -294,7 +378,14 @@ Do not perform a separate full graph check first. Let Skopeo detect content and 
 
 An export failure leaves the persistent store unchanged. Partial destination content remains under containers-storage's management.
 
-For pulled images, use `--preserve-digests` on export to preserve the copied image manifests, and report failure if the destination cannot honor it. Exporting one platform from a stored index preserves that platform's manifest identity, not the parent index identity; retain the parent index in the CAS and make the selection explicit. A containers-storage image ID remains a separate identifier. A later import from containers-storage still cannot promise reconstruction of the original registry representation.
+For images acquired by registry pull, export must use `--preserve-digests` and
+report failure if containers-storage cannot preserve the manifest digest.
+Images acquired by import retain their transfer policy, which permits
+representation changes. Report the stored manifest digest; reject stored
+indexes. Export cannot choose
+another architecture from a single stored manifest. A containers-storage image
+ID remains a separate identifier. A later import still cannot promise
+reconstruction of the original registry representation.
 
 ## 6 Listing and checking
 
@@ -306,9 +397,9 @@ The default table follows `podman images`, with repository, tag, a 12-character
 OCI ImageID, relative creation time, and human-readable stored-content size.
 An optional digest column follows `podman images --digests` and shows the full
 stored root. Rich tables and JSON expose the additional cached fields, status,
-and diagnostics. Reusable string formatters belong to a presentation module,
-separate from storage operations. Matching display units does not make stored
-content size equal to Podman's image size.
+and diagnostics. Presentation remains separate from storage operations.
+Matching display units does not make stored content size equal to Podman's
+image size.
 
 Its embedded quick check reads only ref structure, `oci-layout`, `index.json`, and `metadata.json`. It detects missing or malformed files, ambiguous root selection, and disagreement between the ref and its cached identity fields. It does not traverse the image graph or inspect every layer.
 
@@ -326,13 +417,19 @@ descriptor sizes.
 
 Check is read-only. It reports damaged or unsupported content and returns failure when errors are found or the requested scope cannot be checked. It never repairs or removes refs.
 
-There is no blob hashing, tar unpacking, or deep check mode. Same-size byte corruption may therefore go undetected. Share graph-reading logic between check and prune, and avoid repeatedly inspecting shared objects within one run.
+Checking must account for the complete supported graph, including any
+encountered indexes and nested indexes. This safety requirement does not imply
+support for index acquisition, index-parent metadata, or index export.
+
+There is no blob hashing, tar unpacking, or deep check mode. Same-size byte
+corruption may therefore go undetected. Checking and pruning must use consistent
+reachability rules and avoid repeatedly inspecting shared objects within one run.
 
 ## 7 Removal and pruning
 
 ### Remove
 
-Remove targets one explicit tagged logical ref (`LocalRef`). Digest-bearing
+Remove targets one explicit tagged logical ref. Digest-bearing
 selectors are intentionally unsupported, including `name:tag@digest`; removal
 does not perform digest resolution. Under its locks, make that ref absent
 from the committed namespace as one logical change. Retire its associated raw
@@ -355,30 +452,46 @@ Under the exclusive store lock:
 
 The initial policy is conservative: **any unresolved committed-ref error or incomplete scan blocks destructive pruning**. Never treat an unreadable root or unsupported graph as having no dependencies. Cached metadata and previous check results cannot replace the current reachability scan.
 
+Use the same authoritative reachability rules as checking. Any encountered
+index must be traversed completely, including every platform dependency, or
+block destructive pruning. Excluding index acquisition and export from scope
+never justifies ignoring dependencies.
+
 The grace period provides a recovery margin, not concurrency protection. Prune cleans only recognized internal data and must not delete active lock identities or silently discard broken committed refs.
 
 Removing a ref and pruning its content are intentionally separate. The ref's cached image size is not an estimate of space that prune will reclaim.
 
-## 8 Operational principles and planning boundaries
+## 8 Operational principles and scope boundaries
 
 The essential guarantees are:
 
 - Published content is immutable and refs expose complete raw images.
 - Failed imports and pulls preserve prior refs.
-- Pulled refs retain the resolved registry manifest or index digest.
+- Pulled refs retain the resolved platform-specific registry manifest digest.
 - Active operations are protected against pruning.
 - List and check report damage without deleting data.
 - Prune relies on a complete scan of authoritative refs.
 
 Current stores are user-owned; group-writable stores require a future design extension. Validate cross-node initialization, locking, publication visibility, and durability on the target parallel filesystem. Backups or snapshots are needed to recover accidentally deleted refs and operational metadata; the CAS alone cannot reconstruct their names and history.
 
-Concrete planning should resolve ref naming, metadata schema, publication strategy, Skopeo version and shared-blob behavior, supported registry representations, digest preservation into containers-storage, compression and platform policy, and pruning grace periods. Keep these choices within the seven-action API. Human-readable results and structured output for scripts can share the same operation semantics.
+Concrete choices for ref naming, metadata representation, publication,
+Skopeo integration, supported registry representations, compression, and
+pruning grace periods must preserve these guarantees within the seven-action
+API. Human-readable results and structured output for scripts share the same
+operation semantics.
+
+Complete-index acquisition and storage, nested-index source resolution,
+multi-platform stored images, index-parent inventory, and platform-selecting
+index export remain future extensions. Single-platform transfer and storage
+checks do not qualify these workflows or establish Lustre or VAST deployment
+guarantees.
 
 ## References
 
 - [OCI Image Layout Specification](https://github.com/opencontainers/image-spec/blob/main/image-layout.md)
 - [Containers image transport documentation](https://github.com/containers/image/blob/main/docs/containers-transports.5.md)
 - [Skopeo copy documentation](https://github.com/podman-container-tools/skopeo/blob/main/docs/skopeo-copy.1.md)
+- [Skopeo inspect documentation](https://github.com/podman-container-tools/skopeo/blob/main/docs/skopeo-inspect.1.md)
 - [Named-reference grammar](https://github.com/containers/image/blob/main/docker/reference/reference.go)
 - [Containers-storage destination digest checks](https://github.com/containers/image/blob/main/storage/storage_dest.go)
 
