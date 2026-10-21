@@ -60,3 +60,7 @@ mod tests;
 
 #[cfg(test)]
 mod publication_tests;
+
+#[cfg(test)]
+#[path = "../tests/support/snapshot.rs"]
+mod test_snapshot;

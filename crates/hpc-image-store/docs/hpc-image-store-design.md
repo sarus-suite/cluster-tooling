@@ -1,6 +1,6 @@
 # Filesystem OCI Image Store Design
 
-Version 1.7 · 21 October 2026 · Conceptual design baseline
+Version 1.8 · 21 October 2026 · Conceptual design baseline
 
 ## 1 Purpose and scope
 
@@ -380,8 +380,8 @@ acquisition metadata or the ref chosen during digest lookup.
 Pass export destination digests through to Skopeo and report digest-mismatch
 failures. Follow the upstream [destination digest check](https://github.com/containers/image/blob/main/storage/storage_dest.go);
 never silently discard these digests. This differs from import's explicitly
-ignored destination digest and does not change the preservation policy based on
-acquisition kind.
+ignored destination digest. Every export uses the same preservation policy,
+regardless of acquisition kind.
 
 Resolve the selected ref under its locks, confirm that its small ref files identify a usable source, and invoke Skopeo to copy it into the selected containers-storage destination.
 
@@ -389,11 +389,14 @@ Do not perform a separate full graph check first. Let Skopeo detect content and 
 
 An export failure leaves the persistent store unchanged. Partial destination content remains under containers-storage's management.
 
-For images acquired by registry pull, export must use `--preserve-digests` and
-report failure if containers-storage cannot preserve the manifest digest.
-Images acquired by import retain their transfer policy, which permits
-representation changes. Report the stored manifest digest; reject stored
-indexes. Export cannot choose
+Every export must use `--preserve-digests` and report failure if
+containers-storage cannot preserve the stored manifest digest. This applies
+to both imported and pulled images, including existing refs, without a metadata
+migration. Never retry without preservation. Import itself may change image
+representation during acquisition; the completed stored manifest is the identity
+that subsequent exports must ask Skopeo to preserve. Do not add round-trip
+identity validation for imported images or runtime post-export digest inspection.
+Report the stored manifest digest and reject stored indexes. Export cannot choose
 another architecture from a single stored manifest. A containers-storage image
 ID remains a separate identifier. A later import still cannot promise
 reconstruction of the original registry representation.

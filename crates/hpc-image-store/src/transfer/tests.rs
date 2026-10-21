@@ -1,5 +1,5 @@
 use super::*;
-use crate::{NamespaceChange, StoreConfig};
+use crate::{Acquisition, NamespaceChange, StoreConfig};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -29,10 +29,15 @@ a = sys.argv[1:]
 with open(c['log'], 'a') as f:
     f.write(json.dumps({'tool': p.name, 'args': a, 'environment': os.getenv('HPC_TRANSFER_TEST_ENV')}) + '\n')
 if '--help' in a:
-    print(c.get('help', '--dest-shared-blob-dir --src-shared-blob-dir --preserve-digests --override-os --override-arch --override-variant'))
+    print(c.get('help', '--raw --retry-times --dest-shared-blob-dir --src-shared-blob-dir --preserve-digests --override-os --override-arch --override-variant'))
     sys.exit(0)
 if p.name == 'podman':
     print(c.get('id', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'))
+    sys.exit(0)
+if 'inspect' in a:
+    fixture = pathlib.Path(c['fixture'])
+    root = json.loads((fixture / 'index.json').read_text())['manifests'][0]['digest'].split(':')[1]
+    sys.stdout.buffer.write((fixture / 'blobs' / 'sha256' / root).read_bytes())
     sys.exit(0)
 if c.get('pause'):
     pathlib.Path(c['ready']).write_text(str(os.getpid()))
@@ -51,6 +56,14 @@ if a[-1].startswith('oci:'):
         (blobs / f.name).write_bytes(f.read_bytes())
     if c.get('symlink'):
         (layout / 'outside').symlink_to(c['symlink'], target_is_directory=True)
+else:
+    assert '--preserve-digests' in a
+    assert not any(flag in a for flag in ['--all', '--format', '--dest-compress', '--dest-decompress', '--dest-compress-format', '--dest-compress-level'])
+    source = pathlib.Path(a[-2][4:])
+    root = json.loads((source / 'index.json').read_text())['manifests'][0]['digest']
+    if c.get('export_failure') or ('@' in a[-1] and a[-1].rsplit('@', 1)[1] != root):
+        sys.stderr.write(c.get('export_failure', 'manifest does not match expected digest'))
+        sys.exit(18)
 "#;
 struct Fixture {
     temporary: tempfile::TempDir,
@@ -114,6 +127,23 @@ impl Fixture {
                 notes: Some("retained notes".into()),
             },
         )
+    }
+    fn acquire(&self, pulled: bool) {
+        if pulled {
+            self.store
+                .pull(
+                    &parse_selector("registry.example/image:tag"),
+                    Some(&parse_selector(self.reference.as_str())),
+                    &crate::PullContext {
+                        skopeo: self.context.skopeo.clone(),
+                        ..crate::PullContext::default()
+                    },
+                    &crate::PullOptions::default(),
+                )
+                .unwrap();
+        } else {
+            self.import(false).unwrap();
+        }
     }
     fn log(&self) -> Vec<Value> {
         fs::read_to_string(self.temporary.path().join("log"))
@@ -707,34 +737,124 @@ fn cleanup_does_not_follow_symlinks_or_accept_paths_outside_staging() {
 }
 
 #[test]
-fn pulled_manifest_export_requests_preservation() {
-    let fixture = Fixture::new();
+fn every_export_preserves_the_stored_manifest_and_persistent_state() {
+    use crate::test_snapshot::snapshot;
+    for pulled in [false, true] {
+        let mut fixture = Fixture::new();
+        fixture.acquire(pulled);
+        fixture.context.podman = "/unavailable/podman".into();
+        let root = fixture.read().stored_root;
+        let named = parse_selector(fixture.reference.as_str());
+        let qualified = parse_selector(format!("example/tool@{root}"));
+        let combined = parse_selector(format!("example/tool:ignored@{root}"));
+        let plain = parse_selector("localhost/output:tag");
+        let matching = parse_selector(format!("localhost/output:tag@{root}"));
+        let mismatch = parse_selector(format!("localhost/output:tag@sha256:{}", "f".repeat(64)));
+        let before = snapshot(fixture.store.config().root());
+        for (source, destination) in [
+            (&named, None),
+            (&qualified, None),
+            (&combined, None),
+            (&named, Some(&plain)),
+            (&qualified, Some(&matching)),
+        ] {
+            let calls = fixture.log().len();
+            let report = fixture
+                .store
+                .export(source, destination, &fixture.context)
+                .unwrap();
+            assert_eq!(report.local_ref, fixture.reference);
+            assert_eq!(report.stored_manifest, root);
+            assert_eq!(report.destination, destination.unwrap_or(source).as_str());
+            let log = fixture.log();
+            let export_calls = &log[calls..];
+            assert_eq!(export_calls.len(), 2, "one capability check and one copy");
+            assert!(export_calls.iter().all(|entry| entry["tool"] == "skopeo"));
+            let args = export_calls[1]["args"].as_array().unwrap();
+            assert!(args.contains(&json!("--preserve-digests")));
+            let shared = args
+                .iter()
+                .position(|arg| arg == "--src-shared-blob-dir")
+                .unwrap();
+            assert_eq!(
+                args[shared + 1],
+                json!(fixture.store.config().root().join("blobs"))
+            );
+            assert_eq!(
+                args.last().unwrap(),
+                &json!(format!("containers-storage:{}", report.destination))
+            );
+            assert_eq!(snapshot(fixture.store.config().root()), before);
+        }
+        let calls = fixture.log().len();
+        assert!(matches!(
+            fixture.store.export(&qualified, Some(&mismatch), &fixture.context),
+            Err(Error::ToolFailed { operation: "export image", stderr, .. })
+                if stderr.contains("does not match expected digest")
+        ));
+        assert_eq!(fixture.log().len() - calls, 2, "no fallback copy");
+        assert_eq!(snapshot(fixture.store.config().root()), before);
+    }
+}
+
+#[test]
+fn every_export_requires_capabilities_and_propagates_preservation_failure() {
+    use crate::test_snapshot::snapshot;
+    for pulled in [false, true] {
+        let mut fixture = Fixture::new();
+        fixture.acquire(pulled);
+        let source = parse_selector(fixture.reference.as_str());
+        let before = snapshot(fixture.store.config().root());
+        for (help, missing) in [
+            ("--src-shared-blob-dir", "--preserve-digests"),
+            ("--preserve-digests", "--src-shared-blob-dir"),
+        ] {
+            fixture.config["help"] = json!(help);
+            fixture.save();
+            let calls = fixture.log().len();
+            assert!(matches!(
+                fixture.store.export(&source, None, &fixture.context),
+                Err(Error::ToolCapability { executable, capability })
+                    if executable == fixture.context.skopeo && capability == missing
+            ));
+            let log = fixture.log();
+            assert_eq!(
+                log.len() - calls,
+                1,
+                "capability failure must prevent copying"
+            );
+            assert_eq!(log[calls]["args"], json!(["copy", "--help"]));
+            assert_eq!(snapshot(fixture.store.config().root()), before);
+        }
+        fixture.config.as_object_mut().unwrap().remove("help");
+        fixture.config["export_failure"] = json!("cannot preserve stored manifest digest");
+        fixture.save();
+        let calls = fixture.log().len();
+        assert!(matches!(
+            fixture.store.export(&source, None, &fixture.context),
+            Err(Error::ToolFailed { operation: "export image", executable, status, stderr })
+                if executable == fixture.context.skopeo && status.code() == Some(18)
+                    && stderr == "cannot preserve stored manifest digest"
+        ));
+        assert_eq!(
+            fixture.log().len() - calls,
+            2,
+            "no retry without preservation"
+        );
+        assert_eq!(snapshot(fixture.store.config().root()), before);
+    }
+}
+
+#[test]
+fn import_still_allows_representation_changes_without_preservation_capability() {
+    let mut fixture = Fixture::new();
+    fixture.config["help"] = json!("--dest-shared-blob-dir");
+    fixture.save();
     fixture.import(false).unwrap();
-    let mut metadata = fixture.read();
-    metadata.acquisition = Acquisition::Pull {
-        requested_reference: "example/image:tag".into(),
-        resolved_digest: metadata.stored_root.clone(),
-    };
-    let raw_image = fs::canonicalize(fixture.store.layout.ref_entry(&fixture.reference)).unwrap();
-    fs::write(
-        raw_image.join("metadata.json"),
-        serde_json::to_vec(&metadata).unwrap(),
-    )
-    .unwrap();
-    fixture
-        .store
-        .export(
-            &parse_selector(format!("example/tool@{}", metadata.stored_root)),
-            Some(&parse_selector("localhost/output:tag")),
-            &fixture.context,
-        )
-        .unwrap();
-    assert!(
-        fixture.log().last().unwrap()["args"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("--preserve-digests"))
-    );
+    let log = fixture.log();
+    let args = log.last().unwrap()["args"].as_array().unwrap();
+    assert!(!args.contains(&json!("--preserve-digests")));
+    assert!(args.last().unwrap().as_str().unwrap().starts_with("oci:"));
 }
 
 #[test]

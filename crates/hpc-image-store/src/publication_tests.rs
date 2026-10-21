@@ -120,6 +120,30 @@ fn publish(handle: &Store, reference: &LocalRef, image: Image, replace: bool) ->
 }
 
 #[test]
+fn export_rejects_a_complete_stored_index_before_invoking_tools() {
+    let temporary = tempfile::tempdir().unwrap();
+    let handle = store(temporary.path());
+    publish(&handle, &reference(), Image::Index, false);
+    assert!(!handle.check(&crate::CheckScope::All).unwrap().has_errors());
+    let before = crate::test_snapshot::snapshot(temporary.path());
+    let context = crate::TransferContext {
+        podman: "/unavailable/podman".into(),
+        skopeo: "/unavailable/skopeo".into(),
+        platform: None,
+    };
+    for selector in [
+        reference().to_string(),
+        format!("analysis/tool@{}", root(Image::Index)),
+    ] {
+        assert!(matches!(
+            handle.export(&crate::ImageSelector::new(selector).unwrap(), None, &context),
+            Err(Error::InvalidObject { reason, .. }) if reason.contains("single OCI manifest")
+        ));
+        assert_eq!(crate::test_snapshot::snapshot(temporary.path()), before);
+    }
+}
+
+#[test]
 fn publication_replacement_and_removal_preserve_retired_data_and_lock_identities() {
     let temporary = tempfile::tempdir().unwrap();
     let handle = store(temporary.path());
