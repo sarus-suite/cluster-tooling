@@ -13,7 +13,8 @@ digest, inventory, read-only graph checking, and explicit-name removal.
 Inventory formatting can match Podman's image table or show richer fields and
 JSON diagnostics. Stage 6.1 adds registry pull of one OCI image manifest with
 its original manifest digest. Stage 6.2 requires digest preservation for every
-export, including imported images. Prune remains future work.
+export, including imported images. Stage 6.3 adds library-only local image
+availability for acquisition decisions. Prune remains future work.
 Store initialization is implicit on `import`, `pull` and `remove`, there is no
 `init` CLI action. Recorded validation results are listed below.
 
@@ -510,6 +511,71 @@ metadata, ignored explicit destination digest, and cleanup warnings. Pull has no
 containers-storage image ID. Stored-root lookup uses the committed destination's
 literal repository name, even when it differs from the registry source.
 
+### Inspecting image availability
+
+`Store::availability(&ImageSelector)` inspects local content in an existing,
+initialized store. It uses the same selectors and structural validation as
+single-image checking, including every dependency in a supported index graph.
+It invokes no external tools or registry requests and never initializes a store.
+
+```no_run
+use hpc_image_store::{
+    ImageAvailability, ImageSelector, PullContext, PullOptions, Store, StoreConfig,
+};
+# fn example() -> hpc_image_store::Result<()> {
+let store = Store::new(StoreConfig::new("/scratch/user/.sarus-imagestore")?);
+let image = ImageSelector::new("docker.io/library/alpine:3.23")?;
+
+// Propagate preparation, locking, resolution, and inspection errors to the caller.
+match store.availability(&image)? {
+    ImageAvailability::Ready => {
+        println!("Reuse the stored image {image}");
+    }
+    ImageAvailability::Missing => {
+        store.pull(&image, None, &PullContext::default(), &PullOptions::default())?;
+    }
+    ImageAvailability::Unusable { diagnostics } => {
+        // This caller reports the findings and leaves recovery to its operator.
+        for finding in diagnostics {
+            eprintln!("{:?} at {}: {}", finding.kind, finding.path.display(), finding.message);
+        }
+    }
+}
+# Ok(())
+# }
+```
+
+`Ready` means the selected ref passes checking within the checker's limits.
+`Missing` means the named ref or repository-qualified stored root is definitively
+absent. Missing stores, permission failures, lock timeouts, and incomplete digest
+searches return errors. A damaged candidate that prevents establishing a digest
+match therefore cannot become `Missing`.
+
+`Unusable` contains one or more `AvailabilityDiagnostic` values. Their `kind`
+is `AvailabilityDiagnosticKind::Damage` or `Unsupported`; callers need not parse
+messages to distinguish them. Each diagnostic also contains its existing
+subsystem `category`, path, optional operation, logical ref and object digest,
+and a contextual message. Unsupported versions and representations differ from
+malformed or missing image files. Operational inspection failures return errors,
+even when other damage has already been detected. Checker reports and CLI
+output retain their existing behavior, and availability adds no CLI command.
+
+The shared store and selected-ref locks remain held throughout inspection.
+Results describe the content when observed and reserve nothing afterward. A
+later import or pull must check its destination under its own locks, so even
+acquisition after `Missing` can fail with `RefExists`. Existing refs always
+require explicit replacement. Callers choose whether to report unusable content
+or request replacement; reacquiring unsupported content may reproduce the same
+problem, and replacing a ref cannot generally repair damaged immutable shared
+CAS objects.
+
+Availability checks no remote-tag freshness and uses no provenance aliases.
+It does not hash blobs, decompress or unpack layers, or certify execution.
+Same-size corruption may go undetected. Internal index traversal does not add
+index acquisition or export support. Transfers do not run availability
+automatically, and pruning must perform its own fresh authoritative scan when
+implemented.
+
 ### Names, digests, and metadata
 
 Local refs use the upstream named-reference grammar with explicit, case-sensitive
@@ -806,12 +872,12 @@ continue to coordinate through the same files even when a ref selects a new
 image.
 
 The operation lock policy is shown below. Import, pull, export, remove, list,
-and check are public today; prune remains planned.
+check, and library availability are public today; prune remains planned.
 
 | Operation | Store lock | Ref lock |
 | --- | --- | --- |
 | import, pull, remove | Shared | Exclusive |
-| export, list, check | Shared | Shared |
+| export, list, check, availability | Shared | Shared |
 | prune | Exclusive | None |
 
 Initialization without a marker has a separate phase with an exclusive store
@@ -891,6 +957,17 @@ termination around the rename boundary, and test-only failure checkpoints at
 insertion and sync steps. Synthetic fixtures use version-3 ref metadata, but
 their placeholder acquisition fields do not represent real imports. Fault
 injection is thread-local and unavailable in production builds.
+
+Stage-6.3 tests cover availability outcomes, typed damage and unsupported-content
+diagnostics, operational-error precedence, literal repository boundaries,
+deterministic selection, incomplete digest resolution, and complete internal
+index traversal. Unprivileged subprocesses check permissions. Short test-only
+thresholds exercise actual store and ref lock timeouts. Process handshakes
+verify shared-lock retention during graph inspection, compatible readers, and
+candidate replacement or removal after discovery. Persistent snapshots and
+controlled acquisition fixtures verify preservation, no tool calls, and
+destination checks after a definite miss. Availability shares checking's graph
+and wrapper inspection without changing checker reports.
 
 Stage-3 synthetic and CLI tests exercise source-ID pinning, inherited
 environment, platform flags, clean CLI JSON, unchanged caller configuration,
@@ -994,6 +1071,21 @@ by their owning tests. The Docker Hub smoke test is separately ignored for its
 network access. Never use an unfiltered `--ignored` invocation.
 
 ### Recorded results and outstanding qualification
+
+On 2026-10-21, stage 6.3 passed 158 ordinary tests, including six doctests and
+both existing real-tool tests using Podman 5.4.2 and Skopeo 1.18.0. Six internal
+subprocess helpers and the Docker Hub smoke test were ignored. Availability is
+implemented and remains library-only. It shares typed wrapper and graph
+inspection with checking, preserves existing checker reports and CLI behavior,
+and performs no automatic acquisition or recovery. The suite covers every
+availability outcome, operational failures, incomplete digest resolution,
+multiple findings, preservation, process coordination, and destination conflicts
+after a definite miss. After the final classification and cached-cause test
+refinements, all 15 focused availability tests and eight graph tests passed.
+Crate check, Clippy with warnings denied, formatting, and diff checks passed.
+Earlier validation records below retain their historical meaning.
+Pruning, broader stage-8 qualification, and Lustre/VAST site testing
+remain pending; store format 1 and ref metadata schema 3 are unchanged.
 
 On 2026-10-21, stage 6.2 passed 142 ordinary tests, including five doctests
 and both existing real-tool tests. Six internal subprocess helpers and the

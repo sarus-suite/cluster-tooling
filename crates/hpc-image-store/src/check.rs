@@ -4,9 +4,9 @@ use crate::{
     DiagnosticCategory, Error, ImageSelector, ListDiagnostic, LocalRef, Result, Sha256Digest,
     Store, discovery, fsutil,
     graph::GraphReader,
+    inspection,
     inventory::{self, serialize_path},
     locks::{Operation, RefGuard},
-    refs,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -136,24 +136,22 @@ fn inspect(
 ) -> Result<()> {
     let reference = guard.reference();
     let path = guard.layout().ref_entry(reference);
-    let inspected = match refs::inspect_small(guard) {
-        Ok(inspected) => inspected,
-        Err(Error::RefMissing(_)) if skip_missing => return Ok(()),
-        Err(error) => {
-            failed(report, path, Some(reference.clone()), error);
-            return Ok(());
-        }
-    };
-    fsutil::checkpoint("check.selected", &path)?;
-    let start = report.diagnostics.len();
-    for error in inspected.errors {
-        report.complete = false;
-        report
-            .diagnostics
-            .push(CheckDiagnostic::from_error(&path, Some(reference), &error));
+    let inspected = inspection::inspect(guard, reader, || {
+        fsutil::checkpoint("check.selected", &path)
+    })?;
+    if inspected.missing && skip_missing {
+        return Ok(());
     }
-    if let Some(root) = &inspected.root {
-        let graph = reader.scan(root);
+    let start = report.diagnostics.len();
+    for error in inspected.wrapper_findings {
+        report.complete = false;
+        report.diagnostics.push(CheckDiagnostic::from_error(
+            &path,
+            Some(reference),
+            &error.cause,
+        ));
+    }
+    if let Some(graph) = inspected.graph {
         report.complete &= graph.complete;
         // Retain reachability in the internal graph report for prune. Checking
         // exposes no partial live set that could accidentally authorize deletion.
@@ -161,10 +159,10 @@ fn inspect(
         for diagnostic in graph.diagnostics {
             report.diagnostics.push(CheckDiagnostic {
                 category: DiagnosticCategory::Graph,
-                path: diagnostic.path,
+                path: diagnostic.finding.path,
                 local_ref: Some(reference.clone()),
                 object_digest: Some(diagnostic.digest),
-                message: diagnostic.message,
+                message: diagnostic.finding.message,
             });
         }
     } else {
@@ -173,7 +171,7 @@ fn inspect(
     report.entries.push(CheckEntry {
         path,
         local_ref: Some(reference.clone()),
-        stored_root: inspected.root.map(|root| root.digest),
+        stored_root: inspected.stored_root,
         status: if report.diagnostics.len() == start {
             CheckStatus::Passed
         } else {

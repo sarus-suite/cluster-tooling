@@ -289,7 +289,12 @@ fn handle_and_reads_do_not_initialize() {
     let path = temporary.path().join("missing");
     let handle = store(&path);
     assert_eq!(handle.config().root(), path);
-    for operation in [Operation::Export, Operation::List, Operation::Check] {
+    for operation in [
+        Operation::Export,
+        Operation::List,
+        Operation::Check,
+        Operation::Availability,
+    ] {
         assert!(matches!(
             handle.prepare(operation),
             Err(Error::MissingStore(_))
@@ -453,6 +458,7 @@ fn operation_matrix_is_explicit() {
     for operation in [Operation::Export, Operation::List, Operation::Check] {
         assert_eq!(operation.store_mode(), Mode::Shared);
         assert_eq!(operation.ref_mode(), Some(Mode::Shared));
+        assert!(!operation.initializes());
     }
     assert_eq!(Operation::Prune.store_mode(), Mode::Exclusive);
     assert_eq!(Operation::Prune.ref_mode(), None);

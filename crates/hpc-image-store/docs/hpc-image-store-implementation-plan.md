@@ -1,6 +1,6 @@
 # Staged implementation of the HPC OCI image store
 
-Status: stages 1–5, 6.1, and 6.2 are implemented in `crates/hpc-image-store`.
+Status: stages 1–5 and 6.1–6.3 are implemented in `crates/hpc-image-store`.
 The crate provides single-platform containers-storage import and export,
 registry pull preserving one OCI manifest digest, inventory, read-only graph
 checking, and explicit-name removal. Stage 4.1 supplies common selectors and
@@ -9,12 +9,33 @@ graphs, including nested indexes. Stage 6.1 adds raw registry resolution,
 bounded platform selection, and separate registry configuration while retaining
 store format 1 and ref metadata schema 3. Stage 6.2 requires digest preservation
 on every export, including imported images, and qualifies the registry round
-trip. Stage 6.3 library image availability and stages 7–8 remain planned.
+trip. Stage 6.3 adds library-only image availability with typed diagnostics and
+operational errors. Stages 7–8 remain planned.
 Stage 8 completes the first proof of concept (PoC).
 Multi-platform stored images and complete-index storage remain outside that
 PoC. Lustre/VAST behavior remains unqualified pending site tests.
 
 Design baseline: [Filesystem OCI Image Store Design](hpc-image-store-design.md), version 1.8.
+
+Implementation update, 2026-10-21: stage 6.3 adds
+`Store::availability(&ImageSelector)` with `Ready`, `Missing`, and
+`Unusable { diagnostics }` outcomes. Dedicated diagnostics classify damage and
+unsupported content, while operational failures and incomplete digest resolution
+remain errors. Checking and availability share typed wrapper and complete graph
+inspection; checker reports and CLI interfaces retain their existing behavior.
+The query holds both shared locks throughout inspection, invokes no tools,
+preserves stored content, and grants no reservation for later acquisition.
+
+The full crate suite passed 158 ordinary tests, including six doctests and both
+existing real-tool tests using Podman 5.4.2 and Skopeo 1.18.0. Six internal
+subprocess helpers and the Docker Hub smoke test were ignored; no external
+registry test was requested or run. Coverage includes permissions, short actual
+lock timeouts, process coordination, selector races, multiple typed findings,
+content preservation, and destination conflicts after availability observations.
+Final targeted validation and crate checks are recorded in the README.
+Store format 1 and ref metadata schema 3 are unchanged. Pruning, broader stage-8
+qualification, and Lustre/VAST site testing remain pending. The dated records
+below describe earlier stages and planning revisions.
 
 Implementation update, 2026-10-21: stage 6.2 passed 142 ordinary tests,
 including five doctests and both existing real-tool tests. Six internal
@@ -503,7 +524,7 @@ This section describes the target contract after the relevant stages. Stage
 4.1 implements the common selectors and containers-storage transfer arguments;
 stage 6.1 implements pull and stage 6.2 requires universal export preservation
 and qualifies the registry round trip.
-Stage 6.3 will add library-only availability. Prune also remains planned,
+Stage 6.3 implements library-only availability. Prune remains planned,
 while stage 5 implements checking. Earlier interfaces and their historical
 validation are recorded above.
 
@@ -563,7 +584,7 @@ summed to calculate total store usage.
 - Successful mutations sync before returning; post-publication sync errors explicitly report potentially committed state.
 - File locks, hard-link insertion, atomic rename, publication visibility, and sync behavior require validation on the actual Lustre and VAST deployments. Do not silently downgrade these guarantees if a primitive is unavailable.
 - No hosted registry service, registry push action, automatic repair, deep checking, global catalog, or migration of existing Parallax stores.
-- Availability is a planned library-only observation with the same structural-validation limits as checking. It neither initializes missing stores nor performs automatic acquisition or recovery. A CLI predicate and application integration remain outside scope; storage format and metadata schema are unchanged.
+- Availability is a library-only observation with the same structural-validation limits as checking. It neither initializes missing stores nor performs automatic acquisition or recovery. A CLI predicate and application integration remain outside scope; storage format and metadata schema are unchanged.
 - The crate is development work with initialization aligned to design version 1.3 and locally verified; no production metadata migration is planned. Recreate obsolete development fixtures rather than introducing migration or offline qualification machinery, and never automatically delete unexpected contents.
 - `sarusctl` and Skybox remain unchanged during these stages; their later integration uses the library through workspace path dependencies.
 - Backups or filesystem snapshots remain necessary to recover removed logical refs and operational metadata; the CAS alone cannot reconstruct their names and provenance.

@@ -49,6 +49,27 @@ impl Default for LockWaitPolicy {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_WAIT_POLICY: std::cell::Cell<Option<LockWaitPolicy>> = const { std::cell::Cell::new(None) };
+}
+
+/// Scoped to the test thread, including actual Store operation lock attempts.
+#[cfg(test)]
+pub(crate) fn short_test_waits() -> impl Drop {
+    struct Restore(Option<LockWaitPolicy>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_WAIT_POLICY.set(self.0);
+        }
+    }
+    Restore(TEST_WAIT_POLICY.replace(Some(LockWaitPolicy {
+        retry_interval: Duration::from_millis(5),
+        warning_interval: Duration::from_millis(20),
+        timeout: Duration::from_millis(100),
+    })))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Operation {
     Import,
@@ -57,6 +78,7 @@ pub(crate) enum Operation {
     List,
     Remove,
     Check,
+    Availability,
     Prune,
 }
 impl Operation {
@@ -73,7 +95,7 @@ impl Operation {
     pub fn ref_mode(self) -> Option<Mode> {
         match self {
             Self::Import | Self::Pull | Self::Remove => Some(Mode::Exclusive),
-            Self::Export | Self::List | Self::Check => Some(Mode::Shared),
+            Self::Export | Self::List | Self::Check | Self::Availability => Some(Mode::Shared),
             Self::Prune => None,
         }
     }
@@ -86,7 +108,10 @@ pub(crate) struct FileLock {
 }
 impl FileLock {
     fn acquire(path: &Path, mode: Mode, create: bool) -> Result<Self> {
-        Self::acquire_with_policy(path, mode, create, LockWaitPolicy::default())
+        let policy = LockWaitPolicy::default();
+        #[cfg(test)]
+        let policy = TEST_WAIT_POLICY.get().unwrap_or(policy);
+        Self::acquire_with_policy(path, mode, create, policy)
     }
 
     fn acquire_with_policy(

@@ -1,5 +1,5 @@
 //! Only the small wrapper files are interpreted here, not the image graph.
-use crate::{Error, Result, Sha256Digest, fsutil};
+use crate::{Error, Result, Sha256Digest, fsutil, inspection::Finding};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
 
@@ -43,20 +43,33 @@ struct LayoutIndex {
     manifests: Vec<Descriptor>,
 }
 
-fn parse<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    serde_json::from_slice(&fsutil::read_regular(path)?).map_err(|source| Error::Metadata {
-        kind: "OCI layout",
-        source,
+fn parse<T: serde::de::DeserializeOwned>(path: &Path) -> std::result::Result<T, Finding> {
+    let bytes = fsutil::read_regular(path).map_err(|error| Finding::wrapper(path, error))?;
+    serde_json::from_slice(&bytes).map_err(|source| {
+        Finding::wrapper(
+            path,
+            Error::Metadata {
+                kind: "OCI layout",
+                source,
+            },
+        )
     })
 }
 
 pub(crate) fn roots(layout: &Path) -> Result<Vec<Descriptor>> {
+    inspect_roots(layout).map_err(Finding::into_error)
+}
+
+fn inspect_roots(layout: &Path) -> std::result::Result<Vec<Descriptor>, Finding> {
     let version: LayoutVersion = parse(&layout.join("oci-layout"))?;
     if version.version != "1.0.0" {
-        return Err(Error::InvalidObject {
-            path: layout.join("oci-layout"),
-            reason: "unsupported OCI layout version".into(),
-        });
+        return Err(Finding::unsupported_wrapper(
+            &layout.join("oci-layout"),
+            Error::InvalidObject {
+                path: layout.join("oci-layout"),
+                reason: "unsupported OCI layout version".into(),
+            },
+        ));
     }
     let index_path = layout.join("index.json");
     let index: LayoutIndex = parse(&index_path)?;
@@ -66,10 +79,13 @@ pub(crate) fn roots(layout: &Path) -> Result<Vec<Descriptor>> {
             .as_deref()
             .is_some_and(|media_type| media_type != IMAGE_INDEX)
     {
-        return Err(Error::InvalidObject {
-            path: index_path,
-            reason: "unsupported layout index schema or media type".into(),
-        });
+        return Err(Finding::unsupported_wrapper(
+            &index_path,
+            Error::InvalidObject {
+                path: index_path.clone(),
+                reason: "unsupported layout index schema or media type".into(),
+            },
+        ));
     }
     Ok(index.manifests)
 }
@@ -93,15 +109,24 @@ pub(crate) fn selected_root(layout: &Path, digest: &Sha256Digest) -> Result<Desc
 }
 
 pub(crate) fn single_root(layout: &Path) -> Result<Descriptor> {
-    let mut roots = roots(layout)?;
+    inspect_single_root(layout).map_err(Finding::into_error)
+}
+
+pub(crate) fn inspect_single_root(layout: &Path) -> std::result::Result<Descriptor, Finding> {
+    let mut roots = inspect_roots(layout)?;
+    let index_path = layout.join("index.json");
     if roots.len() != 1 {
-        return Err(Error::InvalidObject {
-            path: layout.join("index.json"),
-            reason: "committed layout must contain exactly one root descriptor".into(),
-        });
+        return Err(Finding::wrapper(
+            &index_path,
+            Error::InvalidObject {
+                path: index_path.clone(),
+                reason: "committed layout must contain exactly one root descriptor".into(),
+            },
+        ));
     }
     let root = roots.remove(0);
-    root.validate(&layout.join("index.json"))?;
+    root.validate(&index_path)
+        .map_err(|error| Finding::unsupported_wrapper(&index_path, error))?;
     Ok(root)
 }
 

@@ -418,6 +418,46 @@ fn destination_exists_is_checked_before_tools_and_reuse_preserves_blob_age() {
 }
 
 #[test]
+fn availability_observations_do_not_reserve_import_destinations_or_invoke_tools() {
+    use crate::{ImageAvailability, locks::Operation, test_snapshot::snapshot};
+    let fixture = Fixture::new();
+    drop(fixture.store.prepare(Operation::Import).unwrap());
+    let selected = parse_selector(fixture.reference.as_str());
+    assert!(matches!(
+        fixture.store.availability(&selected),
+        Ok(ImageAvailability::Missing)
+    ));
+    // Another acquisition wins after the observation and before our next call.
+    fixture.import(false).unwrap();
+    let before = snapshot(fixture.store.config().root());
+    let calls = fixture.log().len();
+    assert!(matches!(
+        fixture.store.availability(&selected),
+        Ok(ImageAvailability::Ready)
+    ));
+    assert!(matches!(fixture.import(false), Err(Error::RefExists(_))));
+    assert_eq!(fixture.log().len(), calls);
+    assert_eq!(snapshot(fixture.store.config().root()), before);
+    fixture.import(true).unwrap();
+    let calls = fixture.log().len();
+    for executable in [&fixture.context.podman, &fixture.context.skopeo] {
+        fs::remove_file(executable).unwrap();
+    }
+    let before = snapshot(fixture.store.config().root());
+    assert!(matches!(
+        fixture.store.availability(&selected),
+        Ok(ImageAvailability::Ready)
+    ));
+    assert_eq!(snapshot(fixture.store.config().root()), before);
+    fs::remove_file(fixture.store.layout.blobs().join(CONFIG_DIGEST)).unwrap();
+    assert!(matches!(
+        fixture.store.availability(&selected),
+        Ok(ImageAvailability::Unusable { .. })
+    ));
+    assert_eq!(fixture.log().len(), calls);
+}
+
+#[test]
 fn failed_copy_and_invalid_id_preserve_previous_ref() {
     let mut fixture = Fixture::new();
     fixture.import(false).unwrap();
