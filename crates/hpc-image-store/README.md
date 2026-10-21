@@ -14,7 +14,8 @@ Inventory formatting can match Podman's image table or show richer fields and
 JSON diagnostics. Stage 6.1 adds registry pull of one OCI image manifest with
 its original manifest digest. Stage 6.2 requires digest preservation for every
 export, including imported images. Stage 6.3 adds library-only local image
-availability for acquisition decisions. Prune remains future work.
+availability for acquisition decisions. Stage 7 adds conservative pruning
+through the library and the seventh CLI command.
 Store initialization is implicit on `import`, `pull` and `remove`, there is no
 `init` CLI action. Recorded validation results are listed below.
 
@@ -191,7 +192,7 @@ change, and leaves the retired raw image, shared content and lock files for
 future maintenance. Directories, special files and malformed namespace parents
 are preserved with an error. Removal initializes a missing store beneath a
 prepared parent under the existing mutation contract, then reports the ref
-missing; list, export, and check never initialize stores.
+missing; list, export, check, availability, and prune never initialize stores.
 
 ### Checking stored images
 
@@ -252,6 +253,114 @@ stored sizes are not compared with graph-derived values. Blobs are not hashed,
 decompressed, or unpacked, so same-size byte corruption and invalid compressed
 or tar data may remain undetected. A passing result does not certify content
 digests or replace backups.
+
+### Pruning unreferenced content
+
+```sh
+hpc-image-store --store /scratch/me/images prune --dry-run
+hpc-image-store --store /scratch/me/images --json prune --dry-run --grace-period 7d
+hpc-image-store --store /scratch/me/images prune --grace-period 0
+```
+
+Prune is explicit maintenance of an initialized store. Neither mode initializes
+or repairs a missing or incomplete store. Both hold the exclusive store lock
+through a fresh scan of every committed ref, candidate enumeration, and any
+removal and syncing. No per-ref lock files are created, and no external tools
+are invoked. Imports, pulls, exports, and availability inspections retain their
+shared locks and therefore exclude pruning, including surviving transfer
+children after their wrapper process exits.
+
+A complete authoritative scan is required before anything can be deleted.
+Prune uses the same pointer, wrapper, and graph validation as checking, traverses
+every encountered index and nested index, and reuses object observations across
+refs. Any unresolved committed-ref error, conflicting descriptor, unreadable
+namespace, or incomplete candidate enumeration blocks **all** deletion,
+including staging cleanup. Previous checks, availability observations, and
+cached image sizes never authorize deletion. A damaged ref remains committed
+until the caller explicitly removes or replaces it.
+
+Visible ref changes can remain after a removal or replacement reports a parent
+sync failure, or after a publisher exits before syncing. Before deleting any
+eligible candidate, destructive prune syncs every scanned ref directory, including
+empty directories and intermediate name directories, from children to parents
+through `refs/`. The exclusive store lock remains held, so writers cannot change
+the namespace between its scan, syncing, and reclamation. This prevents a crash
+from restoring an older ref after its raw image and blobs have been reclaimed.
+A namespace sync failure blocks all cleanup and returns a `sync` diagnostic with
+the failing path, zero eligible totals, and zero removals. `scan_complete` is
+false because safe deletion could not be established. No rollback is attempted.
+
+Candidates are unreferenced regular SHA-256 CAS files, unreferenced raw-image
+directories, and abandoned acquisition directories. Raw-image and operation
+names must match the library's twelve-character alphanumeric identity syntax.
+Directory cleanup recognizes only the current wrapper files, blob-directory
+structure, canonical blob filenames in staging, and the staging `ref-pointer`
+symlink. Missing files and partial writes can be reclaimed. An unknown entry,
+unexpected type, or unexpected symlink preserves the entire candidate directory;
+unknown tool temporary files also remain. Symlinks are never followed. Active
+raw images, initialization remnants, and locks belonging to committed refs are
+preserved. Empty ref directories and unused locks are cleaned as described below.
+
+Prune also removes unused ref bookkeeping immediately, independently of the
+content grace period. It deletes recognized empty regular `ref.lock` files for
+absent refs and removes empty encoded directories beneath `refs/` and
+`locks/refs`, including parents that become empty after child cleanup. Lock files
+must have one hard link and decode to a complete local ref. Nonempty files,
+symlinks, unexpected types, malformed lock identities, and lock subtrees with
+unknown contents are preserved and reported as skips. An operational failure
+while enumerating bookkeeping blocks every cleanup category.
+
+The permanent `refs/` and `locks/refs/` roots and `locks/store.lock` remain.
+Locks for committed refs remain even when other refs are removed. A later lookup
+of an absent ref can recreate its lock bookkeeping; its existence alone does not
+mean that the image is stored. The exclusive store lock makes reclamation safe:
+every ref-lock holder, waiter, and transfer child retains the shared store lock
+until its ref-lock descriptors close. No such descriptors can remain while prune
+holds the exclusive store lock.
+
+Human and JSON reports include `ref_lock`, `ref_lock_directory`, and
+`ref_directory` candidates and per-kind totals. Their logical byte counts are
+zero; counts identify the bookkeeping entries removed. Rust callers with
+exhaustive matches on `PruneKind` must handle the three new variants. Store
+format 1 and ref metadata schema 3 are unchanged.
+
+The default grace period is 24 hours. `--grace-period` accepts integer seconds
+with an optional `s`, `m`, `h`, or `d` suffix, including `0`. Library callers use
+`std::time::Duration`. Eligibility uses each blob's modification time or the
+staging/raw-image root directory's modification time, measured against one time
+captured after locking. The exact boundary is eligible; future timestamps are
+retained even with zero grace. This is object age, not time since ref removal:
+an old blob can become eligible immediately after its last ref is removed.
+Reusing a CAS blob does not refresh its age.
+
+Dry-run performs the same scan and eligibility decisions without creating or
+removing files. It skips the namespace sync barrier and does not certify that a
+later destructive prune can persist the namespace. Destructive prune also skips
+the barrier when there are no eligible candidates. Reports include candidate
+paths and kinds, per-kind eligible and removed counts and bytes, preserved unknown paths and reasons, scan
+completeness, and contextual diagnostics. Byte counts sum regular-file lengths,
+counting hard-linked entries separately. They exclude directory overhead and
+symlink targets and do not promise physical space reclaimed on a particular
+filesystem. When scanning is incomplete or the required namespace sync fails,
+every candidate is ineligible and all eligible totals are zero.
+
+Deletion proceeds through staging, retired raw images, and CAS files, followed
+by unused ref locks, empty lock directories, and empty ref directories. Directories
+are ordered from children to parents, with stable path ordering among siblings.
+The namespace durability barrier runs even for bookkeeping-only cleanup. Trees
+are removed from children to parents, syncing each affected parent after a removal. The first
+removal or sync error stops further deletion and leaves completed changes in
+place. Candidate `removed_entries` and `removed_bytes` include partial cleanup;
+`removed` records whether the candidate root name is absent. A false
+`durability_confirmed` means a removal is visible but its parent sync failed,
+so that change may not survive a crash. Reports describe this run; a later
+retry cannot certify an earlier removal that is no longer discoverable.
+
+Collected failures still produce a report, including JSON on stdout, and exit
+status 1. Unknown entries alone are successful skips. Human summaries show
+eligible and visibly removed logical bytes; diagnostics and skipped paths go to
+stderr. Store preparation and lock failures return an operation error before a
+report. Invalid duration syntax returns status 2 before accessing the store.
 
 ### What transfers preserve and validate
 
@@ -373,7 +482,7 @@ roots and cannot choose another architecture from a single manifest. Persistent
 refs and metadata remain unchanged; partial destination data belongs to
 containers-storage.
 
-Stage 7 will reuse the checker's authoritative graph reader. Any encountered
+Stage 7 reuses the checker's authoritative graph reader. Any encountered
 index must be traversed completely or block destructive pruning; deferred public
 index support does not permit ignoring dependencies. Stage 8 will qualify the
 single-platform workflows, using index fixtures for tag selection and
@@ -573,8 +682,33 @@ Availability checks no remote-tag freshness and uses no provenance aliases.
 It does not hash blobs, decompress or unpack layers, or certify execution.
 Same-size corruption may go undetected. Internal index traversal does not add
 index acquisition or export support. Transfers do not run availability
-automatically, and pruning must perform its own fresh authoritative scan when
-implemented.
+automatically, and pruning always performs its own fresh authoritative scan.
+
+### Library pruning
+
+```rust,no_run
+use hpc_image_store::{PruneOptions, Result, Store, StoreConfig};
+
+fn preview_prune() -> Result<()> {
+    let store = Store::new(StoreConfig::new("/scratch/me/images")?);
+    let report = store.prune(&PruneOptions {
+        dry_run: true,
+        ..PruneOptions::default()
+    })?;
+    if report.has_errors() {
+        for diagnostic in &report.diagnostics {
+            eprintln!("{}: {}", diagnostic.path.display(), diagnostic.message);
+        }
+    }
+    Ok(())
+}
+```
+
+`Store::prune(&PruneOptions)` returns `Result<PruneReport>`. Both dry-run and
+actual deletion use the same report types. Check `has_errors()` as well as the
+outer `Result`: scan and deletion failures are collected, while preparation and
+lock failures are returned as typed errors. See [Pruning unreferenced content](#pruning-unreferenced-content)
+for grace, preservation, logical-byte accounting, and partial-removal semantics.
 
 ### Names, digests, and metadata
 
@@ -642,8 +776,8 @@ store/
 │   ├── layout/                    # Skopeo's unpublished OCI layout
 │   └── blobs/sha256/               # Skopeo's privately transferred objects
 └── locks/
-    ├── store.lock                 # Coordinates operations with future prune
-    └── refs/<encoded-key>/ref.lock # Stable lock for a logical name
+    ├── store.lock                 # Coordinates operations with prune
+    └── refs/<encoded-key>/ref.lock # Coordination for a logical name
 ```
 
 The `ref` entry is a relative symlink selecting a raw-image directory. Each raw
@@ -687,9 +821,10 @@ There is no offline qualification machinery.
 
 ### Preparing the location
 
-An operation that changes the store can initialize a missing store directory
-or an existing empty one. Its immediate parent must already exist and have
-been safely prepared by the user or site. That preparation includes syncing
+Import, pull, and remove can initialize a missing store directory or an
+existing empty one. Prune requires an initialized store in both modes. The
+store's immediate parent must already exist and have been safely prepared by
+the user or site. That preparation includes syncing
 the parent's creation and the directory entries needed to reach it so that
 they survive a crash. The library assumes this has been done; it creates no
 missing ancestors and does not inspect or repair them. Stores inside other
@@ -745,8 +880,8 @@ A supported version-1 store needs no private recovery record.
 
 ### Preparing an existing store
 
-For a store that already has a marker, preparation for a change takes a shared
-store lock, validates the store, and syncs the marker and root again without
+For a store that already has a marker, preparation for import, pull, or remove
+takes a shared store lock, validates the store, and syncs the marker and root again without
 opening the parent. A visible marker does not allow these syncs to be skipped;
 repeated sync failures remain errors until syncing succeeds.
 
@@ -818,7 +953,7 @@ prune; an individual acquisition does not delete them.
 
 Removal unlinks the terminal ref entry and syncs its
 parent without following the pointer. It leaves shared content, retired raw
-images, namespace directories, and lock files in place.
+images, namespace directories, and lock files in place for explicit pruning.
 
 Before the ref is committed, failures preserve any previous ref. Once a
 filesystem entry has changed, a sync failure can mean that the change is
@@ -867,12 +1002,14 @@ the transfer completes, then export performs its existing small source checks.
 ## How locking works
 
 Locks belong to the store and logical ref names rather than individual raw
-images. Lock files stay in place across replacement and removal, so processes
-continue to coordinate through the same files even when a ref selects a new
-image.
+images. The store lock is permanent. Ref locks stay in place across ordinary
+replacement and removal and while a ref remains committed. Only prune, under
+the exclusive store lock, can remove a recognized lock for an absent ref. Ref-lock
+holders and waiters retain their store guard until their ref descriptors close,
+so an exclusive prune cannot split coordination between old and recreated locks.
 
-The operation lock policy is shown below. Import, pull, export, remove, list,
-check, and library availability are public today; prune remains planned.
+The operation lock policy is shown below. All seven CLI operations and
+library availability are implemented.
 
 | Operation | Store lock | Ref lock |
 | --- | --- | --- |
@@ -881,8 +1018,8 @@ check, and library availability are public today; prune remains planned.
 | prune | Exclusive | None |
 
 Initialization without a marker has a separate phase with an exclusive store
-lock. Preparation for a change to a marked store uses shared locking for its
-repeated syncs. Either path is followed by normal operation locking and
+lock. Preparation for import, pull, or remove in a marked store uses shared
+locking for its repeated syncs. Either path is followed by normal operation locking and
 validation. A ref guard borrows its store guard, which ensures that the store
 lock outlives the ref lock.
 
@@ -899,8 +1036,9 @@ use millisecond thresholds instead of waiting for production intervals.
 
 ### Locks during subprocess execution
 
-Locks are released when their owning file descriptors close. Lock files are
-never truncated, replaced, or removed, including after a timeout.
+Locks are released when their owning file descriptors close. Operations never
+truncate or replace lock files, and timeouts never delete them. Only exclusive
+prune may remove unused ref locks; `locks/store.lock` is permanent.
 
 The parent's lock descriptors are marked close-on-exec, which normally prevents
 them from being retained when executing another program. Immediately before
@@ -968,6 +1106,20 @@ candidate replacement or removal after discovery. Persistent snapshots and
 controlled acquisition fixtures verify preservation, no tool calls, and
 destination checks after a definite miss. Availability shares checking's graph
 and wrapper inspection without changing checker reports.
+
+Stage-7 tests cover fresh authoritative reachability, shared layers, nested
+indexes, descriptor conflicts across refs, blocked scans, exact grace boundaries,
+future timestamps, retained CAS age, and preservation of unknown directory
+contents. Snapshot tests cover dry-run without ref-lock files. Fault injection
+covers enumeration, partial removal, and uncertain durability, with safe retry.
+Unprivileged subprocesses exercise permission errors, while process handshakes
+and short actual lock timeouts verify both directions of exclusion. Controlled
+imports and pulls leave real operation remnants for prune; orphaned copy tests
+verify that surviving tools continue to exclude the public prune operation.
+Bookkeeping tests cover immediate cleanup with content still inside its grace
+period, missing-ref lookups, shared encoded prefixes, unknown lock subtrees,
+partial removal and syncing failures, and actual ref-lock waiters. CLI tests
+compare library and JSON reports and verify the three new human-output categories.
 
 Stage-3 synthetic and CLI tests exercise source-ID pinning, inherited
 environment, platform flags, clean CLI JSON, unchanged caller configuration,
@@ -1071,6 +1223,62 @@ by their owning tests. The Docker Hub smoke test is separately ignored for its
 network access. Never use an unfiltered `--ignored` invocation.
 
 ### Recorded results and outstanding qualification
+
+On 2026-10-22, unused-ref bookkeeping cleanup passed 190 ordinary tests,
+including seven doctests and both existing real-tool tests with Podman 5.4.2
+and Skopeo 1.18.0. Crate check, Clippy with warnings denied, formatting, and
+diff checks passed. Six internal subprocess helpers and the Docker Hub smoke
+test were ignored; no external registry test was run. Cargo validation used
+the configured build cache outside the sandbox.
+
+Default prune now immediately removes recognized unused ref locks and empty ref
+and lock directories while leaving image content subject to its grace period.
+Coverage includes the three-ref example, dry-run/library/CLI parity, shared
+encoded prefixes, missing-ref lookup locks, unknown lock subtrees and hard links,
+inspection failures, partial removal and syncing failures, and safe retry.
+A real contended ref-lock waiter retains the store lock even after its original
+holder exits; tests verify exclusion, lock recreation, and mutual exclusion in
+two cleanup cycles. Existing orphaned import, pull, and export tests now verify
+that unused locks survive while transfer children run and can be cleaned after
+they exit. Committed ref locks and the permanent store lock retain their
+identities. Public reports gain three bookkeeping kinds; store format 1 and
+metadata schema 3 remain unchanged. Cross-node coordination and crash durability
+still require site qualification. Earlier records below remain historical.
+
+On 2026-10-21, the stage-7 namespace durability correction passed 182 ordinary
+tests, including seven doctests and both existing real-tool tests with Podman
+5.4.2 and Skopeo 1.18.0. Crate check, Clippy with warnings denied, formatting,
+and diff checks passed. Six internal subprocess helpers and the Docker Hub
+smoke test were ignored; no external registry test was run.
+
+Destructive prune now persists every scanned ref directory before reclaiming
+eligible content. Regressions cover failed removal and replacement syncs, a
+publisher terminated after rename, failures at empty leaf and intermediate
+namespace directories and `refs/`, successful retry, and lock retention during
+the barrier. A child-local seccomp filter forces actual CLI `fsync` calls to
+return `EIO`, verifying human and JSON failure reports without adding production
+fault controls. Dry-run and operations without eligible candidates skip the
+barrier. Local fault injection verifies ordering and failure handling; crash
+persistence and Lustre/VAST behavior still require deployment-site testing.
+Earlier validation records below describe the implementation at those points.
+
+On 2026-10-21, stage 7 passed 177 ordinary tests, including seven doctests
+and both existing real-tool tests using Podman 5.4.2 and Skopeo 1.18.0. Six
+internal subprocess helpers and the Docker Hub smoke test were ignored; no
+external registry test was run. Crate check, Clippy with warnings denied,
+formatting, and diff checks passed. Cargo checks used the configured build cache
+outside the sandbox, and real-tool acceptance used disposable local storage.
+
+Pruning is implemented through the library and CLI. Verified coverage includes
+shared layers after ref removal, complete nested indexes, descriptor conflicts
+across refs, damaged and incomplete scans, dry-run preservation without ref-lock
+files, grace boundaries, future timestamps, logical-byte accounting with hard
+links, unknown trees and symlinks, partial deletion and sync failures, permission
+failures, import/pull remnants, and both directions of lock exclusion. Existing
+orphaned transfer tests also exercise public prune lock timeouts. Store format 1
+and ref metadata schema 3 are unchanged. Stage 8 qualification and Lustre/VAST
+site testing remain pending. Earlier records below retain their historical
+meaning.
 
 On 2026-10-21, stage 6.3 passed 158 ordinary tests, including six doctests and
 both existing real-tool tests using Podman 5.4.2 and Skopeo 1.18.0. Six internal

@@ -1,6 +1,6 @@
 # Staged implementation of the HPC OCI image store
 
-Status: stages 1–5 and 6.1–6.3 are implemented in `crates/hpc-image-store`.
+Status: stages 1–7 are implemented in `crates/hpc-image-store`.
 The crate provides single-platform containers-storage import and export,
 registry pull preserving one OCI manifest digest, inventory, read-only graph
 checking, and explicit-name removal. Stage 4.1 supplies common selectors and
@@ -10,12 +10,77 @@ bounded platform selection, and separate registry configuration while retaining
 store format 1 and ref metadata schema 3. Stage 6.2 requires digest preservation
 on every export, including imported images, and qualifies the registry round
 trip. Stage 6.3 adds library-only image availability with typed diagnostics and
-operational errors. Stages 7–8 remain planned.
+operational errors. Stage 7 adds conservative library and CLI pruning. Stage 8
+remains planned.
 Stage 8 completes the first proof of concept (PoC).
 Multi-platform stored images and complete-index storage remain outside that
 PoC. Lustre/VAST behavior remains unqualified pending site tests.
 
-Design baseline: [Filesystem OCI Image Store Design](hpc-image-store-design.md), version 1.8.
+Design baseline: [Filesystem OCI Image Store Design](hpc-image-store-design.md), version 1.10.
+
+Implementation update, 2026-10-22: stage 7 now reclaims recognized unused ref
+locks and empty ref and lock directories immediately, independently of the image
+content grace period. The permanent store lock and locks belonging to committed
+refs remain. Exclusive-store prune can reclaim an unused ref lock because every
+holder, waiter, and transfer child keeps its shared store lock until its ref-lock
+descriptors close. Later operations can recreate bookkeeping for absent refs.
+The namespace durability barrier runs before bookkeeping-only cleanup as well.
+Unknown lock subtrees are preserved, inspection failures block all deletion,
+and removal or sync errors retain the existing partial-progress semantics.
+
+The complete suite passed 190 ordinary tests, including seven doctests and both
+existing real-tool tests using Podman 5.4.2 and Skopeo 1.18.0. Crate check,
+Clippy with warnings denied, formatting, and diff checks passed. Six internal
+subprocess helpers and the Docker Hub smoke test were ignored; no external
+registry test was run. New tests cover immediate cleanup with young image
+content retained, shared prefixes, unknown lock data, missing-ref lookups,
+inspection and mutation failures, actual waiters, lock recreation, and CLI
+report parity. Orphaned transfer regressions verify that unused locks survive
+while children run and can be reclaimed after exit. Public reports gain
+`RefLock`, `RefLockDirectory`, and `RefDirectory` kinds; store format 1 and
+metadata schema 3 remain unchanged. Site qualification remains pending.
+The earlier validation records below retain their historical meaning.
+
+Implementation correction, 2026-10-21: stage 7 now persists the scanned ref
+namespace before any destructive cleanup with eligible candidates. The exclusive
+store lock remains held while every scanned directory, including empty leaves,
+intermediate name directories, and `refs/`, is synced from children to parents.
+This prevents an older ref from reappearing after a crash once its retired
+content has been reclaimed. Namespace sync failure blocks all cleanup and
+returns a sync diagnostic with zero eligible and removed totals. Dry-run skips
+the barrier and does not certify that it would succeed.
+
+The full crate suite passed 182 ordinary tests, including seven doctests and
+both existing real-tool tests with Podman 5.4.2 and Skopeo 1.18.0. Crate check,
+Clippy with warnings denied, formatting, and diff checks passed. Six internal
+subprocess helpers and the Docker Hub smoke test were ignored; no external
+registry test was run. New regressions cover failed removal/replacement syncs,
+a publisher terminated after rename, every level of the ref namespace, retry,
+lock retention, dry-run behavior, and real CLI sync failures in human and JSON
+modes. Public interfaces, store format 1, and metadata schema 3 remain unchanged.
+Actual crash persistence and Lustre/VAST behavior require site qualification.
+The earlier results below are historical records.
+
+Implementation update, 2026-10-21: stage 7 adds
+`Store::prune(&PruneOptions)` and `prune [--dry-run] [--grace-period DURATION]`.
+Both modes require an initialized store and hold the exclusive store lock
+through a fresh authoritative scan and any deletion and syncing, without
+creating ref-lock files. Incomplete scans block every deletion. Unknown contents
+preserve their whole cleanup directory, while removal and sync failures stop
+pruning with partial-progress and durability diagnostics. The default grace is
+24 hours, with an explicit override including zero.
+
+The complete crate suite passed 177 ordinary tests, including seven doctests
+and both existing real-tool tests using Podman 5.4.2 and Skopeo 1.18.0. Six
+internal subprocess helpers and the Docker Hub smoke test were ignored; no
+external registry test was run. Crate check, Clippy with warnings denied,
+formatting, and diff checks passed. New coverage includes shared layers,
+nested-index reachability, conflicting descriptors across refs, blocked scans,
+unknown-tree preservation, grace boundaries, permissions, partial deletion and
+sync errors, acquisition remnants, and lock exclusion including orphaned copy
+processes. Store format 1 and ref metadata schema 3 are unchanged. Stage 8 and
+Lustre/VAST site qualification remain pending. Earlier records below are
+historical.
 
 Implementation update, 2026-10-21: stage 6.3 adds
 `Store::availability(&ImageSelector)` with `Ready`, `Missing`, and
@@ -153,11 +218,11 @@ Establish plumbing without requiring a usable CLI command.
 - Add the crate to the workspace with Rust edition 2024, `publish = false`, typed errors, and separate library and executable entrypoints.
 - Define explicit store configuration, validated local `name:tag` references, SHA-256 digest types, and versioned store/ref metadata.
 - Use reversible filesystem-safe encoding of logical refs, independent of OCI transport naming. Reject traversal components and omitted tags.
-- Establish shared blobs, committed refs, raw-image directories, staging, and stable lock identities.
-- Implement Linux advisory reader/writer locks with RAII guards, acquiring the store lock before any ref lock. Preserve lock files across removal.
+- Establish shared blobs, committed refs, raw-image directories, staging, a permanent store lock, and ref locks protected by the store-lock lifetime.
+- Implement Linux advisory reader/writer locks with RAII guards, acquiring the store lock before any ref lock. Preserve lock files across ordinary removal; only exclusive prune may reclaim recognized locks for absent refs, after all holders, waiters, and transfer children have closed their ref-lock descriptors.
 - Follow the design's lock matrix: import/pull/export/list/remove/check hold a shared store lock; import/pull/remove take an exclusive ref lock; export/list/check take shared ref locks; prune takes the exclusive store lock.
 - This read policy extends to library availability: a shared store lock and a shared selected-ref lock remain held throughout inspection.
-- Initialize stores for mutation; read operations reject missing or unsupported stores. Do not add an initialization action to the seven-command API.
+- Import, pull, and remove initialize stores for mutation; read operations and prune reject missing or unsupported stores. Do not add an initialization action to the seven-command API.
 
 #### Initialization contract
 
@@ -176,7 +241,7 @@ Use this initialization order:
 
 Always sync the immediate parent for an unmarked store, including existing empty roots and retries, even if another process created the root. This replaces the earlier rule to sync only parents known to have changed. Never sync directories above the immediate parent. Retry interrupted setup by reusing only recognized empty directories and the reserved temporary marker, while preserving the store directory and lock identity. Reject unexpected contents without deleting them.
 
-For a marked store, mutating preparation validates it under the store lock and syncs the marker and store directory again without opening the parent or other ancestors. A marker alone is not evidence that the final save succeeded. Read operations keep the existing lock-and-validation behavior and do not initialize missing stores. Keep the store format at version 1 and the seven CLI commands unchanged.
+For a marked store, import/pull/remove preparation validates it under the store lock and syncs the marker and store directory again without opening the parent or other ancestors. A marker alone is not evidence that the final save succeeded. Read operations keep the existing lock-and-validation behavior and do not initialize missing stores. Keep the store format at version 1 and the seven CLI commands unchanged.
 
 #### Current working-tree alignment
 
@@ -475,20 +540,26 @@ The target outcomes and caller policy are:
 - Verify content preservation and the absence of external-tool calls. Retain all existing checker and graph regressions, including complete internal index traversal without expanding public index workflows.
 - Document library usage for reuse, acquisition after a definite miss, caller-controlled handling of unusable content, and propagation of operational errors. Run the crate-scoped checks when implementing this substage; this planning revision does not claim new implementation validation.
 
-### 7. Conservative pruning
+### 7. Conservative pruning (implemented)
 
 Add `prune`, using the checker's authoritative graph traversal, including any
 shared inspection changes made in stage 6.3.
 
 - Hold the exclusive store lock for enumeration, reachability analysis, and deletion.
+- Both modes require an initialized store, create no ref coordination files, and never resume initialization.
+- Before destructive cleanup with eligible candidates, sync all scanned ref directories from children to parents through `refs/`, including empty and intermediate encoded-name directories. This persists visible removals and replacements before reclaiming their retired content. A namespace sync failure blocks all deletion and reports the failing path with zero eligible and removed totals. Dry-run skips this barrier and cannot certify it will succeed.
+- Preserve an entire cleanup directory if any contents are unrecognized; report unknown entries as successful skips.
+- Stop at the first removal or sync failure, retain partial progress, and report visible removals separately from confirmed durability.
 - Complete the scan before deletion. Reuse stage 5's authoritative reader, including its existing index traversal: any encountered index must be traversed completely or block destructive pruning. Never treat deferred public index support as permission to ignore dependencies. Any unresolved committed-ref error or incomplete enumeration blocks destructive pruning.
-- Reclaim recognized unreferenced CAS objects, abandoned import/pull staging and cleanup remnants, and unreferenced raw images. Successful operations normally clean their own staging immediately; stage 7 handles what remains. Preserve active raw images, lock identities, broken committed refs, and unknown files.
+- Reclaim recognized unreferenced CAS objects, abandoned import/pull staging and cleanup remnants, and unreferenced raw images. Successful operations normally clean their own staging immediately; stage 7 handles what remains. Preserve active raw images, locks for committed refs, the permanent store lock, broken committed refs, and unknown files.
+- Reclaim unused ref bookkeeping immediately, independently of content grace: empty single-link regular ref locks for absent refs, then empty lock and ref directories from children to parents. Keep both roots. Preserve malformed lock identities and lock subtrees containing unknown contents; operational inspection failures block all cleanup. Every ref-lock holder, waiter, and transfer child retains its shared store lock until the ref descriptors close.
+- Report bookkeeping as `ref_lock`, `ref_lock_directory`, and `ref_directory` candidates and totals, with zero logical bytes. These add public `PruneKind` variants without changing the store or metadata versions.
 - Apply a default 24-hour grace period, with an explicit duration override including zero. Use blob modification time and staging/raw-image directory modification time; preserve blob age on reuse. Document that this measures object age, not time since removal.
 - Provide dry-run reports with eligible counts and bytes; report scan and deletion failures clearly.
 - Do not use cached image sizes or past check results as a substitute for the current reachability scan. Report actual candidate bytes rather than estimating reclaimed space from removed refs.
 - Perform a fresh authoritative scan even after availability queries. Never use availability outcomes or prior reports to omit committed refs, infer an empty dependency set, or authorize deletion. An unusable committed ref still blocks destructive pruning.
 
-**Acceptance:** shared layers survive; internal index fixtures retain every reachable dependency or block deletion on incomplete traversal; missing children, unsupported graphs, inconsistent descriptors, and damaged refs block deletion; dry-run changes nothing; grace boundaries; abandoned import/pull cleanup; unknown files remain; active imports, pulls, exports, and availability inspections block prune. Prior availability queries leave pruning decisions unchanged, including refusal to delete when unusable refs remain. Use readiness handshakes and bounded waits to verify exclusion. These safety fixtures do not qualify public index acquisition or export.
+**Acceptance:** immediate bookkeeping cleanup preserves committed locks and shared prefixes; actual holders, waiters, and surviving transfer children exclude cleanup; recreated locks enforce mutual exclusion; unknown lock subtrees remain; failed removal/replacement syncs and interrupted publishers require successful ref-namespace syncing before reclamation; failures at empty leaf, intermediate, or root directories block all deletion; dry-run skips the barrier; shared layers survive; internal index fixtures retain every reachable dependency or block deletion on incomplete traversal; missing children, unsupported graphs, inconsistent descriptors, and damaged refs block deletion; dry-run changes nothing; grace boundaries; abandoned import/pull cleanup; unknown files remain; active imports, pulls, exports, and availability inspections block prune. Prior availability queries leave pruning decisions unchanged, including refusal to delete when unusable refs remain. Use readiness handshakes and bounded waits to verify exclusion. These safety fixtures do not qualify public index acquisition or export.
 
 ### 8. Qualification and developer documentation
 
@@ -524,7 +595,7 @@ This section describes the target contract after the relevant stages. Stage
 4.1 implements the common selectors and containers-storage transfer arguments;
 stage 6.1 implements pull and stage 6.2 requires universal export preservation
 and qualifies the registry round trip.
-Stage 6.3 implements library-only availability. Prune remains planned,
+Stage 6.3 implements library-only availability. Stage 7 implements pruning,
 while stage 5 implements checking. Earlier interfaces and their historical
 validation are recorded above.
 
@@ -556,7 +627,7 @@ replacement, optional notes, registry configuration, and optional platform
 selection using stage 6.1's library defaults and verification policy. It accepts
 no caller-supplied provenance aliases. Export requires preservation of the stored
 manifest for every acquisition kind, reports that digest, and rejects stored
-indexes; it cannot choose another architecture from one manifest. Prune accepts dry-run and a grace-period override.
+indexes; it cannot choose another architecture from one manifest. Prune accepts dry-run and a grace-period override as integer seconds with an optional `s`, `m`, `h`, or `d` suffix, including zero. Both modes require an initialized store.
 
 Metadata records the acquisition kind and a cached stored root checked against
 the OCI layout. Pull additionally records the requested registry reference and

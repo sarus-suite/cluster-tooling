@@ -83,7 +83,7 @@ pub(crate) enum Operation {
 }
 impl Operation {
     pub fn initializes(self) -> bool {
-        matches!(self, Self::Import | Self::Pull | Self::Remove | Self::Prune)
+        matches!(self, Self::Import | Self::Pull | Self::Remove)
     }
     pub fn store_mode(self) -> Mode {
         if matches!(self, Self::Prune) {
@@ -175,7 +175,13 @@ fn wait_for_lock(
                 if matches!(
                     source.kind(),
                     io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                ) => {}
+                ) =>
+            {
+                #[cfg(test)]
+                if source.kind() == io::ErrorKind::WouldBlock {
+                    crate::fsutil::checkpoint("lock.contended", path)?;
+                }
+            }
             Err(source) => return Err(io_error("acquire lock", path, source)),
         }
 
@@ -244,6 +250,8 @@ impl<'a> StoreGuard<'a> {
     }
 }
 
+// The store guard outlives this descriptor, including while FileLock::acquire
+// waits. Only exclusive-store prune may remove an unused ref lock afterwards.
 pub(crate) struct RefGuard<'a> {
     _lock: FileLock,
     _store: &'a StoreGuard<'a>,
@@ -254,6 +262,14 @@ pub(crate) struct RefGuard<'a> {
 impl StoreGuard<'_> {
     pub(crate) fn layout(&self) -> &Layout {
         self.layout
+    }
+    pub(crate) fn require_exclusive(&self) -> Result<()> {
+        if self.operation.store_mode() != Mode::Exclusive {
+            return Err(Error::Coordination(
+                "this operation requires an exclusive store lock",
+            ));
+        }
+        Ok(())
     }
     pub(crate) fn require_shared(&self) -> Result<()> {
         if self.operation.store_mode() != Mode::Shared {

@@ -462,6 +462,7 @@ fn operation_matrix_is_explicit() {
     }
     assert_eq!(Operation::Prune.store_mode(), Mode::Exclusive);
     assert_eq!(Operation::Prune.ref_mode(), None);
+    assert!(!Operation::Prune.initializes());
 }
 
 // Exercise the actual internal API in a fresh process, without exposing a

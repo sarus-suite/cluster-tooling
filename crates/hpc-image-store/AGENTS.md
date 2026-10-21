@@ -43,8 +43,12 @@ than silently choosing a new design.
   migrate, or delete them unless explicitly authorized by the agreed design and
   current task.
 - Preserve the guarantees for immutable content, complete raw-image layouts,
-  pointer confinement, stable lock identities, and durable publication. Do not
-  silently substitute copying, overwriting, or weaker filesystem behavior when
+  pointer confinement, lock coordination, and durable publication. Keep the
+  store lock identity permanent. Ref lock identities must remain stable for
+  committed refs and while any process holds or waits for them; only prune under
+  the exclusive store lock may reclaim unused ref locks. Every holder, waiter,
+  and transfer child must retain the store lock until its ref descriptors close.
+  Do not silently substitute copying, overwriting, or weaker filesystem behavior when
   a required primitive is unavailable.
 - After a namespace change, report potentially visible state if syncing fails.
   Do not roll back a committed ref to hide that failure.

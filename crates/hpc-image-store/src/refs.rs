@@ -1,11 +1,11 @@
 use crate::{
-    Error, NamespaceChange, RefMetadata, Result, cas,
+    Error, LocalRef, NamespaceChange, RefMetadata, Result, cas,
     error::io_error,
     fsutil,
     initialization::{create_directory, require_directory},
     inspection::Finding,
-    layout::valid_raw_image_id,
-    locks::RefGuard,
+    layout::{Layout, valid_raw_image_id},
+    locks::{RefGuard, StoreGuard},
     oci::{self, Descriptor},
     staging::CompletedStage,
 };
@@ -23,11 +23,15 @@ fn invalid(path: &Path, reason: &'static str) -> Error {
 }
 
 fn namespace_entry(guard: &RefGuard<'_>) -> Result<Option<fs::Metadata>> {
+    namespace_entry_at(guard.layout(), guard.reference())
+}
+
+fn namespace_entry_at(layout: &Layout, reference: &LocalRef) -> Result<Option<fs::Metadata>> {
     // Check every parent without following symlinks. Unlinking the terminal
     // entry must never mutate a directory reached through a malformed key.
-    let mut parent = guard.layout().root().join("refs");
+    let mut parent = layout.root().join("refs");
     require_directory(&parent)?;
-    for component in guard.reference().encoded_path().components() {
+    for component in reference.encoded_path().components() {
         parent.push(component);
         match fs::symlink_metadata(&parent) {
             Ok(metadata) if metadata.is_dir() => (),
@@ -41,7 +45,7 @@ fn namespace_entry(guard: &RefGuard<'_>) -> Result<Option<fs::Metadata>> {
             Err(source) => return Err(io_error("inspect ref namespace parent", &parent, source)),
         }
     }
-    let path = guard.layout().ref_entry(guard.reference());
+    let path = layout.ref_entry(reference);
     match fs::symlink_metadata(&path) {
         Ok(metadata) => Ok(Some(metadata)),
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -94,7 +98,7 @@ pub(crate) fn publish(stage: CompletedStage<'_>, replace: bool) -> Result<PathBu
     fsutil::sync_before_commit(&guard.layout().raw_images(), "raw_image.parent-sync")?;
 
     // Different refs can share these namespace parents. Each publisher syncs
-    // its entire path; directories are never pruned by this stage.
+    // its entire path. Prune cannot remove parents while this store guard lives.
     let mut parent = guard.layout().root().join("refs");
     let mut parents = vec![parent.clone()];
     for component in guard.reference().encoded_path().components() {
@@ -149,9 +153,13 @@ pub(crate) fn remove(guard: &RefGuard<'_>) -> Result<()> {
 
 /// Validate the exact relative pointer shape before touching its target.
 pub(crate) fn raw_image_path(guard: &RefGuard<'_>) -> Result<PathBuf> {
-    let path = guard.layout().ref_entry(guard.reference());
-    let metadata =
-        namespace_entry(guard)?.ok_or_else(|| Error::RefMissing(guard.reference().clone()))?;
+    raw_image_path_at(guard.layout(), guard.reference())
+}
+
+fn raw_image_path_at(layout: &Layout, reference: &LocalRef) -> Result<PathBuf> {
+    let path = layout.ref_entry(reference);
+    let metadata = namespace_entry_at(layout, reference)?
+        .ok_or_else(|| Error::RefMissing(reference.clone()))?;
     if !metadata.file_type().is_symlink() {
         return Err(invalid(&path, "committed ref must be a symlink"));
     }
@@ -162,14 +170,14 @@ pub(crate) fn raw_image_path(guard: &RefGuard<'_>) -> Result<PathBuf> {
         .and_then(|name| name.to_str())
         .filter(|name| valid_raw_image_id(name))
         .ok_or_else(|| invalid(&path, "unrecognized raw-image identity"))?;
-    let expected = guard.layout().raw_image_target(guard.reference(), id);
+    let expected = layout.raw_image_target(reference, id);
     if target.as_os_str() != expected.as_os_str() {
         return Err(invalid(
             &path,
             "pointer must be the canonical relative path into raw_images",
         ));
     }
-    let raw_image = guard.layout().raw_image(id);
+    let raw_image = layout.raw_image(id);
     require_directory(&raw_image)?;
     Ok(raw_image)
 }
@@ -216,7 +224,21 @@ pub(crate) struct RefInspection {
 /// Keep independently readable fields available when another wrapper file is
 /// damaged. A cached digest never replaces an unreadable authoritative root.
 pub(crate) fn inspect_small(guard: &RefGuard<'_>) -> Result<RefInspection> {
-    let raw_image = raw_image_path(guard)?;
+    inspect_small_at(guard.layout(), guard.reference())
+}
+
+/// The exclusive store lock excludes every ref writer and protects all targets.
+/// This entrypoint deliberately creates no per-ref coordination files.
+pub(crate) fn inspect_small_exclusive(
+    guard: &StoreGuard<'_>,
+    reference: &LocalRef,
+) -> Result<RefInspection> {
+    guard.require_exclusive()?;
+    inspect_small_at(guard.layout(), reference)
+}
+
+fn inspect_small_at(layout: &Layout, reference: &LocalRef) -> Result<RefInspection> {
+    let raw_image = raw_image_path_at(layout, reference)?;
     let mut errors = Vec::new();
     if let Err(error) = require_directory(&raw_image.join("blobs")) {
         errors.push(Finding::wrapper(&raw_image.join("blobs"), error));
@@ -234,7 +256,7 @@ pub(crate) fn inspect_small(guard: &RefGuard<'_>) -> Result<RefInspection> {
         .and_then(|bytes| RefMetadata::from_json(&bytes))
     {
         Ok(metadata) => {
-            if &metadata.local_ref != guard.reference()
+            if &metadata.local_ref != reference
                 || root
                     .as_ref()
                     .is_some_and(|root| metadata.stored_root != root.digest)

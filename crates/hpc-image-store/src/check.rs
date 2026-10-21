@@ -1,5 +1,5 @@
 //! Ref checking owns coordination and report attribution; graph reading is
-//! independent so future prune can reuse it under an exclusive store lock.
+//! independent so prune can reuse it under an exclusive store lock.
 use crate::{
     DiagnosticCategory, Error, ImageSelector, ListDiagnostic, LocalRef, Result, Sha256Digest,
     Store, discovery, fsutil,

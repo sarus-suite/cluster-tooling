@@ -1,6 +1,6 @@
 //! A Linux, user-owned filesystem OCI image store.
 //! Synchronous transfers, inventory, graph checking, local availability,
-//! digest selection and removal.
+//! digest selection, removal and conservative pruning.
 
 #![doc = include_str!("../README.md")]
 
@@ -32,7 +32,7 @@ mod oci;
 mod refs;
 #[allow(dead_code)]
 mod staging;
-// Coordination also defines the operations reserved for later stages.
+// Coordination guards retain locks for each operation's use of store data.
 #[allow(dead_code)]
 mod initialization;
 #[allow(dead_code)]
@@ -40,6 +40,7 @@ mod layout;
 #[allow(dead_code)]
 mod locks;
 mod metadata;
+mod prune;
 mod pull;
 mod store;
 mod subprocess;
@@ -54,6 +55,10 @@ pub use inventory::{
 };
 pub use metadata::{Acquisition, ContentMetadata, ImageId, Platform, RefMetadata, StoreMetadata};
 pub use presentation::format_list_podman;
+pub use prune::{
+    PruneCandidate, PruneDiagnostic, PruneKind, PruneOptions, PrunePhase, PruneReport,
+    PruneSkipped, PruneSummary,
+};
 pub use pull::{PullContext, PullOptions, PullReport};
 pub use staging::CleanupWarning;
 pub use store::{Store, StoreConfig};

@@ -13,19 +13,32 @@ pub(crate) struct NamespaceEntry {
 pub(crate) struct Discovery {
     pub entries: Vec<NamespaceEntry>,
     pub complete: bool,
+    /// Scanned namespace directories, including empty ones, children first.
+    /// Only a complete scan under an exclusive lock can authorize syncing them.
+    pub directories: Vec<PathBuf>,
 }
 
 pub(crate) fn discover(guard: &StoreGuard<'_>) -> Result<Discovery> {
     guard.require_shared()?;
+    Ok(discover_locked(guard))
+}
+
+pub(crate) fn discover_exclusive(guard: &StoreGuard<'_>) -> Result<Discovery> {
+    guard.require_exclusive()?;
+    Ok(discover_locked(guard))
+}
+
+fn discover_locked(guard: &StoreGuard<'_>) -> Discovery {
     let mut result = Discovery {
         entries: Vec::new(),
         complete: true,
+        directories: Vec::new(),
     };
     visit(guard, Path::new(""), &mut result);
     result
         .entries
         .sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(result)
+    result
 }
 
 fn unexpected(result: &mut Discovery, path: PathBuf, diagnostic: Error) {
@@ -81,17 +94,6 @@ fn visit(guard: &StoreGuard<'_>, relative: &Path, result: &mut Discovery) {
         }
 
         let name = entry.file_name();
-        let canonical_chunk = name.to_str().is_some_and(|name| {
-            !name.is_empty()
-                && name.len() <= 120
-                && name.len() % 2 == 0
-                && name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        });
-        let canonical_parent = relative
-            .components()
-            .all(|part| part.as_os_str().len() == 120);
         let metadata = match fs::symlink_metadata(&child_path) {
             Ok(metadata) => metadata,
             Err(source) => {
@@ -105,11 +107,7 @@ fn visit(guard: &StoreGuard<'_>, relative: &Path, result: &mut Discovery) {
         };
         // Bound malformed trees as well as refusing symlinks. A logical ref has
         // at most 768 hex characters across seven directory components.
-        if canonical_chunk
-            && canonical_parent
-            && relative.components().count() < 7
-            && metadata.is_dir()
-        {
+        if encoded_child(relative, &name) && metadata.is_dir() {
             visit(guard, &child, result);
         } else {
             unexpected(
@@ -122,4 +120,21 @@ fn visit(guard: &StoreGuard<'_>, relative: &Path, result: &mut Discovery) {
             );
         }
     }
+    result.directories.push(path);
+}
+
+/// Directory geometry shared by namespace discovery and lock bookkeeping.
+/// Terminal ref/lock entries additionally require a complete decoded LocalRef.
+pub(crate) fn encoded_child(relative: &Path, name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(|name| {
+        !name.is_empty()
+            && name.len() <= 120
+            && name.len() % 2 == 0
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }) && relative
+        .components()
+        .all(|part| part.as_os_str().len() == 120)
+        && relative.components().count() < 7
 }
