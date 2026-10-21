@@ -1,6 +1,6 @@
 # Filesystem OCI Image Store Design
 
-Version 1.6 · 21 October 2026 · Conceptual design baseline
+Version 1.7 · 21 October 2026 · Conceptual design baseline
 
 ## 1 Purpose and scope
 
@@ -12,7 +12,7 @@ This document defines the architecture, behavior, guarantees, and boundaries
 of the store. Concrete interfaces and data representations must preserve these
 requirements.
 
-The external API has seven actions:
+The library and CLI share seven actions:
 
 | Action | Purpose |
 | --- | --- |
@@ -23,6 +23,12 @@ The external API has seven actions:
 | `remove` | Remove one logical persistent ref |
 | `prune` | Reclaim unreferenced content and abandoned internal data |
 | `check` | Check metadata and the reachable image graph |
+
+The library also provides an image availability query for callers deciding
+whether to acquire content. It distinguishes images that pass structural
+validation, definite misses, and unusable stored images, while reporting
+operational failures separately. Availability has no CLI command and performs
+no automatic acquisition or recovery.
 
 Import and export are named relative to the persistent store. Pull adds direct registry-to-store transfers so users can retain the original registry image identity without first unpacking and recompressing it through containers-storage. There is no hosted registry service, registry push action, SQLite dependency, automatic repair, or deep check functionality.
 
@@ -102,9 +108,9 @@ stored and never supplies a lookup alias. Digest sources must identify the image
 directly. Distinguish the stored root from the per-ref layout's `index.json`
 and a containers-storage image ID.
 
-Export and single-image check use a tagged logical ref or a repository name
-qualified by its stored root digest, as specified below. This allows users to
-reuse a pulled image's original registry digest with the matching stored name.
+Export, single-image check, and image availability use a tagged logical ref or
+a repository name qualified by its stored root digest, as specified below.
+This allows users to reuse a pulled image's original registry digest with the matching stored name.
 Digest selection resolves committed content in this store; it does not trigger
 another registry lookup or use acquisition provenance as an alias.
 
@@ -121,9 +127,9 @@ No global catalog is necessary initially. Listing reads the small per-ref files 
 
 ### Image selectors
 
-Use a common validated image selector for import, export, pull, and single-image
-check. Its string form is `name[:tag][@digest]`, with a mandatory repository
-name and at least one of tag or digest. Keep the repository name, optional tag,
+Use a common validated image selector for import, export, pull, single-image
+check, and library image availability. Its string form is `name[:tag][@digest]`,
+with a mandatory repository name and at least one of tag or digest. Keep the repository name, optional tag,
 and optional digest distinct, and preserve the supplied spelling for display.
 Bare digests, image IDs, untagged names without digests, malformed suffixes, and
 unsupported algorithms are rejected. Digests remain full canonical lowercase
@@ -194,7 +200,7 @@ preserved by the OCI destination, fail the pull. Registry authentication and
 trust configuration remain Skopeo's responsibility; use the same configuration
 for resolution and copying, and never put credentials in per-ref metadata.
 
-**Rely on Skopeo's own transfer validation rather than repeating a complete graph check before and after every copy.** The wrapper checks the selected ref and its own metadata, coordinates access, and publishes completed results. A separate graph traversal is needed for `check` and `prune`, not routinely around imports, pulls, and exports.
+**Rely on Skopeo's own transfer validation rather than repeating a complete graph check before and after every copy.** The wrapper checks the selected ref and its own metadata, coordinates access, and publishes completed results. A separate graph traversal is needed for checking, availability inspection, and pruning. Transfers do not automatically run availability or routinely traverse the complete graph around imports, pulls, and exports.
 
 A successful copy is the normal basis for accepting the transferred image. The wrapper should inspect only the resulting root and the information needed to construct or reconcile metadata. It should not independently rehash copied layers or rerun the dedicated checker.
 
@@ -219,6 +225,7 @@ Use a store-wide reader/writer lock and a reader/writer lock for each logical re
 | List | Shared | Shared while reading each ref |
 | Remove | Shared | Exclusive on selected ref |
 | Check | Shared | Shared while checking each ref |
+| Image availability (library only) | Shared | Shared on selected ref throughout inspection |
 | Prune | Exclusive | No additional ref lock needed |
 
 Acquire the store lock before a ref lock. Hold locks for the operation's use of persistent content, including the entire import, pull, or export transfer.
@@ -228,6 +235,10 @@ This allows work on different refs to proceed concurrently while preventing prun
 Lock identities remain stable across ref replacement and removal. Lock behavior must work across nodes on the actual parallel filesystem. These locks coordinate the persistent store; Skopeo and containers-storage retain their own storage coordination.
 
 List and check need coherent observations of individual refs, but do not promise a single snapshot of the entire store.
+
+Availability holds its locks throughout inspection. Its result describes the
+observed image and does not reserve it for later acquisition or use. A later
+operation acquires its own locks and validates its own preconditions.
 
 ## 5 Import pull and export
 
@@ -387,7 +398,7 @@ another architecture from a single stored manifest. A containers-storage image
 ID remains a separate identifier. A later import still cannot promise
 reconstruction of the original registry representation.
 
-## 6 Listing and checking
+## 6 Listing, checking, and image availability
 
 ### List
 
@@ -425,6 +436,47 @@ There is no blob hashing, tar unpacking, or deep check mode. Same-size byte
 corruption may therefore go undetected. Checking and pruning must use consistent
 reachability rules and avoid repeatedly inspecting shared objects within one run.
 
+### Image availability
+
+Availability is a library-only query that helps callers decide whether to reuse
+stored content or attempt acquisition. It applies the same structural validation
+as checking, including the complete supported dependency graph, and distinguishes
+these outcomes:
+
+| Outcome | Meaning and caller policy |
+| --- | --- |
+| Ready | The selected image passes structural validation and can be reused within the checker's limits. |
+| Missing | The image is definitively absent from a valid initialized store; the caller can attempt pull or import. |
+| Unusable | The selected image has detected damage or unsupported content; the caller decides whether to report it or attempt explicit replacement. |
+
+Structured diagnostics distinguish damage from unsupported content without
+requiring callers to parse messages. They retain context and allow multiple findings.
+Operational failures that prevent determining an outcome are reported as errors,
+including inaccessible stores, permission failures, lock timeouts, and incomplete
+selector resolution. A missing or uninitialized store is an error, not an image
+miss. The query never initializes it.
+
+Use the same literal repository-scoped stored-root selection and digest
+precedence as export and single-image checking, with deterministic matching-ref
+selection. A damaged candidate that prevents establishing a digest match leaves
+resolution incomplete; it does not prove absence.
+
+Availability describes local stored content. It invokes no external tools or
+registry requests, checks no remote-tag freshness, and treats acquisition
+provenance as descriptive rather than an alternate lookup identity. Like other
+read operations, it preserves image data and may create only existing forms of
+coordination files and directories while keeping lock identities stable.
+
+The query does not acquire, repair, replace, or remove images. A later pull or
+import must still check its destination under its own locks and require explicit
+replacement when a ref exists. Reacquiring unsupported content may reproduce the
+same outcome, and replacing a ref cannot generally repair damaged immutable
+shared objects.
+
+A ready outcome is limited to the structural checks described above. It does
+not verify blob hashes, decompress or unpack layers, or certify execution.
+Availability does not extend index acquisition or export support.
+
 ## 7 Removal and pruning
 
 ### Remove
@@ -452,6 +504,11 @@ Under the exclusive store lock:
 
 The initial policy is conservative: **any unresolved committed-ref error or incomplete scan blocks destructive pruning**. Never treat an unreadable root or unsupported graph as having no dependencies. Cached metadata and previous check results cannot replace the current reachability scan.
 
+Previous availability outcomes also cannot replace the fresh authoritative scan,
+justify omitting a committed ref, imply an empty dependency set, or authorize
+deletion. Unusable committed refs still block destructive pruning. Active
+availability inspections are protected by their shared store locks.
+
 Use the same authoritative reachability rules as checking. Any encountered
 index must be traversed completely, including every platform dependency, or
 block destructive pruning. Excluding index acquisition and export from scope
@@ -469,15 +526,16 @@ The essential guarantees are:
 - Failed imports and pulls preserve prior refs.
 - Pulled refs retain the resolved platform-specific registry manifest digest.
 - Active operations are protected against pruning.
-- List and check report damage without deleting data.
+- List, check, and availability report damage without deleting data.
 - Prune relies on a complete scan of authoritative refs.
 
 Current stores are user-owned; group-writable stores require a future design extension. Validate cross-node initialization, locking, publication visibility, and durability on the target parallel filesystem. Backups or snapshots are needed to recover accidentally deleted refs and operational metadata; the CAS alone cannot reconstruct their names and history.
 
 Concrete choices for ref naming, metadata representation, publication,
 Skopeo integration, supported registry representations, compression, and
-pruning grace periods must preserve these guarantees within the seven-action
-API. Human-readable results and structured output for scripts share the same
+pruning grace periods must preserve these guarantees across the shared actions
+and library-only availability query. The CLI retains seven commands.
+Human-readable results and structured output for scripts share the same
 operation semantics.
 
 Complete-index acquisition and storage, nested-index source resolution,

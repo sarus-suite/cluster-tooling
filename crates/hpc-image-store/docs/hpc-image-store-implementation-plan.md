@@ -7,12 +7,20 @@ checking, and explicit-name removal. Stage 4.1 supplies common selectors and
 repository-scoped stored-root lookup; stage 5 checks complete supported OCI
 graphs, including nested indexes. Stage 6.1 adds raw registry resolution,
 bounded platform selection, and separate registry configuration while retaining
-store format 1 and ref metadata schema 3. Stage 6.2 export qualification and
-stages 7–8 remain planned. Stage 8 completes the first proof of concept (PoC).
+store format 1 and ref metadata schema 3. Stage 6.2 export qualification,
+stage 6.3 library image availability, and stages 7–8 remain planned.
+Stage 8 completes the first proof of concept (PoC).
 Multi-platform stored images and complete-index storage remain outside that
 PoC. Lustre/VAST behavior remains unqualified pending site tests.
 
-Design baseline: [Filesystem OCI Image Store Design](hpc-image-store-design.md), version 1.6.
+Design baseline: [Filesystem OCI Image Store Design](hpc-image-store-design.md), version 1.7.
+
+Planning revision, 2026-10-21: add library-only image availability in stage 6.3
+to help callers decide whether to acquire an image. Stages 7 and 8 retain
+conservative pruning and add availability qualification. This revision changes
+documentation only; availability remains unimplemented and adds no CLI command,
+automatic acquisition, or repair. Existing implementation results below remain
+historical records.
 
 Implementation update, 2026-10-21: stage 6.1 passed 138 ordinary tests,
 including five doctests and both existing real-tool tests, with six internal
@@ -102,6 +110,7 @@ Establish plumbing without requiring a usable CLI command.
 - Establish shared blobs, committed refs, raw-image directories, staging, and stable lock identities.
 - Implement Linux advisory reader/writer locks with RAII guards, acquiring the store lock before any ref lock. Preserve lock files across removal.
 - Follow the design's lock matrix: import/pull/export/list/remove/check hold a shared store lock; import/pull/remove take an exclusive ref lock; export/list/check take shared ref locks; prune takes the exclusive store lock.
+- This read policy extends to library availability: a shared store lock and a shared selected-ref lock remain held throughout inspection.
 - Initialize stores for mutation; read operations reject missing or unsupported stores. Do not add an initialization action to the seven-command API.
 
 #### Initialization contract
@@ -121,7 +130,7 @@ Use this initialization order:
 
 Always sync the immediate parent for an unmarked store, including existing empty roots and retries, even if another process created the root. This replaces the earlier rule to sync only parents known to have changed. Never sync directories above the immediate parent. Retry interrupted setup by reusing only recognized empty directories and the reserved temporary marker, while preserving the store directory and lock identity. Reject unexpected contents without deleting them.
 
-For a marked store, mutating preparation validates it under the store lock and syncs the marker and store directory again without opening the parent or other ancestors. A marker alone is not evidence that the final save succeeded. Read operations keep the existing lock-and-validation behavior and do not initialize missing stores. Keep the store format at version 1 and the seven operations unchanged.
+For a marked store, mutating preparation validates it under the store lock and syncs the marker and store directory again without opening the parent or other ancestors. A marker alone is not evidence that the final save succeeded. Read operations keep the existing lock-and-validation behavior and do not initialize missing stores. Keep the store format at version 1 and the seven CLI commands unchanged.
 
 #### Current working-tree alignment
 
@@ -324,9 +333,9 @@ stored-root resolution, including its selected-ref lock and diagnostics.
 Preserve this implemented graph traversal and its tests. Internal index-reading
 capability does not imply supported index acquisition, parent metadata, or export.
 
-### 6. Single-platform registry acquisition and digest-preserving export
+### 6. Registry acquisition, digest-preserving export, and image availability
 
-Implement the two sub-stages below in order. Each acquired ref selects one
+Implement the three sub-stages below in order. Each acquired ref selects one
 platform-specific OCI image manifest. Complete-index storage and index export
 are explicit PoC limitations, deferred beyond stage 8.
 
@@ -379,9 +388,49 @@ its presence does not establish completed qualification of registry round trips.
 
 **Acceptance:** real registry-to-store-to-containers-storage digest preservation; export by name and qualified manifest digest; omitted and explicit destinations; matching and mismatching destination digests; capability and preservation failures; persistent-store contents unchanged by export; stored-index rejection; existing import/export regressions.
 
+#### 6.3. Library image availability for acquisition decisions
+
+Add a library-only query that helps callers decide whether to reuse stored
+content or attempt pull/import. Expose this method on `Store`:
+
+```rust
+pub fn availability(
+    &self,
+    selector: &ImageSelector,
+) -> Result<ImageAvailability>;
+```
+
+The target outcomes and caller policy are:
+
+| Outcome | Meaning and caller action |
+| --- | --- |
+| `Ready` | The selected image passes the same structural validation as `check`; reuse it. |
+| `Missing` | The image is definitively absent from a valid initialized store; attempt pull or import. |
+| `Unusable { diagnostics }` | The selected image has detected damage or unsupported content; the caller chooses whether to report it or attempt explicit replacement. |
+| `Err` | Store preparation, selection, or inspection could not establish an outcome; propagate or retry the error. |
+
+- Provide structured diagnostics that distinguish damage from unsupported content without parsing messages. Preserve operation/path, ref, and object context where available, and support multiple findings. Permission failures, lock timeouts, and other operational inspection failures remain errors rather than evidence of absence or damage.
+- Reuse authoritative ref inspection and graph validation. Preserve typed causes before formatting diagnostics; do not derive availability solely from `CheckReport::has_errors()` or message strings. Preserve existing `check` behavior, reports, CLI output, and exit statuses.
+- Retain literal repository-scoped stored-root selection, digest precedence over a supplied tag, and deterministic matching-ref selection. Report incomplete digest resolution as an error, including when damaged candidates prevent establishing a match; never infer `Missing` from an incomplete search.
+- Return an error for a missing or uninitialized store and never initialize it. Preserve image data, refs, metadata, staging, and stable lock identities; permit only the existing coordination-file creation performed by read operations.
+- Hold the shared store lock and shared selected-ref lock throughout inspection, in the existing lock order. Results describe the image when inspected and do not reserve it. Pull/import must retain destination checks under their own locks and require explicit replacement of an existing ref.
+- Invoke no external tools or registry requests. Availability concerns local stored content, not remote-tag freshness or acquisition provenance. Do not automatically run availability around transfers.
+- Retain complete supported graph validation and the checker's limits: no blob hashing, decompression, or unpacking. `Ready` does not certify execution or expand index acquisition/export support.
+- Keep acquisition and recovery policy in callers. Unsupported content may remain unsupported after reacquisition, and explicit ref replacement cannot generally repair damaged immutable CAS objects. Add no automatic acquisition, repair, replacement, or removal.
+- Add no CLI command, flag, output format, or exit-status mapping for availability. Keep store format 1 and ref metadata schema 3 unchanged.
+
+**Acceptance:**
+
+- Cover `Ready`, definite named and digest misses, damaged wrappers and dependencies, unsupported content, and multiple findings with typed diagnostic classification.
+- Verify missing/uninitialized-store errors, permissions and other inspection failures, lock timeouts, incomplete digest resolution, selector parity, digest precedence, literal repository boundaries, and deterministic matching-ref selection.
+- Verify shared-lock retention during inspection and concurrent replacement/removal using readiness handshakes and bounded waits. Show that later acquisition still performs its own destination checks.
+- Verify content preservation and the absence of external-tool calls. Retain all existing checker and graph regressions, including complete internal index traversal without expanding public index workflows.
+- Document library usage for reuse, acquisition after a definite miss, caller-controlled handling of unusable content, and propagation of operational errors. Run the crate-scoped checks when implementing this substage; this planning revision does not claim new implementation validation.
+
 ### 7. Conservative pruning
 
-Add `prune`, using the checker's authoritative graph traversal.
+Add `prune`, using the checker's authoritative graph traversal, including any
+shared inspection changes made in stage 6.3.
 
 - Hold the exclusive store lock for enumeration, reachability analysis, and deletion.
 - Complete the scan before deletion. Reuse stage 5's authoritative reader, including its existing index traversal: any encountered index must be traversed completely or block destructive pruning. Never treat deferred public index support as permission to ignore dependencies. Any unresolved committed-ref error or incomplete enumeration blocks destructive pruning.
@@ -389,8 +438,9 @@ Add `prune`, using the checker's authoritative graph traversal.
 - Apply a default 24-hour grace period, with an explicit duration override including zero. Use blob modification time and staging/raw-image directory modification time; preserve blob age on reuse. Document that this measures object age, not time since removal.
 - Provide dry-run reports with eligible counts and bytes; report scan and deletion failures clearly.
 - Do not use cached image sizes or past check results as a substitute for the current reachability scan. Report actual candidate bytes rather than estimating reclaimed space from removed refs.
+- Perform a fresh authoritative scan even after availability queries. Never use availability outcomes or prior reports to omit committed refs, infer an empty dependency set, or authorize deletion. An unusable committed ref still blocks destructive pruning.
 
-**Acceptance:** shared layers survive; internal index fixtures retain every reachable dependency or block deletion on incomplete traversal; missing children, unsupported graphs, inconsistent descriptors, and damaged refs block deletion; dry-run changes nothing; grace boundaries; abandoned import/pull cleanup; unknown files remain; active imports, pulls, and exports block prune. These safety fixtures do not qualify public index acquisition or export.
+**Acceptance:** shared layers survive; internal index fixtures retain every reachable dependency or block deletion on incomplete traversal; missing children, unsupported graphs, inconsistent descriptors, and damaged refs block deletion; dry-run changes nothing; grace boundaries; abandoned import/pull cleanup; unknown files remain; active imports, pulls, exports, and availability inspections block prune. Prior availability queries leave pruning decisions unchanged, including refusal to delete when unusable refs remain. Use readiness handshakes and bounded waits to verify exclusion. These safety fixtures do not qualify public index acquisition or export.
 
 ### 8. Qualification and developer documentation
 
@@ -399,13 +449,15 @@ acceptance procedures. Stage 8 is the PoC completion point; complete-index and
 multi-platform stored-image workflows are not acceptance requirements.
 
 - Run crate checks, formatting checks, unit tests, subprocess concurrency tests, and opt-in real Podman/Skopeo integration tests.
-- Add registry integration tests using a disposable test registry, with direct manifests, indexes for tag selection and digest-source rejection, mutable tags, and authentication fixtures. Exercise single-platform acquisition, digest-preserving export, checking, and pruning together. Complete-index round trips and nested-index acquisition qualification remain deferred.
-- Provide a two-node test procedure for Lustre and VAST covering concurrent initialization of the same store beneath a prepared parent, interrupted initialization and retry, lock exclusion, concurrent imports and pulls, shared single-platform content, publication visibility, interrupted transfers, replacement/removal, and pruning.
+- Add registry integration tests using a disposable test registry, with direct manifests, indexes for tag selection and digest-source rejection, mutable tags, and authentication fixtures. Exercise single-platform import/pull, library availability, digest-preserving export, checking, and pruning together. Complete-index round trips and nested-index acquisition qualification remain deferred.
+- Verify availability before and after acquisition and removal, incomplete digest resolution, unusable content, and operational failures. Cover concurrent ref changes and acquisition races with readiness handshakes and bounded waits; verify that availability never bypasses destination-conflict or explicit-replacement checks.
+- Provide a two-node test procedure for Lustre and VAST covering concurrent initialization of the same store beneath a prepared parent, interrupted initialization and retry, lock exclusion, concurrent imports and pulls, shared single-platform content, publication visibility, interrupted transfers, replacement/removal, and pruning. Include availability observations across publication, replacement, and removal, and exclusion between active availability inspections and pruning.
 - Document sync ordering and distinguish locally tested behavior from filesystem durability guarantees requiring site validation.
 - Document CLI examples, library usage, temporary-space costs, requested-source versus stored-identity semantics, supported digest-preserving registry representations, and external-tool versions. Explain library platform defaults, explicit platform checks, manifest-only digest sources, and preservation failures without conversion.
+- Add library availability examples for reuse, acquisition after a definite miss, caller-controlled handling of unusable content, and propagation of operational errors. Explain structural-validation limits, local-only observations, acquisition races, explicit replacement, and CAS repair limitations. Availability stays library-only; application integration and a CLI predicate remain outside scope.
 - Review summaries, stage references, API contracts, assumptions, and future-work statements for consistency. Explicitly document the lack of multi-platform stored images and index acquisition/export, while distinguishing index-based tag selection and internal graph traversal. Preserve historical validation records.
 
-**Acceptance:** local checks pass; external procedures are reproducible; Lustre/VAST support remains explicitly unqualified until site tests are completed. These filesystems cannot be validated in the current development environment.
+**Acceptance:** local checks pass, including the availability and pruning interactions above; library examples cover every availability outcome without implying automatic recovery; external procedures are reproducible and include availability locking and visibility. Lustre/VAST support remains explicitly unqualified until site tests are completed. These filesystems cannot be validated in the current development environment.
 
 ## Deferred beyond the first PoC
 
@@ -423,10 +475,18 @@ remain an operational convention.
 This section describes the target contract after the relevant stages. Stage
 4.1 implements the common selectors and containers-storage transfer arguments;
 stage 6.1 implements pull and stage 6.2 will qualify digest-preserving export.
-Prune also remains planned, while stage 5 implements checking. Earlier
-interfaces and their historical validation are recorded above.
+Stage 6.3 will add library-only availability. Prune also remains planned,
+while stage 5 implements checking. Earlier interfaces and their historical
+validation are recorded above.
 
-The library exposes a store handle, a common `ImageSelector`, tagged `LocalRef` namespace identities, separate containers-storage transfer and registry pull options, operation reports, and typed failures. Its seven operations are `import`, `pull`, `export`, `list`, `remove`, `check`, and `prune`. Storage semantics and diagnostics belong to the library; argument parsing and presentation belong to the executable.
+The library exposes a store handle, a common `ImageSelector`, tagged `LocalRef` namespace identities, separate containers-storage transfer and registry pull options, operation reports, and typed failures. Its target operations are `import`, `pull`, `export`, `list`, `remove`, `check`, `prune`, and the library-only `availability` query. The CLI retains its seven commands and gains no availability command or flags. Storage semantics and diagnostics belong to the library; argument parsing and presentation belong to the executable.
+
+Availability accepts the same `ImageSelector` as single-image checking and
+returns `Result<ImageAvailability>` with `Ready`, `Missing`, or
+`Unusable { diagnostics }` as specified in stage 6.3. A missing/uninitialized
+store, incomplete resolution, or operational inspection failure returns an
+error. Callers decide whether to acquire or explicitly replace; the query does
+not perform those actions or reserve the observed ref.
 
 The executable uses the same name as the crate and requires `--store PATH`. Import, export, pull, and single-image check identify images with `name[:tag][@digest]`, requiring a name and at least one of tag or digest. Import, export, and pull accept optional destinations of the same type. Bare digests, image IDs, and implicit `latest` are unsupported. Removal alone requires an explicit `name:tag` and rejects digest-bearing selectors. Names, including registry ports, are preserved without normalization. Stored-root selection is confined to refs with the same literal repository name, ignores any supplied tag when a digest is present, and never triggers registry resolution. Multiple healthy matching refs resolve deterministically.
 
@@ -475,6 +535,7 @@ summed to calculate total store usage.
 - Successful mutations sync before returning; post-publication sync errors explicitly report potentially committed state.
 - File locks, hard-link insertion, atomic rename, publication visibility, and sync behavior require validation on the actual Lustre and VAST deployments. Do not silently downgrade these guarantees if a primitive is unavailable.
 - No hosted registry service, registry push action, automatic repair, deep checking, global catalog, or migration of existing Parallax stores.
+- Availability is a planned library-only observation with the same structural-validation limits as checking. It neither initializes missing stores nor performs automatic acquisition or recovery. A CLI predicate and application integration remain outside scope; storage format and metadata schema are unchanged.
 - The crate is development work with initialization aligned to design version 1.3 and locally verified; no production metadata migration is planned. Recreate obsolete development fixtures rather than introducing migration or offline qualification machinery, and never automatically delete unexpected contents.
 - `sarusctl` and Skybox remain unchanged during these stages; their later integration uses the library through workspace path dependencies.
 - Backups or filesystem snapshots remain necessary to recover removed logical refs and operational metadata; the CAS alone cannot reconstruct their names and provenance.
