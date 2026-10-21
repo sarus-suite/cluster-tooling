@@ -46,20 +46,7 @@ impl TransferContext {
             ));
         }
         if let Some(platform) = &self.platform {
-            for value in [&platform.os, &platform.architecture]
-                .into_iter()
-                .chain(platform.variant.iter())
-            {
-                if value.is_empty()
-                    || !value
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
-                {
-                    return Err(Error::InvalidTransfer(
-                        "platform fields must be nonempty identifiers".into(),
-                    ));
-                }
-            }
+            platform.validate()?;
         }
         Ok(())
     }
@@ -114,7 +101,11 @@ impl TransferContext {
         Ok(())
     }
 }
-fn require_capability(help: &str, executable: &Path, capability: &'static str) -> Result<()> {
+pub(crate) fn require_capability(
+    help: &str,
+    executable: &Path,
+    capability: &'static str,
+) -> Result<()> {
     if !help.split_whitespace().any(|word| word == capability) {
         return Err(Error::ToolCapability {
             executable: executable.to_owned(),
@@ -148,9 +139,10 @@ pub struct ExportReport {
 }
 
 /// Naming is resolved before preparing the store or invoking either tool.
-fn import_destination(
+pub(crate) fn acquisition_destination(
     source: &ImageSelector,
     destination: Option<&ImageSelector>,
+    operation: Operation,
 ) -> Result<LocalRef> {
     let effective = destination.unwrap_or(source);
     let tag = match effective.tag() {
@@ -158,14 +150,20 @@ fn import_destination(
         None => source
             .digest()
             .map(|digest| &digest.hex()[..12])
-            .ok_or_else(|| Error::InvalidImportDestination {
-                source_selector: source.to_string(),
-                destination: effective.to_string(),
+            .ok_or_else(|| match operation {
+                Operation::Pull => Error::InvalidPullDestination {
+                    source_selector: source.to_string(),
+                    destination: effective.to_string(),
+                },
+                _ => Error::InvalidImportDestination {
+                    source_selector: source.to_string(),
+                    destination: effective.to_string(),
+                },
             })?,
     };
     LocalRef::new(format!("{}:{tag}", effective.name()))
 }
-fn oci_argument(path: &Path) -> Result<OsString> {
+pub(crate) fn oci_argument(path: &Path) -> Result<OsString> {
     if path.as_os_str().as_bytes().contains(&b':') {
         return Err(Error::InvalidTransfer(
             "Skopeo's OCI transport cannot address a layout path containing ':'".into(),
@@ -189,7 +187,7 @@ impl Store {
         context: &TransferContext,
         options: &ImportOptions,
     ) -> Result<ImportReport> {
-        let reference = import_destination(source, destination)?;
+        let reference = acquisition_destination(source, destination, Operation::Import)?;
         let ignored_destination_digest = destination.and_then(ImageSelector::digest).cloned();
         context.validate()?;
         if context.podman.as_os_str().is_empty() {
@@ -249,7 +247,7 @@ impl Store {
 
         // Skopeo has exited: no writable producer may remain when staged
         // objects become aliases of the immutable CAS.
-        let (root, content, objects) = import_content(&stage)?;
+        let (root, content, objects) = acquired_content(&stage)?;
         let acquired_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| Error::InvalidTransfer("system clock is before the Unix epoch".into()))?
@@ -352,7 +350,7 @@ fn parse_object<T: serde::de::DeserializeOwned>(path: &Path, size: u64) -> Resul
         source,
     })
 }
-fn import_content(
+pub(crate) fn acquired_content(
     stage: &AcquisitionStage<'_>,
 ) -> Result<(Descriptor, ContentMetadata, Vec<BlobSpec>)> {
     require_directory(&stage.layout_path())?;

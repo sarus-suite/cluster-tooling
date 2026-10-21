@@ -3,6 +3,10 @@
 
 #![doc = include_str!("../README.md")]
 
+// The registry fixture is shared by unit and CLI integration tests.
+#[cfg(test)]
+extern crate self as hpc_image_store;
+
 #[cfg(not(target_os = "linux"))]
 compile_error!("hpc-image-store currently supports Linux only");
 
@@ -33,6 +37,7 @@ mod layout;
 #[allow(dead_code)]
 mod locks;
 mod metadata;
+mod pull;
 mod store;
 mod subprocess;
 mod transfer;
@@ -45,6 +50,7 @@ pub use inventory::{
 };
 pub use metadata::{Acquisition, ContentMetadata, ImageId, Platform, RefMetadata, StoreMetadata};
 pub use presentation::format_list_podman;
+pub use pull::{PullContext, PullOptions, PullReport};
 pub use staging::CleanupWarning;
 pub use store::{Store, StoreConfig};
 pub use transfer::{ExportReport, ImportOptions, ImportReport, TransferContext};

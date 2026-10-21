@@ -3,22 +3,23 @@
 This crate stores container images in a user-owned directory on Linux, separate
 from Podman's local image storage. It uses the Open Container Initiative (OCI)
 image format and shares identical image content between stored images. You can
-import an image from local Podman storage and later export it back to local
-storage using Skopeo to copy the image data.
+import an image from local Podman storage, pull one directly from a registry,
+and later export it to local storage using Skopeo to copy the image data.
 
 The crate provides a synchronous Rust library and the `hpc-image-store` CLI.
 The library is private to this workspace and is not published as a package.
 Stages 1–5 provide import, export by name or repository-qualified stored-root
 digest, inventory, read-only graph checking, and explicit-name removal.
 Inventory formatting can match Podman's image table or show richer fields and
-JSON diagnostics. Pull and prune remain future operations, and there is no
-`init` CLI action. Recorded validation results are listed below.
+JSON diagnostics. Stage 6.1 adds registry pull of one OCI image manifest with
+its original manifest digest. Prune remains future work, and there is no `init`
+CLI action. Recorded validation results are listed below.
 
 Multi-platform stored images, complete-index storage, index-parent metadata
 and inventory, platform-selecting index export, and nested-index source
-resolution are unsupported and deferred beyond that PoC. A planned tag pull
-may use a registry index to select one image manifest, without retaining the
-index or other platforms. See [Planned registry acquisition](#planned-registry-acquisition).
+resolution are unsupported and deferred beyond that PoC. A tag pull may use a
+registry index to select one image manifest, without retaining the index or
+other platforms. See [Registry acquisition](#registry-acquisition).
 
 The [filesystem image store design](docs/hpc-image-store-design.md) describes
 the agreed behavior and guarantees. The
@@ -263,9 +264,10 @@ multiple images or platforms. With OCI defaults, Skopeo compresses uncompressed
 layers and preserves supported existing compression. A content digest identifies
 the exact bytes of an object. Import can change the manifest, layer
 representation, and their digests, so it does not claim to preserve the original
-registry identity. The `pull` acquisition kind in
-metadata establishes the policy for exports that preserve digests. Registry
-pull and preservation qualification implementation is upcoming.
+registry identity. Pull instead preserves one platform-specific OCI image
+manifest and records `Acquisition::Pull` provenance. Its existing export branch
+requests digest preservation; stage 6.2 will qualify that containers-storage
+round trip.
 
 Export validates the small files and pointer that describe the selected ref,
 then relies on Skopeo to report content or transfer failures. Neither import
@@ -274,65 +276,83 @@ objects. Export leaves the persistent ref unchanged, and any partial data at
 the destination belongs to containers-storage. Export creates no temporary
 staging directory in the filesystem store.
 
-### Planned registry acquisition
+### Registry acquisition
 
-The following contract describes planned imlementation, not available
-commands or new validation results. Pull will require Skopeo, not Podman, and
-will not populate containers-storage. It will accept the common image selector,
-an optional destination, replacement, notes, and registry configuration separate
-from containers-storage settings. Destination naming will follow import's
-existing rules, including source-derived fallback tags and notices for ignored
-explicit destination digests.
+Pull requires Skopeo, does not invoke Podman, and does not populate
+containers-storage. It accepts the common image selector, an optional
+destination, replacement, and notes. Destination naming follows import's
+rules, including source-derived fallback tags and notices for ignored explicit
+destination digests. A tag resolved during acquisition cannot supply a generated
+destination tag.
 
-Before transferring layers, the library will use `skopeo inspect --raw` to
-resolve one supported platform-specific image manifest:
+```sh
+hpc-image-store --store /scratch/user/.sarus-imagestore pull docker.io/library/alpine:3.23
+hpc-image-store --store /scratch/user/.sarus-imagestore --platform linux/arm64/v8 pull registry.example/tool:release tool:release --notes 'job image'
+hpc-image-store --store /scratch/user/.sarus-imagestore pull registry.example/tool:release --authfile /path/to/auth.json --cert-dir /path/to/certs --policy /path/to/policy.json
+```
 
-- A digest source must identify the manifest itself. An explicit digest takes
-  precedence over any source tag. Index and manifest-list digests, including
-  single-entry indexes, will be rejected without selecting a child.
-- A tag source will be inspected once. For a direct manifest, its digest will
-  be calculated from the exact raw response bytes, without reserializing JSON.
-  For an OCI index or Docker manifest list, the library will select one supported
-  manifest descriptor and inspect that child by digest, verifying its type,
-  digest, and descriptor size before copying. It will not look up the mutable
-  tag again or retain the source index and other platforms.
-- Malformed objects, unsupported schemas or representations, and resolution
-  requiring nested-index traversal will fail. Reading a Docker manifest-list
-  envelope will not add support for storing Docker-specific image content.
+`PullContext` keeps registry settings separate from `TransferContext`. It holds
+Skopeo's executable path, an optional platform, and optional `auth_file`,
+`cert_dir`, `policy`, and `tls_verify` settings. The matching pull flags are
+`--authfile`, `--cert-dir`, `--policy`, and `--tls-verify[=true|false]`. Omitted
+settings use Skopeo's normal configuration and inherited environment, including
+`REGISTRY_AUTH_FILE`. Inspection and copying receive the same settings. Skopeo
+reads credentials itself; credentials and registry configuration are never
+written into ref metadata. Pull does not configure containers-storage.
 
-The registry pull context will accept an optional `Platform`, exposed through
-CLI `--platform OS/ARCH[/VARIANT]`. Unlike current containers-storage transfers,
-planned pull will use these bounded library rules rather than Skopeo's default
-selection and compatibility fallbacks:
+Before transferring layers, the library uses `skopeo inspect --raw` to resolve
+one supported platform-specific image manifest:
 
-| Input | Planned pull behavior |
+- A digest source must identify the OCI manifest itself. An explicit digest
+  takes precedence over any source tag. Index and manifest-list digests,
+  including single-entry indexes, are rejected without selecting a child.
+- A tag source is inspected once. A direct manifest's digest is calculated from
+  the exact response bytes, without trimming or reserializing JSON. For an OCI
+  index or Docker manifest list, the library selects one image descriptor and
+  inspects that child by digest, verifying its type, digest, and descriptor
+  size. It never looks up the mutable tag again.
+- Malformed objects, artifact content, unsupported schemas or representations,
+  and resolution requiring nested indexes fail. Stored content must use the
+  supported OCI manifest, configuration, and layer media types. Reading a
+  Docker manifest-list envelope does not enable Docker image representations.
+
+Pull uses the following library platform policy. Its defaults can differ from
+Skopeo's platform preferences and compatibility fallbacks.
+
+| Input | Pull behavior |
 | --- | --- |
-| Index tag, no explicit platform | Select `linux/amd64` for an `x86_64` library target or `linux/arm64` for an `aarch64` target; other targets require an explicit platform. Do not detect CPU variants. |
-| Index tag, explicit platform | Match descriptor OS and architecture, and variant when supplied. Without a supplied variant, do not filter by variant. |
+| Index tag, no explicit platform | Select `linux/amd64` for an `x86_64` library target or `linux/arm64` for `aarch64`; other targets require an explicit platform. Do not detect CPU variants. |
+| Index tag, explicit platform | Match descriptor OS and architecture, and variant when supplied. Without a variant, do not filter by variant. |
 | Direct manifest, no explicit platform | Accept its actual platform without host selection. |
-| Any source, explicit platform | Verify completed configuration OS, architecture, and any supplied variant before publication; missing or mismatching required values fail. |
+| Any source, explicit platform | Verify completed configuration OS, architecture, and any supplied variant; missing or mismatching required values fail. |
 
-Index selection will require one distinct matching manifest digest. Consistent
-duplicate descriptors may collapse to one candidate. No match or multiple
-distinct matches will fail with actionable diagnostics, rather than selecting
-by descriptor order. These rules can differ from Skopeo's selection. Repository
-names will not enforce one architecture across all tags; that remains an
-operational convention.
+Index selection requires one distinct matching manifest digest. Consistent
+duplicate descriptors collapse to one candidate; conflicting duplicates fail.
+No match or several distinct matches fails with a platform diagnostic.
+Descriptor order never breaks a tie. Repository names do not enforce one
+architecture across all tags.
 
-Skopeo will copy the pinned `repository@manifest-digest` into private staging
-with `--preserve-digests`, without `--all`, forced conversion, recompression, or
-fallback to another digest. The completed root must be that single supported
-manifest. The library will reuse existing CAS publication, locks, durability,
-replacement, and cleanup. Consistent authentication, certificate, trust-policy,
-and environment configuration will apply across inspection and copying;
-credentials will not be recorded in metadata. Layer validation remains Skopeo's
-responsibility, without another full checker pass or layer hashing.
+Skopeo copies the pinned `repository@manifest-digest` into private staging with
+`--preserve-digests`, without `--all`, forced conversion, recompression, or
+fallback to another digest. Unsupported or incompatible representations fail
+without publication. Pull sets command retries to zero and does not retry a
+failed resolution or copy. The completed layout must select exactly one OCI
+manifest whose digest equals the resolved digest. The wrapper reads the small
+manifest and configuration for metadata and checks descriptor sizes during
+staging completion. It relies on Skopeo's transfer validation without invoking
+the full graph checker or hashing layers.
 
-Requested source and stored identity will remain distinct. For example, a tag
-that resolves through index `I` to manifest `A` records the requested tag and
+Pull reuses import's locks, CAS insertion, replacement, durability, and cleanup.
+Before publication, failure preserves any previous ref. After publication,
+durability errors describe possibly visible changes and cleanup failures become
+warnings. A surviving copying Skopeo retains the operation's store and ref locks
+if its wrapper terminates.
+
+Requested source and stored identity remain distinct. A tag resolved through
+index `I` to manifest `A` records the requested selector and
 `resolved_digest == stored_root == A`; index `I` is neither stored nor a lookup
-alias. Metadata and stored size describe the manifest, configuration, and unique
-layers. Store format 1 and ref metadata schema 3 will remain unchanged.
+alias. Metadata and stored size describe the manifest, configuration, and
+unique layers. Store format 1 and ref metadata schema 3 are unchanged.
 
 Stage 6.2 will build on the existing export branch for pull metadata and qualify
 real registry-to-store-to-containers-storage digest preservation. Pulled content
@@ -365,8 +385,8 @@ let digest = Sha256Digest::new(format!("sha256:{}", "a".repeat(64)))?;
 
 Constructing the configuration and handle does not change the filesystem.
 A relative store path is resolved against the current working directory when
-the configuration is constructed. Import and export perform their own store
-preparation and locking, so callers do not need to coordinate those steps.
+the configuration is constructed. Import, pull, and export perform their own
+store preparation and locking, so callers do not need to coordinate those steps.
 
 Checking returns collected damage as a report, while store and selection
 failures return typed errors:
@@ -458,6 +478,25 @@ damaged. `RemoveReport` identifies the removed name without estimating reclaimed
 space. `export` returns `ExportReport`, including the deterministically chosen
 local ref. Stage 4.1 removes `export_selected` and replaces the earlier string
 and named-ref transfer arguments with selectors; callers must update explicitly.
+
+### Pulling from the Rust library
+
+```no_run
+use hpc_image_store::{ImageSelector, PullContext, PullOptions, Store, StoreConfig};
+# fn example() -> hpc_image_store::Result<()> {
+let store = Store::new(StoreConfig::new("/scratch/user/.sarus-imagestore")?);
+let source = ImageSelector::new("docker.io/library/alpine:3.23")?;
+let report = store.pull(&source, None, &PullContext::default(), &PullOptions::default())?;
+assert_eq!(report.resolved_digest, report.stored_root);
+# Ok(())
+# }
+```
+
+`PullOptions` supplies replacement and notes. `PullReport` returns the actual
+committed ref, requested selector, resolved digest, stored root, content
+metadata, ignored explicit destination digest, and cleanup warnings. Pull has no
+containers-storage image ID. Stored-root lookup uses the committed destination's
+literal repository name, even when it differs from the registry source.
 
 ### Names, digests, and metadata
 
@@ -652,9 +691,9 @@ complete new layout, with its matching metadata. Updating `index.json` and
 states, and an ordinary directory rename cannot replace an existing nonempty
 directory.
 
-The internal storage primitives described here also support future behavior.
-Registry pull is planned and upcoming; image-index acquisition and export are
-deferred for future work and are not supported public operations in the PoC.
+Import and pull use the same publication primitives. Those primitives also
+support internal index fixtures, but image-index acquisition and export remain
+deferred beyond the PoC.
 
 ### Preparing and saving the image
 
@@ -680,8 +719,8 @@ The library exclusively creates each raw image with small OCI wrapper files,
 matching versioned metadata, and an empty real `blobs/` directory. It normalizes
 `index.json` to exactly one selected root descriptor while retaining the
 descriptor's extra fields. The internal primitives allow either an OCI manifest
-or image index as the root, although the current import/export operations
-accept only manifests. Content blobs remain unchanged, including the bytes and
+or image index as the root, although import, pull, and export accept only
+manifests. Content blobs remain unchanged, including the bytes and
 identity of an image-index root.
 
 Publication writes and syncs the raw image files, then syncs its `blobs/`
@@ -697,7 +736,7 @@ remain held throughout.
 An existing destination, including a dangling symlink, causes an error unless
 replacement is explicitly requested. Replacement accepts symlinks and regular
 files but rejects directory entries. Replaced raw images remain for future
-prune; an individual import does not delete them.
+prune; an individual acquisition does not delete them.
 
 Removal unlinks the terminal ref entry and syncs its
 parent without following the pointer. It leaves shared content, retired raw
@@ -711,15 +750,15 @@ with the path whose sync failed. The library never rolls back a committed
 pointer after a sync failure, because doing so would introduce another change
 instead of resolving whether the committed change was saved.
 
-### Cleanup after import
+### Cleanup after acquisition
 
-Once an import has durably published its ref, it removes only its own operation
+Once an import or pull has durably published its ref, it removes only its own operation
 directory and syncs `tmp/`, while still holding the store and ref locks.
 Cleanup does not follow symlinks or scan other operations. Removing these
 staging files does not remove the published image.
 
 Cleanup is best effort after successful publication. On normal success,
-`ImportReport.cleanup_warnings` is empty. A removal or cleanup-sync failure
+`ImportReport.cleanup_warnings` and `PullReport.cleanup_warnings` are empty. A removal or cleanup-sync failure
 adds a structured `CleanupWarning` containing the staging path and a contextual
 message, while the ref remains committed and usable. The CLI prints warnings
 on stderr, includes them in JSON results, and exits with status 0. A cleanup-sync
@@ -754,8 +793,8 @@ images. Lock files stay in place across replacement and removal, so processes
 continue to coordinate through the same files even when a ref selects a new
 image.
 
-The operation lock policy is shown below. Import, export, remove, list, and check
-are public today; pull and prune describe the policy for planned operations.
+The operation lock policy is shown below. Import, pull, export, remove, list,
+and check are public today; prune remains planned.
 
 | Operation | Store lock | Ref lock |
 | --- | --- | --- |
@@ -803,8 +842,10 @@ the orphaned copy to release them.
 
 Run the following commands from the workspace root. The suite needs Podman,
 Skopeo, Python 3, tar, and sha256sum, plus permission to create rootless user
-namespaces and use overlay storage. Real-tool tests run as part of ordinary
-`cargo test`; no `--ignored` flag or external Bash harness is needed.
+namespaces and use overlay storage. The existing local real-tool tests run as
+part of ordinary `cargo test`; no `--ignored` flag or external Bash harness is
+needed for those tests. The Docker Hub test requires explicit selection as
+described below.
 
 ```sh
 cargo check --locked -p hpc-image-store
@@ -853,8 +894,8 @@ stderr diagnostics in both human and JSON modes.
 Coordination tests cover stable lock identities, separate processes, lock-wait
 warnings, and acquisition timeouts. Process tests verify both inherited locks
 after wrapper termination using readiness handshakes and bounded waits.
-The five ignored tests (`lock_worker`, `wait_worker`, `publication_worker`,
-`transfer_worker`, and `cleanup_warning_worker`) are internal subprocess helpers
+The six ignored tests (`lock_worker`, `wait_worker`, `publication_worker`,
+`transfer_worker`, `pull_worker`, and `cleanup_warning_worker`) are internal subprocess helpers
 invoked by ordinary tests. Do not run these helpers directly or use an
 unfiltered `--ignored` invocation. Neither real-tool acceptance test is ignored.
 
@@ -910,7 +951,48 @@ The independent real-Skopeo OCI-to-OCI lock test needs no Podman storage:
 cargo test --locked -p hpc-image-store actual_skopeo_retains_locks_after_parent_termination -- --nocapture
 ```
 
+### Docker Hub smoke test (explicit only)
+
+Ordinary `cargo test` and CI do not contact Docker Hub. All registry edge cases
+use controlled Skopeo fixtures. The following single ignored test performs one
+CLI acquisition of `docker.io/library/alpine:3.23` for `linux/amd64` into a
+temporary store, then verifies metadata, inventory, and checking locally:
+
+```sh
+cargo test --locked -p hpc-image-store --test registry_pull dockerhub_alpine_smoke -- --ignored --exact --nocapture
+```
+
+Run it at most once per acceptance session and never in a CI matrix. It performs
+no preliminary registry probe, additional library pull, automatic retry, or
+fallback to another image. Network, authentication, rate-limit, and unsupported
+representation failures remain failures and leave live acquisition qualification
+incomplete. Existing caller authentication may be inherited without modifying
+it. The temporary store is discarded when the test exits. This test does not
+qualify registry-to-containers-storage export; that belongs to stage 6.2.
+
+The six ignored subprocess helpers, including `pull_worker`, are invoked only
+by their owning tests. The Docker Hub smoke test is separately ignored for its
+network access. Never use an unfiltered `--ignored` invocation.
+
 ### Recorded results and outstanding qualification
+
+On 2026-10-21, stage 6.1 passed 138 ordinary tests, including five doctests and
+both existing real-tool tests. Six internal subprocess helpers and the Docker
+Hub smoke test were ignored in that run. Crate check, Clippy with warnings
+denied, formatting, and diff checks passed. Real local acceptance used Podman
+5.4.2 and Skopeo 1.18.0 with fresh disposable overlay storage.
+
+The Docker Hub smoke test was explicitly run once and passed, storing
+`docker.io/library/alpine:3.23` for `linux/amd64` as manifest
+`sha256:1f3591b8a02ea153f41c5bba878ad477f63ab3d19349762cb77504db02a23e15`.
+Its metadata, inventory, stored-root selection, and graph checks passed locally.
+No registry retries or additional pulls were performed. Controlled tests cover
+registry resolution, platform policy, option forwarding, CLI/library parity,
+failed replacement, publication and cleanup faults, concurrent pulls, and
+orphaned-copy lock retention. Store format 1 and ref metadata schema 3 are
+unchanged. Stage 6.2 export qualification, pruning, and Lustre/VAST site testing
+remain pending.
+
 
 On 2026-10-20, stage 5 passed 120 tests, including four doctests and both
 real-tool tests, with the existing five internal subprocess helpers ignored.
