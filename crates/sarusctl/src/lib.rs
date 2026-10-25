@@ -396,6 +396,7 @@ fn build_pull_ctx(config: &Config) -> PodmanCtx {
         runroot: None,
         parallax_mount_program: None,
         ro_store: None,
+        mksquashfs_path: None,
         podman_env: None,
     }
 }
@@ -412,6 +413,7 @@ pub fn build_parallax_seed_ctx(config: &Config) -> PodmanCtx {
         runroot: None,
         parallax_mount_program: None,
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
+        mksquashfs_path: Some(PathBuf::from(&config.mksquashfs_path)),
         podman_env: None,
     }
 }
@@ -428,6 +430,7 @@ pub fn build_readonly_ctx(config: &Config) -> PodmanCtx {
         runroot: None,
         parallax_mount_program: None,
         ro_store: None,
+        mksquashfs_path: None,
         podman_env: None,
     }
 }
@@ -448,6 +451,7 @@ pub fn build_run_ctx(
         runroot: Some(roots_base.join("runroot")),
         parallax_mount_program: Some(PathBuf::from(&config.parallax_mount_program)),
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
+        mksquashfs_path: None,
         podman_env: None,
     }
     .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
@@ -1806,6 +1810,10 @@ spec:
         let seed = build_parallax_seed_ctx(&config);
         assert_eq!(seed.podman_path, PathBuf::from("/usr/bin/podman"));
         assert_eq!(seed.ro_store, Some(parallax_imagestore.clone()));
+        assert_eq!(
+            seed.mksquashfs_path,
+            Some(PathBuf::from(&config.mksquashfs_path))
+        );
 
         let ro = build_readonly_ctx(&config);
         assert_eq!(ro.podman_path, PathBuf::from("/usr/bin/podman"));

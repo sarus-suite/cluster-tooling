@@ -33,6 +33,7 @@ pub struct RawConfig {
     parallax_imagestore_keepalive: Option<bool>,
     parallax_mount_program: Option<String>,
     parallax_path: Option<String>,
+    mksquashfs_path: Option<String>,
     parallax_mp_uid: Option<u32>,
     parallax_mp_gid: Option<u32>,
     parallax_mp_logfile: Option<String>,
@@ -52,7 +53,7 @@ pub struct RawConfigHooks {
     parallax_imagestore_create: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     #[serde(default = "get_default_edf_system_search_path")]
     pub edf_system_search_path: String,
@@ -66,6 +67,8 @@ pub struct Config {
     pub parallax_mount_program: String,
     #[serde(default = "get_default_parallax_path")]
     pub parallax_path: String,
+    #[serde(default = "get_default_mksquashfs_path")]
+    pub mksquashfs_path: String,
     #[serde(default = "get_default_parallax_mp_uid")]
     pub parallax_mp_uid: u32,
     #[serde(default = "get_default_parallax_mp_gid")]
@@ -90,6 +93,12 @@ pub struct Config {
     pub tracking_enabled: bool,
     #[serde(default = "get_default_tracking_tool")]
     pub tracking_tool: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        RawConfig::default().into()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
@@ -123,6 +132,10 @@ fn get_default_parallax_mount_program() -> String {
 
 fn get_default_parallax_path() -> String {
     return String::from("parallax");
+}
+
+fn get_default_mksquashfs_path() -> String {
+    return String::from("/usr/bin/mksquashfs");
 }
 
 fn get_default_parallax_mp_uid() -> u32 {
@@ -211,6 +224,10 @@ impl From<RawConfig> for Config {
                 Some(s) => s,
                 None => get_default_parallax_path(),
             },
+            mksquashfs_path: match r.mksquashfs_path {
+                Some(s) => s,
+                None => get_default_mksquashfs_path(),
+            },
             parallax_mp_uid: match r.parallax_mp_uid {
                 Some(v) => v,
                 None => get_default_parallax_mp_uid(),
@@ -283,6 +300,9 @@ impl RawConfig {
         }
         if i.parallax_path.is_some() {
             self.parallax_path = i.parallax_path;
+        }
+        if i.mksquashfs_path.is_some() {
+            self.mksquashfs_path = i.mksquashfs_path;
         }
         if i.parallax_mp_uid.is_some() {
             self.parallax_mp_uid = i.parallax_mp_uid;
@@ -383,8 +403,21 @@ fn load_raw_config_from_file(
 
     // Expand variables in the fields
     expand_raw_config_fields(&mut r, force_expand, env_option)?;
+    validate_raw_config_fields(&r, &path_str)?;
 
     Ok(r)
+}
+
+fn validate_raw_config_fields(config: &RawConfig, filepath: &str) -> SarusResult<()> {
+    if config.mksquashfs_path.as_deref() == Some("") {
+        return Err(SarusError {
+            code: 4,
+            file_path: Some(filepath.to_string()),
+            msg: String::from("mksquashfs_path must not be empty"),
+        });
+    }
+
+    Ok(())
 }
 
 fn expand_raw_config_fields(
@@ -402,6 +435,7 @@ fn expand_raw_config_fields(
     expand_raw_option_string(&mut r.parallax_imagestore, force, e)?;
     expand_raw_option_string(&mut r.parallax_mount_program, force, e)?;
     expand_raw_option_string(&mut r.parallax_path, force, e)?;
+    expand_raw_option_string(&mut r.mksquashfs_path, force, e)?;
     expand_raw_option_string(&mut r.parallax_mp_logfile, force, e)?;
     expand_raw_option_string(&mut r.parallax_mp_squashfuse_path, force, e)?;
     expand_raw_option_string(&mut r.podman_module, force, e)?;
@@ -763,6 +797,7 @@ mod tests {
         assert!(cfg.parallax_imagestore == expected_imagestore);
         assert!(cfg.parallax_mount_program == "parallax_mount_program77");
         assert!(cfg.parallax_path == "parallax50");
+        assert_eq!(cfg.mksquashfs_path, "/usr/bin/mksquashfs");
         assert!(cfg.perfmon == false);
         assert!(cfg.podman_module == "hpc");
         assert!(cfg.podman_path == "podman01");
@@ -777,6 +812,16 @@ mod tests {
     fn load_config_unquoted() {
         let result = get_rendered_config("config.unquoted");
         assert!(result.is_err())
+    }
+
+    #[test]
+    fn load_config_rejects_empty_mksquashfs_path() {
+        let config_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test/config.empty-mksquashfs");
+        let error = load_config_path(Some(config_dir), VarExpand::Must, &None).unwrap_err();
+
+        assert_eq!(error.code, 4);
+        assert!(error.file_path.is_some());
     }
 
     #[test]

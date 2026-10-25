@@ -58,6 +58,7 @@ pub(crate) fn podman_pull(
         runroot: Some(PathBuf::from(&runroot)),
         parallax_mount_program: None,
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
+        mksquashfs_path: None,
         podman_env: None,
     }
     .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
@@ -75,6 +76,7 @@ pub(crate) fn podman_pull(
         runroot: Some(PathBuf::from(&runroot)),
         parallax_mount_program: None,
         ro_store: None,
+        mksquashfs_path: None,
         podman_env: None,
     }
     .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
@@ -92,6 +94,7 @@ pub(crate) fn podman_pull(
         runroot: None,
         parallax_mount_program: None,
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
+        mksquashfs_path: Some(PathBuf::from(&config.mksquashfs_path)),
         podman_env: None,
     }
     .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
@@ -185,6 +188,7 @@ pub(crate) fn podman_start(
         runroot: Some(PathBuf::from(&runroot)),
         parallax_mount_program: Some(PathBuf::from(&config.parallax_mount_program)),
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
+        mksquashfs_path: None,
         podman_env: None,
     }
     .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())

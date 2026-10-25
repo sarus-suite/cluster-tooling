@@ -37,6 +37,11 @@
       "description": "filesystem path to parallax tool",
       "type": "string"
     },
+    "mksquashfs_path": {
+      "description": "filesystem path to the mksquashfs executable used by Parallax",
+      "type": "string",
+      "minLength": 1
+    },
     "parallax_mp_uid": {
       "description": "user id passed to the parallax mount program",
       "type": "integer",

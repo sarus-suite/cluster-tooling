@@ -273,6 +273,11 @@ pub(crate) fn parallax(
     command.arg("--roStoragePath").arg(read_only_store);
     cli_opt(
         &mut command,
+        "--mksquashfsPath",
+        podman_ctx.mksquashfs_path.as_deref().map(Path::as_os_str),
+    );
+    cli_opt(
+        &mut command,
         "--podmanRoot",
         podman_ctx.graphroot.as_deref().map(Path::as_os_str),
     );
@@ -348,6 +353,7 @@ mod tests {
                 "/usr/local/sarus-test/parallax_mount_program",
             )),
             ro_store: Some(PathBuf::from("/scratch/user/parallax/store")),
+            mksquashfs_path: Some(PathBuf::from("/usr/bin/mksquashfs")),
             podman_env: None,
         }
     }
@@ -517,7 +523,12 @@ mod tests {
         assert_eq!(cmd.get_program(), parallax_path);
 
         let args: Vec<&OsStr> = cmd.get_args().collect();
-        assert_eq!(args.len(), 7);
+        assert_eq!(args.len(), 9);
+        assert!(args.windows(2).any(|w| w
+            == [
+                OsStr::new("--mksquashfsPath"),
+                OsStr::new("/usr/bin/mksquashfs")
+            ]));
         assert!(args.windows(2).any(|w| w
             == [
                 OsStr::new("--podmanRoot"),
@@ -547,6 +558,7 @@ mod tests {
             runroot: None,
             parallax_mount_program: None,
             ro_store: None,
+            mksquashfs_path: None,
             podman_env: None,
         };
 

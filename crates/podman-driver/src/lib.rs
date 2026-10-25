@@ -333,6 +333,7 @@ mod tests {
             runroot: None,
             parallax_mount_program: None,
             ro_store: Some(PathBuf::from("store")),
+            mksquashfs_path: None,
             podman_env: None,
         };
 
