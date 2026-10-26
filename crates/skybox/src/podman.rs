@@ -53,6 +53,7 @@ pub(crate) fn podman_pull(
 
     let ro_ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
+        conmon_path: Some(PathBuf::from(&config.conmon_path)),
         module: None,
         graphroot: Some(PathBuf::from(&graphroot)),
         runroot: Some(PathBuf::from(&runroot)),
@@ -71,6 +72,7 @@ pub(crate) fn podman_pull(
 
     let local_ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
+        conmon_path: Some(PathBuf::from(&config.conmon_path)),
         module: None,
         graphroot: Some(PathBuf::from(&graphroot)),
         runroot: Some(PathBuf::from(&runroot)),
@@ -89,6 +91,7 @@ pub(crate) fn podman_pull(
 
     let migrate_ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
+        conmon_path: Some(PathBuf::from(&config.conmon_path)),
         module: None,
         graphroot: Some(PathBuf::from(&graphroot)),
         runroot: None,
@@ -183,6 +186,7 @@ pub(crate) fn podman_start(
 
     let run_ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
+        conmon_path: Some(PathBuf::from(&config.conmon_path)),
         module: Some(String::from(&config.podman_module)),
         graphroot: Some(PathBuf::from(&graphroot)),
         runroot: Some(PathBuf::from(&runroot)),

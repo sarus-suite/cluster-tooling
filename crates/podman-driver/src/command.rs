@@ -25,6 +25,11 @@ pub(crate) fn base(podman_ctx: Option<&PodmanCtx>) -> Command {
         "--runroot",
         ctx.runroot.as_deref().map(Path::as_os_str),
     );
+    cli_opt(
+        &mut command,
+        "--conmon",
+        ctx.conmon_path.as_deref().map(Path::as_os_str),
+    );
     command
 }
 
@@ -346,6 +351,7 @@ mod tests {
     fn podman_context() -> PodmanCtx {
         PodmanCtx {
             podman_path: PathBuf::from("/usr/bin/podman"),
+            conmon_path: Some(PathBuf::from("/usr/bin/conmon")),
             module: Some(String::from("hpc")),
             graphroot: Some(PathBuf::from("/dev/shm/sarus-test/graphroot")),
             runroot: Some(PathBuf::from("/dev/shm/sarus-test/runroot")),
@@ -383,13 +389,15 @@ mod tests {
         assert_eq!(cmd.get_program(), OsStr::new("/usr/bin/podman"));
 
         let args: Vec<&OsStr> = cmd.get_args().collect();
-        assert_eq!(args.len(), 43);
+        assert_eq!(args.len(), 45);
 
         let args_head: Vec<&OsStr> = vec![
             OsStr::new("--root"),
             OsStr::new("/dev/shm/sarus-test/graphroot"),
             OsStr::new("--runroot"),
             OsStr::new("/dev/shm/sarus-test/runroot"),
+            OsStr::new("--conmon"),
+            OsStr::new("/usr/bin/conmon"),
             OsStr::new("--module"),
             OsStr::new("hpc"),
             OsStr::new("--storage-opt"),
@@ -410,7 +418,7 @@ mod tests {
             OsStr::new("/tmp/test/pidfile"),
             OsStr::new("--entrypoint="),
         ];
-        assert_eq!(args[..23], args_head);
+        assert_eq!(args[..25], args_head);
 
         // Use any() and iterator windows to be flexible w.r.t HashMap ordering and
         // at the same time check that option/value pairs are respected
@@ -553,6 +561,7 @@ mod tests {
     fn parallax_requires_read_only_store() {
         let p_ctx = PodmanCtx {
             podman_path: PathBuf::from("podman"),
+            conmon_path: None,
             module: None,
             graphroot: None,
             runroot: None,
@@ -588,6 +597,8 @@ mod tests {
                 OsStr::new("/tmp/graphroot"),
                 OsStr::new("--runroot"),
                 OsStr::new("/tmp/runroot"),
+                OsStr::new("--conmon"),
+                OsStr::new("/usr/bin/conmon"),
                 OsStr::new("--storage-opt"),
                 OsStr::new("additionalimagestore=/shared/imagestore"),
                 OsStr::new("container"),

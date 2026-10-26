@@ -391,6 +391,7 @@ impl UserContext for RealUserContext {
 fn build_pull_ctx(config: &Config) -> PodmanCtx {
     PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
+        conmon_path: Some(PathBuf::from(&config.conmon_path)),
         module: None,
         graphroot: None,
         runroot: None,
@@ -408,6 +409,7 @@ fn build_pull_ctx(config: &Config) -> PodmanCtx {
 pub fn build_parallax_seed_ctx(config: &Config) -> PodmanCtx {
     PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
+        conmon_path: Some(PathBuf::from(&config.conmon_path)),
         module: None,
         graphroot: None,
         runroot: None,
@@ -425,6 +427,7 @@ pub fn build_parallax_seed_ctx(config: &Config) -> PodmanCtx {
 pub fn build_readonly_ctx(config: &Config) -> PodmanCtx {
     PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
+        conmon_path: Some(PathBuf::from(&config.conmon_path)),
         module: None,
         graphroot: Some(PathBuf::from(&config.parallax_imagestore)),
         runroot: None,
@@ -446,6 +449,7 @@ pub fn build_run_ctx(
 
     let ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
+        conmon_path: Some(PathBuf::from(&config.conmon_path)),
         module: Some(config.podman_module.clone()),
         graphroot: Some(roots_base.join("graphroot")),
         runroot: Some(roots_base.join("runroot")),

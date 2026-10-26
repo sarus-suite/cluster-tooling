@@ -68,6 +68,10 @@
       "description": "filesystem path to podman tool",
       "type": "string"
     },
+    "conmon_path": {
+      "description": "filesystem path to conmon tool",
+      "type": "string"
+    },
     "podman_tmp_path": {
       "description": "filesystem path where to store podman temporary files",
       "type": "string"

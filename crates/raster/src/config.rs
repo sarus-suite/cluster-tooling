@@ -41,6 +41,7 @@ pub struct RawConfig {
     perfmon: Option<bool>,
     podman_module: Option<String>,
     podman_path: Option<String>,
+    conmon_path: Option<String>,
     podman_tmp_path: Option<String>,
     runtime_path: Option<String>,
     skybox_enabled: Option<bool>,
@@ -83,6 +84,8 @@ pub struct Config {
     pub podman_module: String,
     #[serde(default = "get_default_podman_path")]
     pub podman_path: String,
+    #[serde(default = "get_default_conmon_path")]
+    pub conmon_path: String,
     #[serde(default = "get_default_podman_tmp_path")]
     pub podman_tmp_path: String,
     #[serde(default = "get_default_runtime_path")]
@@ -167,6 +170,19 @@ fn get_default_podman_path() -> String {
     return String::from("podman");
 }
 
+fn get_default_conmon_path() -> String {
+    return String::from("conmon");
+}
+
+fn conmon_path_for(podman_path: &str) -> String {
+    Path::new(podman_path)
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join("conmon")
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn get_default_podman_tmp_path() -> String {
     return String::from("/dev/shm");
 }
@@ -199,6 +215,11 @@ fn get_default_hooks() -> ConfigHooks {
 
 impl From<RawConfig> for Config {
     fn from(r: RawConfig) -> Self {
+        let podman_path = r.podman_path.unwrap_or_else(get_default_podman_path);
+        let conmon_path = r
+            .conmon_path
+            .unwrap_or_else(|| conmon_path_for(&podman_path));
+
         Config {
             edf_system_search_path: match r.edf_system_search_path {
                 Some(s) => s,
@@ -252,10 +273,8 @@ impl From<RawConfig> for Config {
                 Some(s) => s,
                 None => get_default_podman_module(),
             },
-            podman_path: match r.podman_path {
-                Some(s) => s,
-                None => get_default_podman_path(),
-            },
+            podman_path,
+            conmon_path,
             podman_tmp_path: match r.podman_tmp_path {
                 Some(s) => s,
                 None => get_default_podman_tmp_path(),
@@ -324,6 +343,9 @@ impl RawConfig {
         }
         if i.podman_path.is_some() {
             self.podman_path = i.podman_path;
+        }
+        if i.conmon_path.is_some() {
+            self.conmon_path = i.conmon_path;
         }
         if i.podman_tmp_path.is_some() {
             self.podman_tmp_path = i.podman_tmp_path;
@@ -440,6 +462,7 @@ fn expand_raw_config_fields(
     expand_raw_option_string(&mut r.parallax_mp_squashfuse_path, force, e)?;
     expand_raw_option_string(&mut r.podman_module, force, e)?;
     expand_raw_option_string(&mut r.podman_path, force, e)?;
+    expand_raw_option_string(&mut r.conmon_path, force, e)?;
     expand_raw_option_string(&mut r.podman_tmp_path, force, e)?;
     expand_raw_option_string(&mut r.runtime_path, force, e)?;
     expand_raw_option_string(&mut r.tracking_tool, force, e)?;
@@ -801,6 +824,7 @@ mod tests {
         assert!(cfg.perfmon == false);
         assert!(cfg.podman_module == "hpc");
         assert!(cfg.podman_path == "podman01");
+        assert!(cfg.conmon_path == "conmon");
         assert!(cfg.podman_tmp_path == "podman_tmp_path");
         assert!(cfg.runtime_path == "crun99");
         assert!(cfg.skybox_enabled == true);
@@ -812,6 +836,26 @@ mod tests {
     fn load_config_unquoted() {
         let result = get_rendered_config("config.unquoted");
         assert!(result.is_err())
+    }
+
+    #[test]
+    fn default_conmon_path_uses_podman_bundle_directory() {
+        let config: Config = RawConfig {
+            podman_path: Some(String::from("/opt/sarus-suite/bin/podman")),
+            ..RawConfig::default()
+        }
+        .into();
+
+        assert_eq!(config.conmon_path, "/opt/sarus-suite/bin/conmon");
+
+        let config: Config = RawConfig {
+            podman_path: Some(String::from("/opt/sarus-suite/bin/podman")),
+            conmon_path: Some(String::from("/custom/conmon")),
+            ..RawConfig::default()
+        }
+        .into();
+
+        assert_eq!(config.conmon_path, "/custom/conmon");
     }
 
     #[test]

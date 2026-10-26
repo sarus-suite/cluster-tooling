@@ -5,6 +5,7 @@ use std::path::PathBuf;
 #[derive(Debug)]
 pub struct PodmanCtx {
     pub podman_path: PathBuf,
+    pub conmon_path: Option<PathBuf>,
     pub module: Option<String>,
     pub graphroot: Option<PathBuf>,
     pub runroot: Option<PathBuf>,
