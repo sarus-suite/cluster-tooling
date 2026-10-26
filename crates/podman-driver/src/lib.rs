@@ -328,11 +328,13 @@ mod tests {
     fn migrate_requires_graphroot() {
         let context = PodmanCtx {
             podman_path: PathBuf::from("podman"),
+            conmon_path: None,
             module: None,
             graphroot: None,
             runroot: None,
             parallax_mount_program: None,
             ro_store: Some(PathBuf::from("store")),
+            mksquashfs_path: None,
             podman_env: None,
         };
 

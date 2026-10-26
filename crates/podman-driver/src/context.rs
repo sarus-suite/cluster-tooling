@@ -5,11 +5,14 @@ use std::path::PathBuf;
 #[derive(Debug)]
 pub struct PodmanCtx {
     pub podman_path: PathBuf,
+    pub conmon_path: Option<PathBuf>,
     pub module: Option<String>,
     pub graphroot: Option<PathBuf>,
     pub runroot: Option<PathBuf>,
     pub parallax_mount_program: Option<PathBuf>,
     pub ro_store: Option<PathBuf>,
+    /// Path to the mksquashfs executable used by Parallax image operations.
+    pub mksquashfs_path: Option<PathBuf>,
     pub podman_env: Option<HashMap<OsString, OsString>>,
 }
 

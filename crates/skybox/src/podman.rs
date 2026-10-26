@@ -53,11 +53,13 @@ pub(crate) fn podman_pull(
 
     let ro_ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
+        conmon_path: Some(PathBuf::from(&config.conmon_path)),
         module: None,
         graphroot: Some(PathBuf::from(&graphroot)),
         runroot: Some(PathBuf::from(&runroot)),
         parallax_mount_program: None,
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
+        mksquashfs_path: None,
         podman_env: None,
     }
     .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
@@ -70,11 +72,13 @@ pub(crate) fn podman_pull(
 
     let local_ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
+        conmon_path: Some(PathBuf::from(&config.conmon_path)),
         module: None,
         graphroot: Some(PathBuf::from(&graphroot)),
         runroot: Some(PathBuf::from(&runroot)),
         parallax_mount_program: None,
         ro_store: None,
+        mksquashfs_path: None,
         podman_env: None,
     }
     .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
@@ -87,11 +91,13 @@ pub(crate) fn podman_pull(
 
     let migrate_ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
+        conmon_path: Some(PathBuf::from(&config.conmon_path)),
         module: None,
         graphroot: Some(PathBuf::from(&graphroot)),
         runroot: None,
         parallax_mount_program: None,
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
+        mksquashfs_path: Some(PathBuf::from(&config.mksquashfs_path)),
         podman_env: None,
     }
     .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
@@ -180,11 +186,13 @@ pub(crate) fn podman_start(
 
     let run_ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
+        conmon_path: Some(PathBuf::from(&config.conmon_path)),
         module: Some(String::from(&config.podman_module)),
         graphroot: Some(PathBuf::from(&graphroot)),
         runroot: Some(PathBuf::from(&runroot)),
         parallax_mount_program: Some(PathBuf::from(&config.parallax_mount_program)),
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
+        mksquashfs_path: None,
         podman_env: None,
     }
     .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
