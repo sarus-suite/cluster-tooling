@@ -6,7 +6,7 @@ use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use tracing::instrument;
+use tracing::{instrument, trace};
 
 const CONFIG_PATH: &str = "/etc/sarus-suite";
 const XDG_CONFIG_DIR: &str = "/etc/xdg";
@@ -542,7 +542,8 @@ pub fn config_search_paths(
     paths
 }
 
-/// Load configuration using the XDG search order.
+/// Load configuration from the first eligible directory in the XDG search order.
+/// A directory is eligible if it contains a file the configuration loader would read.
 pub fn load_config_xdg(
     force_expand: VarExpand,
     env_option: &Option<HashMap<String, String>>,
@@ -565,7 +566,7 @@ pub fn load_config_xdg(
     load_config_path(Some(config_dir), force_expand, env_option)
 }
 
-/// Resolve the first existing directory using the XDG configuration search order.
+/// Resolve the first directory containing an applicable `.conf` file in the XDG search order.
 pub fn resolve_config_dir() -> Result<PathBuf, ConfigResolutionError> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
@@ -581,9 +582,11 @@ pub fn resolve_config_dir() -> Result<PathBuf, ConfigResolutionError> {
 
 fn resolve_config_dir_from_paths(paths: &[PathBuf]) -> Result<PathBuf, ConfigResolutionError> {
     for path in paths {
+        trace!(directory = %path.display(), "Examining configuration directory");
         match std::fs::metadata(path) {
-            Ok(metadata) if metadata.is_dir() => return Ok(path.clone()),
+            Ok(metadata) if metadata.is_dir() => {}
             Ok(_) => {
+                trace!(directory = %path.display(), reason = "not_a_directory", "Configuration discovery failed");
                 return Err(ConfigResolutionError {
                     reason: format!(
                         "Configuration path {} exists but is not a directory",
@@ -591,8 +594,12 @@ fn resolve_config_dir_from_paths(paths: &[PathBuf]) -> Result<PathBuf, ConfigRes
                     ),
                 });
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                trace!(directory = %path.display(), reason = "not_found", "Discarding configuration directory");
+                continue;
+            }
             Err(error) => {
+                trace!(directory = %path.display(), reason = %error, "Configuration discovery failed");
                 return Err(ConfigResolutionError {
                     reason: format!(
                         "Cannot access configuration directory {}: {error}",
@@ -601,11 +608,34 @@ fn resolve_config_dir_from_paths(paths: &[PathBuf]) -> Result<PathBuf, ConfigRes
                 });
             }
         }
+
+        let entries = std::fs::read_dir(path)
+            .and_then(|entries| entries.collect::<Result<Vec<_>, _>>())
+            .map_err(|error| {
+                trace!(directory = %path.display(), reason = %error, "Configuration directory inspection failed");
+                ConfigResolutionError {
+                    reason: format!(
+                        "Cannot read configuration directory {}: {error}",
+                        path.display()
+                    ),
+                }
+            })?;
+
+        if let Some(config_file) = entries.iter().find_map(applicable_config_file) {
+            trace!(directory = %path.display(), config_file = %config_file, "Selected eligible configuration directory");
+            return Ok(path.clone());
+        }
+
+        trace!(directory = %path.display(), reason = "no_applicable_conf_files", "Discarding configuration directory");
     }
 
+    trace!(
+        reason = "no_eligible_directory",
+        "Configuration discovery exhausted all candidates"
+    );
     Err(ConfigResolutionError {
         reason: format!(
-            "Cannot find config files in {}",
+            "Cannot find applicable .conf files in {}",
             paths
                 .iter()
                 .map(|path| path.display().to_string())
@@ -613,6 +643,19 @@ fn resolve_config_dir_from_paths(paths: &[PathBuf]) -> Result<PathBuf, ConfigRes
                 .join(" or ")
         ),
     })
+}
+
+// Keep discovery and loading aligned, including symlink and UTF-8 path handling.
+fn applicable_config_file(entry: &std::fs::DirEntry) -> Option<String> {
+    let file_name = entry.file_name().into_string().ok()?;
+    let path = entry.path();
+    let file_path = path.to_str()?;
+
+    if file_name.ends_with(".conf") && !path.is_dir() {
+        Some(file_path.to_string())
+    } else {
+        None
+    }
 }
 
 pub fn load_config_path(
@@ -656,21 +699,7 @@ fn load_raw_config_from_dir(
     entries.sort_by_key(|dir| dir.path());
 
     for e in entries {
-        let file_name = match e.file_name().into_string() {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
-        let file_path = match e.path().as_os_str().to_str() {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-
-        if e.path().is_dir() {
-            continue;
-        }
-
-        if file_name.ends_with(".conf") {
+        if let Some(file_path) = applicable_config_file(&e) {
             let cur_rcfg = load_raw_config_from_file(file_path, force_expand, env_option)?;
             rcfg.extend(cur_rcfg);
         }
@@ -798,6 +827,42 @@ mod tests {
     use crate::tests::get_rendered_edf;
     use serial_test::serial;
     use std::ffi::OsStr;
+    use std::fs;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use tempfile::tempdir;
+
+    #[derive(Clone)]
+    struct TraceWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for TraceWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_config_trace(
+        paths: &[PathBuf],
+        level: tracing::Level,
+    ) -> (Result<PathBuf, ConfigResolutionError>, String) {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let writer = TraceWriter(Arc::clone(&buffer));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(level)
+            .with_writer(move || writer.clone())
+            .finish();
+        let result =
+            tracing::subscriber::with_default(subscriber, || resolve_config_dir_from_paths(paths));
+        let output = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        (result, output)
+    }
 
     fn get_rendered_config(cfg_dir: &str) -> SarusResult<Config> {
         let cwd = std::env::current_dir()
@@ -933,13 +998,250 @@ mod tests {
     }
 
     #[test]
-    fn load_config_xdg_from_paths_loads_first_existing_directory() {
+    fn load_config_xdg_from_paths_loads_first_eligible_directory() {
         let config_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/config");
         let paths = vec![PathBuf::from("missing"), config_dir];
         let config_dir = resolve_config_dir_from_paths(&paths).unwrap();
         let config = load_config_path(Some(config_dir), VarExpand::Must, &None).unwrap();
 
         assert_eq!(config.parallax_path, "parallax50");
+    }
+
+    #[test]
+    fn discovery_skips_ineligible_directories_and_traces_selection() {
+        let temp = tempdir().unwrap();
+        let paths = [
+            "missing",
+            "empty",
+            "unrelated",
+            "subdirectories",
+            "system",
+            "later",
+        ]
+        .map(|name| temp.path().join(name));
+        for path in &paths[1..] {
+            fs::create_dir(path).unwrap();
+        }
+        fs::write(paths[2].join("README"), "not configuration").unwrap();
+        fs::write(paths[2].join("settings.CONF"), "").unwrap();
+        let nested = paths[3].join("nested.conf");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("settings.conf"), "").unwrap();
+        let selected_file = paths[4].join("system.conf");
+        fs::write(&selected_file, "parallax_path = \"system-parallax\"\n").unwrap();
+        fs::write(paths[5].join("later.conf"), "").unwrap();
+
+        let (result, trace) = capture_config_trace(&paths, tracing::Level::TRACE);
+        assert_eq!(result.unwrap(), paths[4]);
+        let events = trace.lines().collect::<Vec<_>>();
+        assert_eq!(events.len(), 10);
+        for (index, path) in paths[..5].iter().enumerate() {
+            assert!(events[index * 2].contains("Examining configuration directory"));
+            assert!(events[index * 2].contains(&format!("directory={}", path.display())));
+            assert!(events[index * 2 + 1].contains(&format!("directory={}", path.display())));
+        }
+        assert!(events[1].contains("Discarding configuration directory"));
+        assert!(events[1].contains("reason=\"not_found\""));
+        for event in [events[3], events[5], events[7]] {
+            assert!(event.contains("Discarding configuration directory"));
+            assert!(event.contains("reason=\"no_applicable_conf_files\""));
+        }
+        assert!(events[9].contains("Selected eligible configuration directory"));
+        assert!(events[9].contains(&format!("config_file={}", selected_file.display())));
+        assert!(!trace.contains(&paths[5].display().to_string()));
+        assert!(!trace.contains("system-parallax"));
+
+        let config = load_config_path(Some(paths[4].clone()), VarExpand::Must, &None).unwrap();
+        assert_eq!(config.parallax_path, "system-parallax");
+        let (_, quiet_trace) = capture_config_trace(&paths, tracing::Level::DEBUG);
+        assert!(quiet_trace.is_empty());
+    }
+
+    #[test]
+    fn discovery_accepts_empty_and_comment_only_files() {
+        for content in ["", "# Intentionally use default settings\n"] {
+            let temp = tempdir().unwrap();
+            let first = temp.path().join("first");
+            let later = temp.path().join("later");
+            fs::create_dir(&first).unwrap();
+            fs::create_dir(&later).unwrap();
+            fs::write(first.join("empty.conf"), content).unwrap();
+            fs::write(later.join("later.conf"), "parallax_path = \"later\"\n").unwrap();
+
+            let selected = resolve_config_dir_from_paths(&[first.clone(), later]).unwrap();
+            assert_eq!(selected, first);
+            let config = load_config_path(Some(selected), VarExpand::Must, &None).unwrap();
+            assert_eq!(config.parallax_path, "parallax");
+        }
+    }
+
+    #[test]
+    fn discovery_reports_exhausted_candidates() {
+        let temp = tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        let empty = temp.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+
+        let (result, trace) =
+            capture_config_trace(&[missing.clone(), empty.clone()], tracing::Level::TRACE);
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("Cannot find applicable .conf files"));
+        assert!(error.contains(&missing.display().to_string()));
+        assert!(error.contains(&empty.display().to_string()));
+        assert!(trace.contains("Configuration discovery exhausted all candidates"));
+        assert!(trace.contains("reason=\"no_eligible_directory\""));
+        assert!(!trace.contains("Selected eligible configuration directory"));
+    }
+
+    #[test]
+    fn discovery_does_not_fallback_after_inspection_errors() {
+        let temp = tempdir().unwrap();
+        let not_a_directory = temp.path().join("file");
+        fs::write(&not_a_directory, "").unwrap();
+        fs::write(temp.path().join("valid.conf"), "").unwrap();
+
+        let (result, trace) = capture_config_trace(
+            &[not_a_directory.clone(), temp.path().to_path_buf()],
+            tracing::Level::TRACE,
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("is not a directory")
+        );
+        assert!(trace.contains("Configuration discovery failed"));
+        assert!(trace.contains("reason=\"not_a_directory\""));
+        assert_eq!(
+            trace.matches("Examining configuration directory").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn selected_configuration_errors_do_not_fallback() {
+        for content in ["parallax_path = [", "parallax_path = \"$(invalid)\"\n"] {
+            let temp = tempdir().unwrap();
+            let first = temp.path().join("first");
+            let later = temp.path().join("later");
+            fs::create_dir(&first).unwrap();
+            fs::create_dir(&later).unwrap();
+            fs::write(first.join("invalid.conf"), content).unwrap();
+            fs::write(later.join("valid.conf"), "parallax_path = \"later\"\n").unwrap();
+
+            let selected = resolve_config_dir_from_paths(&[first.clone(), later]).unwrap();
+            assert_eq!(selected, first);
+            let result = load_config_path(Some(selected), VarExpand::Must, &Some(HashMap::new()));
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn partial_user_configuration_replaces_system_configuration() {
+        let temp = tempdir().unwrap();
+        let user = temp.path().join("user");
+        let system = temp.path().join("system");
+        fs::create_dir(&user).unwrap();
+        fs::create_dir(&system).unwrap();
+        fs::write(user.join("user.conf"), "skybox_enabled = true\n").unwrap();
+        fs::write(system.join("system.conf"), "parallax_path = \"system\"\n").unwrap();
+
+        let selected = resolve_config_dir_from_paths(&[user.clone(), system]).unwrap();
+        assert_eq!(selected, user);
+        let config = load_config_path(Some(selected), VarExpand::Must, &None).unwrap();
+        assert!(config.skybox_enabled);
+        assert_eq!(config.parallax_path, "parallax");
+    }
+
+    #[test]
+    fn explicit_empty_directory_still_loads_defaults() {
+        let temp = tempdir().unwrap();
+        let config =
+            load_config_path(Some(temp.path().to_path_buf()), VarExpand::Must, &None).unwrap();
+        assert_eq!(config.parallax_path, "parallax");
+        assert_eq!(config.parallax_imagestore, "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_and_loading_preserve_symlink_and_utf8_handling() {
+        use std::ffi::OsString;
+        use std::os::unix::{ffi::OsStringExt, fs::symlink};
+
+        let temp = tempdir().unwrap();
+        let user = temp.path().join("user");
+        let system = temp.path().join("system");
+        fs::create_dir(&user).unwrap();
+        fs::create_dir(&system).unwrap();
+        fs::write(
+            user.join(OsString::from_vec(b"invalid-\xff.conf".to_vec())),
+            "",
+        )
+        .unwrap();
+        symlink(&system, user.join("directory.conf")).unwrap();
+        let target = system.join("target.conf");
+        fs::write(&target, "parallax_path = \"linked\"\n").unwrap();
+        let paths = [user.clone(), system.clone()];
+        assert_eq!(resolve_config_dir_from_paths(&paths).unwrap(), system);
+
+        let link = user.join("link.conf");
+        symlink(&target, &link).unwrap();
+        let selected = resolve_config_dir_from_paths(&paths).unwrap();
+        assert_eq!(selected, user);
+        let config = load_config_path(Some(selected), VarExpand::Must, &None).unwrap();
+        assert_eq!(config.parallax_path, "linked");
+
+        fs::remove_file(&target).unwrap();
+        let selected = resolve_config_dir_from_paths(&paths).unwrap();
+        assert_eq!(selected, user);
+        assert!(load_config_path(Some(selected), VarExpand::Must, &None).is_err());
+
+        let non_utf8_directory = temp.path().join(OsString::from_vec(b"dir-\xff".to_vec()));
+        fs::create_dir(&non_utf8_directory).unwrap();
+        fs::write(non_utf8_directory.join("valid.conf"), "").unwrap();
+        assert!(resolve_config_dir_from_paths(&[non_utf8_directory]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_directories_and_files_fail_without_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root can read entries regardless of these permission bits.
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let temp = tempdir().unwrap();
+        let first = temp.path().join("first");
+        let later = temp.path().join("later");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&later).unwrap();
+        let file = first.join("unreadable.conf");
+        fs::write(&file, "").unwrap();
+        fs::write(later.join("valid.conf"), "").unwrap();
+        let paths = [first.clone(), later];
+
+        fs::set_permissions(&first, fs::Permissions::from_mode(0o000)).unwrap();
+        let (result, trace) = capture_config_trace(&paths, tracing::Level::TRACE);
+        fs::set_permissions(&first, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Cannot read configuration directory")
+        );
+        assert!(trace.contains("Configuration directory inspection failed"));
+        assert_eq!(
+            trace.matches("Examining configuration directory").count(),
+            1
+        );
+
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+        let selected = resolve_config_dir_from_paths(&paths).unwrap();
+        assert_eq!(selected, first);
+        let result = load_config_path(Some(selected), VarExpand::Must, &None);
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(result.is_err());
     }
 
     #[test]
