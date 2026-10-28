@@ -155,6 +155,13 @@ impl SarusMount {
             }
 
             i.flags = String::from("");
+
+            return Err(SarusError {
+                code: 30,
+                file_path: None,
+                msg: format!("Unsupported SquashFS type for standard podman mounts"),
+            });
+
         } else {
             // Remove duplicate flags
             let parts: Vec<_> = i.flags.split(',').collect();
@@ -202,7 +209,22 @@ pub fn sarus_mounts_from_strings(
     let mut res = vec![];
 
     for i in input.iter() {
-        let m = SarusMount::try_new(i.clone(), uenv)?;
+
+        let m = match SarusMount::try_new(i.clone(), uenv) {
+            Ok(sm) => sm,
+            Err(e) => {
+                match e.code {
+                    // Skip Extra mounts -> Error Code: 30
+                    30 => {
+                        continue;
+                    },
+                    _ => {
+                        return Err(e);
+                    },
+                };
+            },
+        };
+
         if !res.contains(&m) {
             res.push(m.clone());
         }
@@ -222,7 +244,7 @@ pub fn sarus_mounts_from_strings(
 //     convert from string representation to escaped representation and
 //     back.  When converting from escaped representation, the sequence
 //     \134 is also converted to a backslash.
-fn escape_mount(path: String) -> String {
+pub(crate) fn escape_mount(path: String) -> String {
     let mut epath = String::from("");
     for c1 in path.chars() {
         let c2 = match c1 {

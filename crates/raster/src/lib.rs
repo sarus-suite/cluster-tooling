@@ -12,6 +12,7 @@ use tracing::instrument;
 use crate::common::{expand_vars_hashmap, expand_vars_vec};
 use crate::error::{SarusError, SarusResult};
 use crate::mount::{SarusMounts, sarus_mounts_from_strings};
+use crate::squashfs_mount::{ToString, squashfs_mounts_from_mount_strings};
 
 pub mod common;
 pub mod config;
@@ -19,6 +20,7 @@ pub mod error;
 pub mod hooks;
 pub mod imagestore;
 pub mod mount;
+pub mod squashfs_mount;
 
 pub use crate::common::expand_vars_string;
 pub use crate::config::{
@@ -211,7 +213,7 @@ fn get_default_writable() -> bool {
 }
 
 fn edf_from_raw(r: RawEDF, uenv: &Option<HashMap<String, String>>) -> SarusResult<EDF> {
-    Ok(EDF {
+    let mut edf = EDF {
         annotations: match r.annotations {
             Some(s) => annotations_as_hashmap(s),
             None => get_default_annotations(),
@@ -239,7 +241,7 @@ fn edf_from_raw(r: RawEDF, uenv: &Option<HashMap<String, String>>) -> SarusResul
             }
         },
         mounts: match r.mounts {
-            Some(s) => sarus_mounts_from_strings(s, uenv)?,
+            Some(ref s) => sarus_mounts_from_strings(s.to_vec(), uenv)?,
             None => get_default_mounts(),
         },
         workdir: match r.workdir {
@@ -250,7 +252,39 @@ fn edf_from_raw(r: RawEDF, uenv: &Option<HashMap<String, String>>) -> SarusResul
             Some(s) => s,
             None => get_default_writable(),
         },
-    })
+    };
+
+    update_edf_with_squashfs_mounts(&mut edf, r.mounts, uenv)?;
+
+    Ok(edf)
+}
+
+fn update_edf_with_squashfs_mounts(
+    edf: &mut EDF,
+    mounts: Option<Vec<String>>,
+    uenv: &Option<HashMap<String, String>>
+) -> SarusResult<()> {
+    if mounts.is_some() {
+        let mount_strings = mounts.unwrap();
+        let squashfs_mounts = squashfs_mounts_from_mount_strings(mount_strings, uenv)?;
+
+        if !squashfs_mounts.is_empty() {
+            let sms = squashfs_mounts.to_string();
+
+            if !sms.is_empty() {
+
+                let annotation = String::from("com.hooks.squashfs_mounts");
+
+                let squashfs_mounts = match edf.annotations.get(&annotation) {
+                    Some(s) => format!("{s};{sms}"),
+                    None => format!("{sms}"),
+                };
+
+                edf.annotations.insert(annotation, squashfs_mounts);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn load(file_path: &str) -> Result<String, Box<dyn Error>> {
