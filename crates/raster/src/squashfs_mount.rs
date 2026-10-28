@@ -161,7 +161,7 @@ impl SquashfsMount {
                 code: 41,
                 file_path: None,
                 msg: format!(
-                    "mount source {:#?} an absolute path starting with /",
+                    "mount source {:#?} must be an absolute path starting with /",
                     self.source
                 ),
             });
