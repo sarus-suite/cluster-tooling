@@ -124,29 +124,55 @@ impl SquashfsMount {
             },
         };
 
+        let mut pt: std::path::PathBuf = std::path::Path::new(&i.target).into();
+
+        if pt.starts_with(".") {
+            pt = match std::path::absolute(&pt) {
+                Err(_) => {
+                    return Err(SarusError {
+                        code: 45,
+                        file_path: None,
+                        msg: format!("cannot translate {} in an absolute path", pt.display()),
+                    });
+                },
+                Ok(ok) => ok,
+            }
+        }
+
+        i.target = match pt.as_os_str().to_str() {
+            Some(ok) => ok.to_string(),
+            None => {
+                return Err(SarusError {
+                    code: 46,
+                    file_path: None,
+                    msg: format!("cannot translate {} into string", pt.display()),
+                });
+            },
+        };
+
         *self = i;
 
         return Ok(());
     }
 
     fn validate(&self) -> SarusResult<()> {
-        if ![".", "/"].iter().any(|s| self.source.starts_with(*s)) {
+        if !self.source.starts_with("/") {
             return Err(SarusError {
                 code: 41,
                 file_path: None,
                 msg: format!(
-                    "mount source {:#?} must be one among a relative path starting with . , an absolute path starting with / , \"tmpfs\" or \"umount\"",
+                    "mount source {:#?} an absolute path starting with /",
                     self.source
                 ),
             });
         }
 
-        if ![".", "/"].iter().any(|s| self.target.starts_with(*s)) {
+        if !self.target.starts_with("/") {
             return Err(SarusError {
                 code: 42,
                 file_path: None,
                 msg: format!(
-                    "mount target {:#?} must be one among a relative path starting with . or an absolute path starting with /",
+                    "mount target {:#?} must be an absolute path starting with /",
                     self.target
                 ),
             });
