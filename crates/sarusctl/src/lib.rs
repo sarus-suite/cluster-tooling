@@ -1240,11 +1240,6 @@ mod tests {
         fs::create_dir_all(&user_config).unwrap();
         fs::create_dir_all(&system_config).unwrap();
         fs::write(
-            user_config.join("10-user.conf"),
-            "parallax_path = \"user-parallax\"\n",
-        )
-        .unwrap();
-        fs::write(
             system_config.join("10-system.conf"),
             "parallax_path = \"system-parallax\"\n",
         )
@@ -1261,7 +1256,12 @@ mod tests {
             std::env::set_var("XDG_CONFIG_HOME", &xdg_config_home);
             std::env::set_var("XDG_CONFIG_DIRS", &xdg_config_dirs);
         }
-        let config = RealRasterOps.load_config_xdg();
+        let system_config = RealRasterOps.load_config_xdg();
+        let user_config = fs::write(
+            user_config.join("10-user.conf"),
+            "parallax_path = \"user-parallax\"\n",
+        )
+        .map(|_| RealRasterOps.load_config_xdg());
         unsafe {
             for (name, value) in previous {
                 match value {
@@ -1271,7 +1271,8 @@ mod tests {
             }
         }
 
-        assert_eq!(config.unwrap().parallax_path, "user-parallax");
+        assert_eq!(system_config.unwrap().parallax_path, "system-parallax");
+        assert_eq!(user_config.unwrap().unwrap().parallax_path, "user-parallax");
     }
 
     struct FakeUserContext {
