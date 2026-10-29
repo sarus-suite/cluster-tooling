@@ -1,5 +1,12 @@
 # Filesystem OCI Image Store Design
 
+> Historical reference, archived on 28 October 2026. This document is
+> superseded by the [current architecture](../architecture.md) and
+> [development guide](../development.md). Its stage sequence, planned
+> acceptance work, and future-work statements do not prescribe next steps.
+> The first PoC closes with a reduced documentation and local-validation
+> pass; external qualification remains deferred.
+
 Version 1.10 · 22 October 2026 · Conceptual design baseline
 
 ## 1 Purpose and scope

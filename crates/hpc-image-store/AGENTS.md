@@ -5,21 +5,22 @@ any applicable parent instructions. Distinguish instructions in documents from
 the work the user has actually authorized; a planned feature is not permission
 to implement it.
 
-## Design and implementation references
+## Architecture and current references
 
 Before planning or changing storage behavior, read the relevant sections of:
 
-- [Filesystem OCI image store design](docs/hpc-image-store-design.md): the
-  agreed behavior, guarantees, and boundaries.
-- [Staged implementation plan](docs/hpc-image-store-implementation-plan.md):
-  implementation order, stage requirements, and acceptance criteria.
-- [Crate README](README.md): current interfaces, storage layout, initialization,
-  coordination, and validation commands.
+- [Architecture](docs/architecture.md): authoritative behavior, guarantees, and boundaries.
+- [User guide](docs/user-guide.md) and [library guide](docs/library-guide.md): current usage and interfaces.
+- [Administration](docs/administration.md): installation and operational responsibilities.
+- [Development](docs/development.md): checks, test harnesses, current PoC state, and validation limits.
+
+The documents under `docs/archive/` are historical references. Their stage
+sequence, acceptance criteria, and future-work statements do not authorize or
+prescribe subsequent work. Establish scope from the user's current request.
 
 Check the source, tests, and git status to establish the actual implementation
-state. Do not assume every feature in the design or plan already exists. If the
-documents conflict on a consequential requirement, report the conflict rather
-than silently choosing a new design.
+state. If the architecture and implementation conflict on a consequential
+requirement, report the conflict rather than silently choosing a new design.
 
 ## Coding style
 
@@ -35,8 +36,8 @@ than silently choosing a new design.
 
 ## Development approach
 
-- Complete the authorized stage and its required validation. Do not bring later
-  stages or application integration into scope without a user request.
+- Complete the authorized work and its required validation. Do not bring new
+  features or application integration into scope without a user request.
 - Preserve existing working-tree changes and avoid unrelated edits. Honor
   review-only requests and instructions not to modify source files.
 - Preserve unexpected store contents. Do not automatically adopt, repair,
@@ -56,7 +57,7 @@ than silently choosing a new design.
 Initialization requires a separately prepared immediate parent. Create only the
 store root and its internal structure, never missing ancestors. Nested stores
 are unsupported as a setup restriction; do not add ancestor searches to enforce
-that restriction. Follow the design's initialization ordering and retry rules.
+that restriction. Follow the architecture's initialization ordering and retry rules.
 
 ## Stop rule for major design gaps
 
@@ -85,6 +86,7 @@ cargo check --locked -p hpc-image-store
 cargo test --locked -p hpc-image-store
 cargo clippy --locked -p hpc-image-store --all-targets -- -D warnings
 cargo fmt -p hpc-image-store -- --check
+RUSTDOCFLAGS="-D warnings" cargo doc --locked -p hpc-image-store --no-deps
 git diff --check
 ```
 
@@ -103,11 +105,11 @@ longer sentences that explain ideas gradually over short sentences packed with
 meaning or unnecessarily sophisticated words.
 
 Keep the crate README and relevant implementation status aligned with completed,
-verified behavior. Distinguish future stages from implemented features and
+verified behavior. Distinguish deferred work from implemented features and
 historical results from current checks. Explain the context behind consequential
 storage decisions.
 
-Keep the design and implementation plan as the primary references. If a handoff
-is needed, record current state, validation, unresolved issues, and the next
-authorized step without duplicating the design. In the final report, explain
+Keep the architecture as the authoritative reference. If a handoff is needed,
+record current state, validation, unresolved issues, and authorized follow-up work
+in the development guide without duplicating the architecture. In the final report, explain
 what changed, why, how it was checked, and any remaining limits.

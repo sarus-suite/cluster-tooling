@@ -21,7 +21,7 @@ pub fn run_if_needed(test: &str, ignored: bool) -> bool {
         );
         assert!(
             std::env::var_os("CONTAINERS_STORAGE_CONF").is_some(),
-            "caller must supply disposable storage configuration; see README"
+            "caller must supply disposable storage configuration; see docs/development.md"
         );
         assert!(
             run(Command::new("podman").args(["images", "--quiet"])).is_empty(),

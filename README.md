@@ -12,7 +12,7 @@ Instead of consuming `raster` and `podman-driver` directly from git, this worksp
 ```
 .
 ├── crates/
-│   ├── hpc-image-store/   # Filesystem OCI image store foundations
+│   ├── hpc-image-store/   # Filesystem OCI image store PoC
 │   ├── skybox/            # Slurm SPANK plugin (cdylib)
 │   ├── sarusctl/          # Test CLI and utilities
 │   ├── podman-driver/     # sarus-suite-podman-driver crate
@@ -25,7 +25,7 @@ Instead of consuming `raster` and `podman-driver` directly from git, this worksp
 
 | Crate                         | Purpose                                                           |
 | ----------------------------- | ----------------------------------------------------------------- |
-| **hpc-image-store**           | [Filesystem OCI image store](crates/hpc-image-store/README.md), stages 1–2 foundations and internal publication |
+| **hpc-image-store**           | [Filesystem OCI image store](crates/hpc-image-store/README.md) (PoC) |
 | **skybox**                    | Slurm SPANK plugin implemented in Rust, built as a shared library |
 | **sarusctl**                  | CLI for testing raster + podman integration                       |
 | **sarus-suite-podman-driver** | Library for constructing Podman invocations from EDF              |
@@ -222,7 +222,7 @@ cargo test
 ```
 
 For integration tests that execute Podman containers or transfer images with
-Skopeo, use the [Podman/Skopeo integration devcontainer](.devcontainer/integration/README.md).
+Skopeo, use the [Podman/Skopeo integration devcontainer configuration](.devcontainer/integration/devcontainer.json).
 
 commit to workspace
 ```bash

@@ -2,7 +2,7 @@
 //! Synchronous transfers, inventory, graph checking, local availability,
 //! digest selection, removal and conservative pruning.
 
-#![doc = include_str!("../README.md")]
+#![doc = include_str!("../docs/library-guide.md")]
 
 // The registry fixture is shared by unit and CLI integration tests.
 #[cfg(test)]

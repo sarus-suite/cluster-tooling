@@ -1,8 +1,8 @@
 //! Real-tool acceptance with disposable containers-storage prepared by the test
 //! caller. The transfer library inherits that context without changing it.
 use hpc_image_store::{
-    Error, ImageSelector, ImportOptions, LocalRef, Platform, Store, StoreConfig, TransferContext,
-    format_list_podman,
+    CheckScope, Error, ImageAvailability, ImageSelector, ImportOptions, LocalRef, Platform,
+    PruneKind, PruneOptions, Store, StoreConfig, TransferContext, format_list_podman,
 };
 use serde_json::{Value, json};
 use std::{
@@ -27,6 +27,9 @@ fn parse_selector(value: impl AsRef<str>) -> ImageSelector {
 #[path = "support/storage.rs"]
 mod storage;
 use storage::run;
+
+#[path = "support/snapshot.rs"]
+mod snapshot;
 
 fn digest(path: &Path) -> String {
     let output = run(Command::new("sha256sum").arg(path));
@@ -72,6 +75,109 @@ fn fixture(directory: &Path, layer: &[u8], marker: &str, architecture: &str) -> 
     )
     .unwrap();
     layout
+}
+
+// Run within the existing disposable-storage invocation. A second top-level
+// test could otherwise compete for explicitly supplied containers-storage.
+fn poc_lifecycle(directory: &Path, source: &str, output: &str, context: &TransferContext) {
+    let store = Store::new(StoreConfig::new(directory.join("lifecycle-store")).unwrap());
+    let keeper = LocalRef::new("poc/keeper:tag").unwrap();
+    let target = LocalRef::new("poc/target:tag").unwrap();
+    let keeper_selector = parse_selector(keeper.as_str());
+    let target_selector = parse_selector(target.as_str());
+    let kept = store
+        .import(
+            &parse_selector(source),
+            Some(&keeper_selector),
+            context,
+            &ImportOptions::default(),
+        )
+        .unwrap();
+    assert!(kept.cleanup_warnings.is_empty());
+    let store_lock = store.config().root().join("locks/store.lock");
+    let lock_before = fs::metadata(&store_lock).unwrap();
+    assert!(matches!(
+        store.availability(&target_selector).unwrap(),
+        ImageAvailability::Missing
+    ));
+    let acquired = store
+        .import(
+            &parse_selector(source),
+            Some(&target_selector),
+            context,
+            &ImportOptions::default(),
+        )
+        .unwrap();
+    assert!(acquired.cleanup_warnings.is_empty());
+    assert_eq!(acquired.stored_root, kept.stored_root);
+    assert!(matches!(
+        store.availability(&target_selector).unwrap(),
+        ImageAvailability::Ready
+    ));
+    let inventory = store.list().unwrap();
+    assert!(!inventory.has_errors(), "{inventory:?}");
+    assert_eq!(inventory.entries.len(), 2);
+    let checked = store.check(&CheckScope::All).unwrap();
+    assert!(!checked.has_errors(), "{checked:?}");
+    store
+        .export(&target_selector, Some(&parse_selector(output)), context)
+        .unwrap();
+    let restored: Value = serde_json::from_slice(&run(Command::new(&context.skopeo)
+        .args(["inspect", "--config"])
+        .arg(format!("containers-storage:{output}"))))
+    .unwrap();
+    assert_eq!(restored["config"]["Env"][0], "MARKER=one");
+
+    store.remove(&target).unwrap();
+    assert!(matches!(
+        store.availability(&target_selector).unwrap(),
+        ImageAvailability::Missing
+    ));
+    let options = PruneOptions {
+        dry_run: true,
+        grace_period: Duration::ZERO,
+    };
+    let before = snapshot::snapshot(store.config().root());
+    let preview = store.prune(&options).unwrap();
+    assert!(!preview.has_errors(), "{preview:?}");
+    assert!(
+        preview
+            .candidates
+            .iter()
+            .any(|candidate| candidate.eligible)
+    );
+    assert_eq!(snapshot::snapshot(store.config().root()), before);
+    let options = PruneOptions {
+        dry_run: false,
+        ..options
+    };
+    let pruned = store.prune(&options).unwrap();
+    assert!(!pruned.has_errors(), "{pruned:?}");
+    assert!(pruned.candidates.iter().any(|candidate| candidate.removed));
+    assert_eq!(pruned.summaries[&PruneKind::Blob].removed_count, 0);
+    assert!(matches!(
+        store.availability(&keeper_selector).unwrap(),
+        ImageAvailability::Ready
+    ));
+    store.remove(&keeper).unwrap();
+    let pruned = store.prune(&options).unwrap();
+    assert!(!pruned.has_errors(), "{pruned:?}");
+    assert!(pruned.summaries[&PruneKind::Blob].removed_count > 0);
+    for relative in ["blobs/sha256", "raw_images", "tmp", "refs", "locks/refs"] {
+        assert_eq!(
+            fs::read_dir(store.config().root().join(relative))
+                .unwrap()
+                .count(),
+            0,
+            "remaining lifecycle data in {relative}"
+        );
+    }
+    let lock_after = fs::metadata(store_lock).unwrap();
+    assert_eq!(lock_after.dev(), lock_before.dev());
+    assert_eq!(lock_after.ino(), lock_before.ino());
+    // This export shares the source image ID. Remove only its added name so
+    // later Podman inventory assertions still observe the original fixture.
+    run(Command::new(&context.podman).args(["untag", output, output]));
 }
 
 fn try_exclusive(path: &Path) -> bool {
@@ -202,6 +308,12 @@ fn real_rootless_round_trip() {
             .arg(format!("oci:{}", layout.display()))
             .arg(format!("containers-storage:{name}")));
     }
+    poc_lifecycle(
+        directory,
+        &source,
+        &format!("{prefix}:poc-output"),
+        &context,
+    );
     let store = Store::new(StoreConfig::new(directory.join("store")).unwrap());
     let reference = LocalRef::new("test/one:tag").unwrap();
     let report = store

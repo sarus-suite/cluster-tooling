@@ -1,5 +1,12 @@
 # Staged implementation of the HPC OCI image store
 
+> Historical reference, archived on 28 October 2026. This document is
+> superseded by the [current architecture](../architecture.md) and
+> [development guide](../development.md). Its stage sequence, planned
+> acceptance work, and future-work statements do not prescribe next steps.
+> The first PoC closes with a reduced documentation and local-validation
+> pass; external qualification remains deferred.
+
 Status: stages 1–7 are implemented in `crates/hpc-image-store`.
 The crate provides single-platform containers-storage import and export,
 registry pull preserving one OCI manifest digest, inventory, read-only graph
