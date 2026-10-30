@@ -239,7 +239,8 @@ pub fn squashfs_mounts_from_mount_strings(
             Err(e) => {
                 match e.code {
                     // Skip Standard mounts -> Error Code: 31
-                    31 => {
+                    // Skip Standard mounts with no flags -> Error Code: 32
+                    31 | 32 => {
                         continue;
                     },
                     _ => {
