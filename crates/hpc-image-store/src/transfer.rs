@@ -198,8 +198,7 @@ impl Store {
         // Fail on an unrepresentable OCI path before initializing the store.
         oci_argument(self.config().root())?;
         let store_guard = self.prepare(Operation::Import)?;
-        let ref_guard = store_guard.lock_ref(&reference)?;
-        refs::check_destination(&ref_guard, options.replace)?;
+        refs::check_destination(&store_guard, &reference, options.replace)?;
         context.check_capabilities("--dest-shared-blob-dir", false)?;
 
         let selected_source = match source.digest() {
@@ -227,7 +226,7 @@ impl Store {
                 executable: context.podman.clone(),
                 reason: "expected one complete containers-storage image ID".into(),
             })?;
-        let stage = AcquisitionStage::new(&ref_guard)?;
+        let stage = AcquisitionStage::new(&store_guard, &reference)?;
         let mut command = context.copy_command();
         command
             .arg("--dest-shared-blob-dir")
@@ -242,7 +241,7 @@ impl Store {
             &mut command,
             "import image",
             &context.skopeo,
-            Some(ref_guard.transfer_fds()),
+            Some(store_guard.transfer_fd()),
         )?;
 
         // Skopeo has exited: no writable producer may remain when staged
@@ -265,8 +264,8 @@ impl Store {
         let staging_directory = completed.directory().to_owned();
         refs::publish(completed, options.replace)?;
         // Publication (including both rename-parent syncs) has succeeded. Keep
-        // the same locks while removing only this operation's private aliases.
-        let cleanup_warnings = staging::cleanup_published(&ref_guard, &staging_directory)
+        // the store lock while removing only this operation's private aliases.
+        let cleanup_warnings = staging::cleanup_published(&store_guard, &staging_directory)
             .into_iter()
             .collect();
         Ok(ImportReport {
@@ -296,8 +295,8 @@ impl Store {
         // Podman is never used by export, even to probe its availability.
         context.validate()?;
         let store_guard = self.prepare(Operation::Export)?;
-        let ref_guard = crate::inventory::select(&store_guard, selector)?;
-        let resolved = refs::read(&ref_guard)?;
+        let reference = crate::inventory::select(&store_guard, selector)?;
+        let resolved = refs::read(&store_guard, &reference)?;
         require_manifest(&resolved.root, &resolved.raw_image)?;
         context.check_capabilities("--src-shared-blob-dir", true)?;
         let mut command = context.copy_command();
@@ -311,10 +310,10 @@ impl Store {
             &mut command,
             "export image",
             &context.skopeo,
-            Some(ref_guard.transfer_fds()),
+            Some(store_guard.transfer_fd()),
         )?;
         Ok(ExportReport {
-            local_ref: ref_guard.reference().clone(),
+            local_ref: reference.clone(),
             stored_manifest: resolved.root.digest.clone(),
             destination: destination.into(),
         })

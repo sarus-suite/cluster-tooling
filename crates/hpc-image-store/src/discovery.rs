@@ -19,12 +19,6 @@ pub(crate) struct Discovery {
 }
 
 pub(crate) fn discover(guard: &StoreGuard<'_>) -> Result<Discovery> {
-    guard.require_shared()?;
-    Ok(discover_locked(guard))
-}
-
-pub(crate) fn discover_exclusive(guard: &StoreGuard<'_>) -> Result<Discovery> {
-    guard.require_exclusive()?;
     Ok(discover_locked(guard))
 }
 
@@ -123,8 +117,8 @@ fn visit(guard: &StoreGuard<'_>, relative: &Path, result: &mut Discovery) {
     result.directories.push(path);
 }
 
-/// Directory geometry shared by namespace discovery and lock bookkeeping.
-/// Terminal ref/lock entries additionally require a complete decoded LocalRef.
+/// Directory geometry for namespace discovery.
+/// Terminal ref entries additionally require a complete decoded LocalRef.
 pub(crate) fn encoded_child(relative: &Path, name: &std::ffi::OsStr) -> bool {
     name.to_str().is_some_and(|name| {
         !name.is_empty()

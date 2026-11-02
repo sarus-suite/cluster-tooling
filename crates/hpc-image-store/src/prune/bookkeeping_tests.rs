@@ -1,4 +1,4 @@
-//! Bookkeeping reclamation and the ref-lock lifetime contract.
+//! Empty namespace reclamation and permanent store-lock coordination.
 use super::*;
 use crate::{
     ImageAvailability, ImageSelector, PruneKind, PruneOptions, PrunePhase, PruneReport, locks,
@@ -10,12 +10,6 @@ fn prune(handle: &Store) -> PruneReport {
     assert!(!report.has_errors(), "{report:?}");
     report
 }
-fn unused_lock(handle: &Store, reference: &LocalRef) -> PathBuf {
-    let guard = handle.prepare(Operation::List).unwrap();
-    drop(guard.lock_ref(reference).unwrap());
-    handle.layout.ref_lock(reference)
-}
-
 #[test]
 fn default_prune_cleans_the_example_without_touching_live_identity_or_young_content() {
     let temporary = tempfile::tempdir().unwrap();
@@ -30,8 +24,6 @@ fn default_prune_cleans_the_example_without_touching_live_identity_or_young_cont
         publish(&handle, reference, Image::One, false);
         handle.remove(reference).unwrap();
     }
-    let live_lock = handle.layout.ref_lock(&live);
-    let live_inode = fs::metadata(&live_lock).unwrap().ino();
     let store_inode = fs::metadata(handle.layout.store_lock()).unwrap().ino();
     let raw_before = snapshot(&raw);
     let blobs_before = snapshot(&handle.layout.blobs());
@@ -44,22 +36,12 @@ fn default_prune_cleans_the_example_without_touching_live_identity_or_young_cont
         .unwrap();
     assert!(!dry.has_errors());
     assert_eq!(snapshot(temporary.path()), before);
-    for kind in [
-        PruneKind::RefLock,
-        PruneKind::RefLockDirectory,
-        PruneKind::RefDirectory,
-    ] {
-        assert_eq!(dry.summaries[&kind].eligible_count, 2);
-        assert_eq!(dry.summaries[&kind].eligible_bytes, 0);
-    }
+    assert_eq!(dry.summaries[&PruneKind::RefDirectory].eligible_count, 2);
+    assert_eq!(dry.summaries[&PruneKind::RefDirectory].eligible_bytes, 0);
+
     let report = prune(&handle);
-    for kind in [
-        PruneKind::RefLock,
-        PruneKind::RefLockDirectory,
-        PruneKind::RefDirectory,
-    ] {
-        assert_eq!(report.summaries[&kind].removed_count, 2);
-    }
+    assert_eq!(report.summaries[&PruneKind::RefDirectory].removed_count, 2);
+
     for reference in &dead {
         assert!(
             !handle
@@ -69,18 +51,15 @@ fn default_prune_cleans_the_example_without_touching_live_identity_or_young_cont
                 .unwrap()
                 .exists()
         );
-        assert!(!handle.layout.ref_lock(reference).parent().unwrap().exists());
     }
-    assert_eq!(fs::metadata(&live_lock).unwrap().ino(), live_inode);
     assert_eq!(
         fs::metadata(handle.layout.store_lock()).unwrap().ino(),
         store_inode
     );
     assert_eq!(snapshot(&raw), raw_before);
     assert_eq!(snapshot(&handle.layout.blobs()), blobs_before);
-    for root in ["refs", "locks/refs"] {
-        assert!(handle.layout.root().join(root).is_dir());
-    }
+    assert!(handle.layout.root().join("refs").is_dir());
+
     assert!(
         prune(&handle)
             .summaries
@@ -90,18 +69,23 @@ fn default_prune_cleans_the_example_without_touching_live_identity_or_young_cont
 }
 
 #[test]
-fn missing_lookups_create_reclaimable_locks_and_bookkeeping_requires_the_barrier() {
+fn missing_lookups_create_no_bookkeeping_and_namespace_cleanup_requires_the_barrier() {
     let temporary = tempfile::tempdir().unwrap();
     let handle = store(temporary.path());
     drop(handle.prepare(Operation::Import).unwrap());
     let selected = ImageSelector::new("missing:tag").unwrap();
-    let reference = LocalRef::new("missing:tag").unwrap();
+    let before = snapshot(temporary.path());
     assert!(matches!(
         handle.availability(&selected),
         Ok(ImageAvailability::Missing)
     ));
-    let lock = handle.layout.ref_lock(&reference);
-    assert!(lock.exists());
+    prune(&handle);
+    assert_eq!(snapshot(temporary.path()), before);
+    assert!(!temporary.path().join("locks/refs").exists());
+
+    // A removed ref leaves only namespace directories eligible at default grace.
+    publish(&handle, &reference(), Image::One, false);
+    handle.remove(&reference()).unwrap();
     let before = snapshot(temporary.path());
     fsutil::fail_once("prune.namespace-sync", libc::EIO);
     let blocked = handle.prune(&PruneOptions::default()).unwrap();
@@ -111,21 +95,13 @@ fn missing_lookups_create_reclaimable_locks_and_bookkeeping_requires_the_barrier
         blocked
             .summaries
             .values()
-            .all(|summary| summary.eligible_count == 0 && summary.removed_count == 0)
+            .all(|s| s.eligible_count == 0 && s.removed_count == 0)
     );
     assert_eq!(snapshot(temporary.path()), before);
     assert_eq!(
-        prune(&handle).summaries[&PruneKind::RefLock].removed_count,
+        prune(&handle).summaries[&PruneKind::RefDirectory].removed_count,
         1
     );
-    assert!(!lock.exists());
-    assert!(matches!(
-        handle.availability(&selected),
-        Ok(ImageAvailability::Missing)
-    ));
-    assert!(lock.exists());
-    prune(&handle);
-    assert!(!lock.exists());
 }
 
 #[test]
@@ -146,122 +122,76 @@ fn shared_encoded_prefixes_retain_live_ancestors_and_remove_children_first() {
         let dead = LocalRef::new(dead).unwrap();
         publish(&handle, &live, Image::One, false);
         publish(&handle, &dead, Image::Two, false);
-        let live_inode = fs::metadata(handle.layout.ref_lock(&live)).unwrap().ino();
+        let live_inode = fs::metadata(handle.layout.ref_entry(&live)).unwrap().ino();
         handle.remove(&dead).unwrap();
         prune(&handle);
         assert!(handle.layout.ref_entry(&live).exists());
         assert_eq!(
-            fs::metadata(handle.layout.ref_lock(&live)).unwrap().ino(),
+            fs::metadata(handle.layout.ref_entry(&live)).unwrap().ino(),
             live_inode
         );
-        assert!(!handle.layout.ref_lock(&dead).exists());
         assert!(!handle.layout.ref_entry(&dead).parent().unwrap().exists());
         handle.remove(&live).unwrap();
         let report = prune(&handle);
-        for kind in [PruneKind::RefDirectory, PruneKind::RefLockDirectory] {
-            let dirs: Vec<_> = report
-                .candidates
-                .iter()
-                .filter(|candidate| candidate.kind == kind)
-                .collect();
-            assert!(
-                dirs.iter()
-                    .all(|candidate| candidate.removed && candidate.durability_confirmed)
-            );
-            assert!(
-                dirs.windows(2)
-                    .all(|pair| pair[0].path.components().count()
-                        >= pair[1].path.components().count())
-            );
-        }
-        for root in ["refs", "locks/refs"] {
-            assert_eq!(
-                fs::read_dir(handle.layout.root().join(root))
-                    .unwrap()
-                    .count(),
-                0
-            );
-        }
+        let dirs: Vec<_> = report
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.kind == PruneKind::RefDirectory)
+            .collect();
+        assert!(
+            dirs.iter()
+                .all(|candidate| candidate.removed && candidate.durability_confirmed)
+        );
+        assert!(
+            dirs.windows(2)
+                .all(|pair| pair[0].path.components().count() >= pair[1].path.components().count())
+        );
+
+        assert_eq!(
+            fs::read_dir(handle.layout.root().join("refs"))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 }
 
 #[test]
-fn unknown_lock_subtrees_are_preserved_while_independent_known_locks_are_cleaned() {
-    for case in [
-        "extra-file",
-        "symlink",
-        "nonempty",
-        "directory",
-        "hard-link",
-        "malformed",
-    ] {
-        let temporary = tempfile::tempdir().unwrap();
-        let handle = store(temporary.path());
-        drop(handle.prepare(Operation::Import).unwrap());
-        let bad = LocalRef::new(format!("{}:bad", "a".repeat(60))).unwrap();
-        let path = unused_lock(&handle, &bad);
-        let top = handle
-            .layout
-            .root()
-            .join("locks/refs")
-            .join(bad.encoded_path().components().next().unwrap());
-        match case {
-            "extra-file" => fs::write(top.join("unknown"), b"preserve").unwrap(),
-            "nonempty" => fs::write(&path, b"not library bookkeeping").unwrap(),
-            "hard-link" => fs::hard_link(&path, temporary.path().join("outside-link")).unwrap(),
-            "symlink" | "directory" => {
-                fs::remove_file(&path).unwrap();
-                if case == "directory" {
-                    fs::create_dir(&path).unwrap();
-                } else {
-                    symlink("/outside/never-follow", &path).unwrap();
-                }
-            }
-            _ => {
-                let malformed = handle.layout.root().join("locks/refs/ff");
-                fs::create_dir(&malformed).unwrap();
-                fs::write(malformed.join("ref.lock"), b"").unwrap();
-                fs::write(top.join("unknown"), b"preserve").unwrap();
-            }
-        }
-        let independent = LocalRef::new("independent:unused").unwrap();
-        let good = unused_lock(&handle, &independent);
-        let before = snapshot(&top);
-        let report = prune(&handle);
-        assert!(!report.skipped.is_empty(), "{case}");
-        assert_eq!(snapshot(&top), before, "{case}");
-        assert!(!good.exists());
-        assert!(fs::symlink_metadata(&path).is_ok());
-        if case == "malformed" {
-            assert!(handle.layout.root().join("locks/refs/ff/ref.lock").exists());
-        }
-    }
+fn unexpected_lock_contents_are_preserved_without_adoption() {
+    let temporary = tempfile::tempdir().unwrap();
+    let handle = store(temporary.path());
+    drop(handle.prepare(Operation::Import).unwrap());
+    let foreign = temporary.path().join("locks/refs/foreign");
+    fs::create_dir_all(&foreign).unwrap();
+    fs::write(foreign.join("ref.lock"), b"preserve").unwrap();
+    symlink("/outside/never-follow", foreign.join("pointer")).unwrap();
+    let before = snapshot(&temporary.path().join("locks"));
+    prune(&handle);
+    assert_eq!(snapshot(&temporary.path().join("locks")), before);
 }
 
 #[test]
 fn incomplete_bookkeeping_scan_blocks_all_reclamation() {
-    for point in ["prune.bookkeeping-enumerate", "prune.bookkeeping-metadata"] {
-        let temporary = tempfile::tempdir().unwrap();
-        let handle = store(temporary.path());
-        publish(&handle, &reference(), Image::One, false);
-        handle.remove(&reference()).unwrap();
-        let before = snapshot(temporary.path());
-        fsutil::fail_once(point, libc::EACCES);
-        let report = handle
-            .prune(&PruneOptions {
-                grace_period: Duration::ZERO,
-                ..PruneOptions::default()
-            })
-            .unwrap();
-        assert!(report.has_errors() && !report.scan_complete);
-        assert!(
-            report
-                .candidates
-                .iter()
-                .all(|candidate| !candidate.eligible && !candidate.removed)
-        );
-        assert_eq!(snapshot(temporary.path()), before);
-    }
+    let temporary = tempfile::tempdir().unwrap();
+    let handle = store(temporary.path());
+    publish(&handle, &reference(), Image::One, false);
+    handle.remove(&reference()).unwrap();
+    let before = snapshot(temporary.path());
+    fsutil::fail_once("prune.bookkeeping-enumerate", libc::EACCES);
+    let report = handle
+        .prune(&PruneOptions {
+            grace_period: Duration::ZERO,
+            ..PruneOptions::default()
+        })
+        .unwrap();
+    assert!(report.has_errors() && !report.scan_complete);
+    assert!(
+        report
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.eligible && !candidate.removed)
+    );
+    assert_eq!(snapshot(temporary.path()), before);
 }
 
 #[test]
@@ -270,8 +200,9 @@ fn bookkeeping_remove_and_sync_errors_stop_with_visible_progress_and_allow_retry
         for completed in 0..3 {
             let temporary = tempfile::tempdir().unwrap();
             let handle = store(temporary.path());
-            publish(&handle, &reference(), Image::One, false);
-            handle.remove(&reference()).unwrap();
+            let reference = LocalRef::new(format!("{}:tag", "x".repeat(130))).unwrap();
+            publish(&handle, &reference, Image::One, false);
+            handle.remove(&reference).unwrap();
             let blob_before = snapshot(&handle.layout.blobs());
             fsutil::fail_after(point, completed, libc::EIO);
             let report = handle.prune(&PruneOptions::default()).unwrap();
@@ -309,11 +240,11 @@ fn bookkeeping_remove_and_sync_errors_stop_with_visible_progress_and_allow_retry
                 );
             }
             prune(&handle);
-            assert!(!handle.layout.ref_lock(&reference()).exists());
+
             assert!(
                 !handle
                     .layout
-                    .ref_entry(&reference())
+                    .ref_entry(&reference)
                     .parent()
                     .unwrap()
                     .exists()
@@ -324,19 +255,18 @@ fn bookkeeping_remove_and_sync_errors_stop_with_visible_progress_and_allow_retry
 }
 
 #[test]
-fn ref_lock_holders_and_actual_waiters_exclude_cleanup_including_after_recreation() {
+fn store_lock_holders_exclude_cleanup_and_waiters_retain_permanent_identity() {
     let temporary = tempfile::tempdir().unwrap();
     let handle = store(temporary.path());
     drop(handle.prepare(Operation::Import).unwrap());
     let selected = reference();
     for _ in 0..2 {
         let guard = handle.prepare(Operation::Import).unwrap();
-        let ref_guard = guard.lock_ref(&selected).unwrap();
-        let lock = handle.layout.ref_lock(&selected);
+        let lock = handle.layout.store_lock();
         let inode = fs::metadata(&lock).unwrap().ino();
         let mut waiter = Worker::start(temporary.path(), &selected, "bookkeeping-waiter");
-        // The checkpoint is reached only after a real flock returns WouldBlock;
-        // the waiter already owns its store guard and open ref-lock descriptor.
+        // The checkpoint proves the waiter has opened the permanent lock
+        // and a real flock has returned WouldBlock.
         waiter.wait_for("PUBLICATION_PAUSED");
         {
             let _short = locks::short_test_waits();
@@ -345,15 +275,10 @@ fn ref_lock_holders_and_actual_waiters_exclude_cleanup_including_after_recreatio
                 Err(Error::LockTimeout { .. })
             ));
         }
-        drop(ref_guard);
         drop(guard);
-        {
-            let _short = locks::short_test_waits();
-            assert!(matches!(
-                handle.prune(&PruneOptions::default()),
-                Err(Error::LockTimeout { .. })
-            ));
-        }
+        // A waiting descriptor has no lock yet. Prune can run while it is
+        // paused, but must preserve the inode on which it will retry.
+        prune(&handle);
         assert_eq!(fs::metadata(&lock).unwrap().ino(), inode);
         waiter.proceed();
         waiter.wait_for("BOOKKEEPING_ACQUIRED");
@@ -367,18 +292,14 @@ fn ref_lock_holders_and_actual_waiters_exclude_cleanup_including_after_recreatio
         waiter.proceed();
         waiter.wait_for("PUBLICATION_READY");
         waiter.finish();
-        assert_eq!(
-            prune(&handle).summaries[&PruneKind::RefLock].removed_count,
-            1
-        );
-        assert!(!lock.exists());
+        prune(&handle);
+        assert_eq!(fs::metadata(&lock).unwrap().ino(), inode);
     }
 }
 
-pub(super) fn worker(handle: &Store, selected: &LocalRef) {
-    let guard = handle.prepare(Operation::Export).unwrap();
+pub(super) fn worker(handle: &Store, _selected: &LocalRef) {
     fsutil::pause_once("lock.contended");
-    let _ref_guard = guard.lock_ref(selected).unwrap();
+    let _guard = handle.prepare(Operation::Export).unwrap();
     println!("BOOKKEEPING_ACQUIRED");
     std::io::stdout().flush().unwrap();
     let mut instruction = String::new();

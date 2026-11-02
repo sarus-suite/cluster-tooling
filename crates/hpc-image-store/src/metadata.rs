@@ -8,7 +8,7 @@ pub struct StoreMetadata {
 }
 impl Default for StoreMetadata {
     fn default() -> Self {
-        Self { version: 1 }
+        Self { version: 2 }
     }
 }
 impl StoreMetadata {
@@ -16,7 +16,7 @@ impl StoreMetadata {
         self.version
     }
     pub fn from_json(bytes: &[u8]) -> Result<Self> {
-        check_version(bytes, "store", 1)?;
+        check_version(bytes, "store", 2)?;
         Ok(Self::default())
     }
 }

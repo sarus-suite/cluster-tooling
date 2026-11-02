@@ -5,7 +5,7 @@
 use crate::{
     LocalRef, RefMetadata, Sha256Digest, Store, StoreConfig,
     graph::{CONFIG, INDEX, LAYERS, MANIFEST},
-    locks::{Operation, RefGuard},
+    locks::{Operation, StoreGuard},
     oci::{self, Descriptor},
     refs,
     staging::{AcquisitionStage, BlobSpec, CompletedStage},
@@ -146,10 +146,11 @@ impl NestedImages {
 }
 
 pub(crate) fn stage_image<'a>(
-    guard: &'a RefGuard<'a>,
+    guard: &'a StoreGuard<'a>,
+    reference: &LocalRef,
     image: &SyntheticImage,
 ) -> CompletedStage<'a> {
-    let stage = AcquisitionStage::new(guard).unwrap();
+    let stage = AcquisitionStage::new(guard, reference).unwrap();
     oci::write_layout(&stage.layout_path(), &image.root).unwrap();
     let mut specs = Vec::new();
     for (digest, bytes) in &image.objects {
@@ -166,7 +167,7 @@ pub(crate) fn stage_image<'a>(
     stage
         .complete(
             &image.root.digest,
-            RefMetadata::new(guard.reference().clone(), image.root.digest.clone()),
+            RefMetadata::new(reference.clone(), image.root.digest.clone()),
             specs,
         )
         .unwrap()
@@ -181,8 +182,8 @@ pub(crate) fn publish_image(
     replace: bool,
 ) -> PathBuf {
     let guard = store.prepare(Operation::Import).unwrap();
-    let selected = guard.lock_ref(reference).unwrap();
-    refs::publish(stage_image(&selected, image), replace).unwrap()
+    let selected = reference.clone();
+    refs::publish(stage_image(&guard, &selected, image), replace).unwrap()
 }
 
 pub(crate) fn prefix_names() -> (LocalRef, LocalRef) {

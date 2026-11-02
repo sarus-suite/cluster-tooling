@@ -154,8 +154,7 @@ impl Fixture {
     }
     fn read(&self) -> RefMetadata {
         let store_guard = self.store.prepare(Operation::Export).unwrap();
-        let guard = store_guard.lock_ref(&self.reference).unwrap();
-        refs::read(&guard).unwrap().metadata
+        refs::read(&store_guard, &self.reference).unwrap().metadata
     }
     fn alter_manifest(&self, change: impl FnOnce(&mut Value)) {
         let directory = self.temporary.path().join("fixture");
@@ -765,14 +764,14 @@ fn cleanup_does_not_follow_symlinks_or_accept_paths_outside_staging() {
     assert!(fixture.import(false).unwrap().cleanup_warnings.is_empty());
     assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"keep");
     let guard = fixture.store.prepare(Operation::Import).unwrap();
-    let ref_guard = guard.lock_ref(&fixture.reference).unwrap();
+    let destination = fixture.reference.clone();
     let replaced = fixture.store.layout.staging().join("operation-replaced");
     symlink(&outside, &replaced).unwrap();
-    assert!(staging::cleanup_published(&ref_guard, &replaced).is_none());
+    assert!(staging::cleanup_published(&guard, &replaced).is_none());
     assert!(fs::symlink_metadata(&replaced).is_err());
     assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"keep");
-    let raw_image = refs::read(&ref_guard).unwrap().raw_image;
-    assert!(staging::cleanup_published(&ref_guard, &raw_image).is_some());
+    let raw_image = refs::read(&guard, &destination).unwrap().raw_image;
+    assert!(staging::cleanup_published(&guard, &raw_image).is_some());
     assert!(raw_image.join("metadata.json").is_file());
 }
 
@@ -1020,8 +1019,8 @@ fn transfer_worker() {
     let operation = std::env::var("HPC_TRANSFER_TEST_OPERATION").unwrap();
     if operation == "actual-skopeo" {
         let guard = store.prepare(Operation::Import).unwrap();
-        let ref_guard = guard.lock_ref(&reference).unwrap();
-        let stage = AcquisitionStage::new(&ref_guard).unwrap();
+        let destination = reference.clone();
+        let stage = AcquisitionStage::new(&guard, &destination).unwrap();
         let executable = PathBuf::from(std::env::var_os("HPC_TRANSFER_TEST_SKOPEO").unwrap());
         let mut command = Command::new(&executable);
         command
@@ -1037,7 +1036,7 @@ fn transfer_worker() {
             &mut command,
             "actual Skopeo lock test",
             &executable,
-            Some(ref_guard.transfer_fds()),
+            Some(guard.transfer_fd()),
         )
         .unwrap();
     } else if operation == "import" {
@@ -1072,7 +1071,7 @@ fn transfer_worker() {
 }
 
 #[test]
-fn actual_skopeo_retains_locks_after_parent_termination() {
+fn actual_skopeo_retains_lock_after_parent_termination() {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let fixture = Fixture::new();
@@ -1126,13 +1125,17 @@ fn actual_skopeo_retains_locks_after_parent_termination() {
     wrapper.kill().unwrap();
     wrapper.wait().unwrap();
     let store_lock = fixture.store.layout.store_lock();
-    let ref_lock = fixture.store.layout.ref_lock(&fixture.reference);
+
     assert!(!try_exclusive(&store_lock), "real Skopeo lost store lock");
-    assert!(!try_exclusive(&ref_lock), "real Skopeo lost ref lock");
+    assert!(
+        !try_lock(&store_lock, libc::LOCK_SH),
+        "orphan writer allowed a reader"
+    );
+
     writer.write_all(CONFIG).unwrap();
     drop(writer);
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !try_exclusive(&store_lock) || !try_exclusive(&ref_lock) {
+    while !try_exclusive(&store_lock) {
         assert!(
             Instant::now() < deadline,
             "real Skopeo did not release its locks"
@@ -1165,13 +1168,17 @@ fn wait_for(path: &Path) {
     }
 }
 fn try_exclusive(path: &Path) -> bool {
+    try_lock(path, libc::LOCK_EX)
+}
+
+fn try_lock(path: &Path, mode: libc::c_int) -> bool {
     use std::os::fd::AsRawFd;
     let file = fs::File::open(path).unwrap();
     // SAFETY: file owns a valid descriptor, and this is a nonblocking attempt.
-    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+    unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) == 0 }
 }
 #[test]
-fn orphaned_transfer_retains_store_and_ref_locks_and_inherits_environment() {
+fn orphaned_transfer_retains_store_lock_and_inherits_environment() {
     for operation in ["import", "export", "digest-export"] {
         let mut fixture = Fixture::new();
         fixture.import(false).unwrap();
@@ -1180,9 +1187,10 @@ fn orphaned_transfer_retains_store_and_ref_locks_and_inherits_environment() {
             .store
             .availability(&parse_selector(unused_ref.as_str()))
             .unwrap();
-        let unused_lock = fixture.store.layout.ref_lock(&unused_ref);
-        let committed_lock = fixture.store.layout.ref_lock(&fixture.reference);
-        let committed_inode = fs::metadata(&committed_lock).unwrap().ino();
+
+        let store_inode = fs::metadata(fixture.store.layout.store_lock())
+            .unwrap()
+            .ino();
         let root = fixture.temporary.path();
         let release = root.join("release");
         let ready = root.join("ready");
@@ -1210,9 +1218,10 @@ fn orphaned_transfer_retains_store_and_ref_locks_and_inherits_environment() {
         wrapper.kill().unwrap();
         wrapper.wait().unwrap();
         assert!(!try_exclusive(&fixture.store.layout.store_lock()));
-        assert!(!try_exclusive(
-            &fixture.store.layout.ref_lock(&fixture.reference)
-        ));
+        assert_eq!(
+            try_lock(&fixture.store.layout.store_lock(), libc::LOCK_SH),
+            operation != "import"
+        );
         {
             let _short = crate::locks::short_test_waits();
             assert!(matches!(
@@ -1220,7 +1229,7 @@ fn orphaned_transfer_retains_store_and_ref_locks_and_inherits_environment() {
                 Err(Error::LockTimeout { .. })
             ));
         }
-        assert!(unused_lock.exists());
+        assert!(!fixture.store.config().root().join("locks/refs").exists());
         assert!(
             fixture
                 .log()
@@ -1229,9 +1238,7 @@ fn orphaned_transfer_retains_store_and_ref_locks_and_inherits_environment() {
         );
         fs::write(release, b"continue").unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !try_exclusive(&fixture.store.layout.store_lock())
-            || !try_exclusive(&fixture.store.layout.ref_lock(&fixture.reference))
-        {
+        while !try_exclusive(&fixture.store.layout.store_lock()) {
             assert!(
                 Instant::now() < deadline,
                 "orphaned child did not release locks"
@@ -1257,10 +1264,12 @@ fn orphaned_transfer_retains_store_and_ref_locks_and_inherits_environment() {
             .prune(&crate::PruneOptions::default())
             .unwrap();
         assert!(!report.has_errors(), "{report:?}");
-        assert!(!unused_lock.exists());
+        assert!(!fixture.store.config().root().join("locks/refs").exists());
         assert_eq!(
-            fs::metadata(&committed_lock).unwrap().ino(),
-            committed_inode
+            fs::metadata(fixture.store.layout.store_lock())
+                .unwrap()
+                .ino(),
+            store_inode
         );
     }
 }
@@ -1316,13 +1325,12 @@ fn digest_aware_import_naming_reports_ignored_digests_and_preserves_source_selec
             destination.as_ref().and_then(ImageSelector::digest)
         );
         let guard = fixture.store.prepare(Operation::Export).unwrap();
-        let ref_guard = guard.lock_ref(&imported.local_ref).unwrap();
-        let metadata = refs::read(&ref_guard).unwrap().metadata;
+        let destination = imported.local_ref.clone();
+        let metadata = refs::read(&guard, &destination).unwrap().metadata;
         assert!(
             matches!(metadata.acquisition, Acquisition::Import { source: recorded, .. }
                         if recorded == source.as_str())
         );
-        drop(ref_guard);
         drop(guard);
         let calls = fixture.log();
         let inspection = calls.iter().find(|call| call["tool"] == "podman").unwrap();

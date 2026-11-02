@@ -109,9 +109,7 @@ fn encoding_is_canonical_reversible_and_bounded() {
     assert!(long.encoded_path().starts_with(short.encoded_path()));
     let temporary = tempfile::tempdir().unwrap();
     let handle = store(temporary.path());
-    let guard = handle.prepare(Operation::Import).unwrap();
-    let _short_lock = guard.lock_ref(&short).unwrap();
-    let _long_lock = guard.lock_ref(&long).unwrap();
+    let _guard = handle.prepare(Operation::Import).unwrap();
     assert_ne!(
         handle.layout.ref_entry(&short),
         handle.layout.ref_entry(&long)
@@ -148,16 +146,16 @@ fn metadata_round_trips_and_checks_versions() {
         reference
     );
     assert_eq!(
-        StoreMetadata::from_json(b"{\"version\":1}")
+        StoreMetadata::from_json(b"{\"version\":2}")
             .unwrap()
             .version(),
-        1
+        2
     );
     for bytes in [b"{}".as_slice(), b"null", b"{", b"{\"version\":\"1\"}"] {
         assert!(StoreMetadata::from_json(bytes).is_err());
     }
     assert!(matches!(
-        StoreMetadata::from_json(b"{\"version\":2}"),
+        StoreMetadata::from_json(b"{\"version\":1}"),
         Err(Error::UnsupportedVersion { .. })
     ));
     assert!(matches!(
@@ -411,57 +409,30 @@ fn reads_reject_missing_markers_and_symlinked_locks() {
 }
 
 #[test]
-fn initialized_stores_are_not_repaired_and_ref_lock_paths_reject_symlinks() {
+fn initialized_stores_are_not_repaired() {
     let temporary = tempfile::tempdir().unwrap();
     initialize(temporary.path());
     fs::remove_dir(temporary.path().join("raw_images")).unwrap();
     assert!(store(temporary.path()).prepare(Operation::Import).is_err());
     assert!(!temporary.path().join("raw_images").exists());
-
-    let temporary = tempfile::tempdir().unwrap();
-    initialize(temporary.path());
-    let handle = store(temporary.path());
-    let reference = LocalRef::new("a:t").unwrap();
-    let guard = handle.prepare(Operation::List).unwrap();
-    let outside = tempfile::tempdir().unwrap();
-    symlink(
-        outside.path(),
-        temporary
-            .path()
-            .join("locks/refs")
-            .join(reference.encoded_path()),
-    )
-    .unwrap();
-    assert!(guard.lock_ref(&reference).is_err());
-    assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
-
-    let temporary = tempfile::tempdir().unwrap();
-    initialize(temporary.path());
-    let handle = store(temporary.path());
-    let guard = handle.prepare(Operation::List).unwrap();
-    drop(guard.lock_ref(&reference).unwrap());
-    let lock = handle.layout.ref_lock(&reference);
-    fs::remove_file(&lock).unwrap();
-    let target = outside.path().join("keep");
-    fs::write(&target, b"preserve").unwrap();
-    symlink(&target, &lock).unwrap();
-    assert!(guard.lock_ref(&reference).is_err());
-    assert_eq!(fs::read(target).unwrap(), b"preserve");
 }
 
 #[test]
 fn operation_matrix_is_explicit() {
     for operation in [Operation::Import, Operation::Pull, Operation::Remove] {
-        assert_eq!(operation.store_mode(), Mode::Shared);
-        assert_eq!(operation.ref_mode(), Some(Mode::Exclusive));
+        assert_eq!(operation.store_mode(), Mode::Exclusive);
+        assert!(operation.initializes());
     }
-    for operation in [Operation::Export, Operation::List, Operation::Check] {
+    for operation in [
+        Operation::Export,
+        Operation::List,
+        Operation::Check,
+        Operation::Availability,
+    ] {
         assert_eq!(operation.store_mode(), Mode::Shared);
-        assert_eq!(operation.ref_mode(), Some(Mode::Shared));
         assert!(!operation.initializes());
     }
     assert_eq!(Operation::Prune.store_mode(), Mode::Exclusive);
-    assert_eq!(Operation::Prune.ref_mode(), None);
     assert!(!Operation::Prune.initializes());
 }
 
@@ -475,8 +446,13 @@ fn lock_worker() {
     println!("WORKER_ATTEMPT");
     std::io::stdout().flush().unwrap();
     wait_for_instruction();
-    if action == "initialize" {
-        drop(handle.prepare(Operation::Import).unwrap());
+    if matches!(action.as_str(), "initialize" | "initialize-pull") {
+        let operation = if action == "initialize-pull" {
+            Operation::Pull
+        } else {
+            Operation::Import
+        };
+        drop(handle.prepare(operation).unwrap());
         worker_ready();
         wait_for_instruction();
         return;
@@ -507,19 +483,13 @@ fn lock_worker() {
         "export" => Operation::Export,
         "list" => Operation::List,
         "check" => Operation::Check,
+        "availability" => Operation::Availability,
         "prune" => Operation::Prune,
         _ => panic!("unknown worker operation"),
     };
     let guard = handle.prepare(operation).unwrap();
-    let reference = std::env::var("HPC_STORE_TEST_REF")
-        .ok()
-        .map(|value| LocalRef::new(value).unwrap());
-    let ref_guard = reference
-        .as_ref()
-        .map(|reference| guard.lock_ref(reference).unwrap());
     worker_ready();
     wait_for_instruction();
-    drop(ref_guard);
     drop(guard);
 }
 
@@ -622,10 +592,13 @@ fn separate_processes_obey_the_lock_matrix() {
     let cases = [
         ("export", "check", Some("a:t"), false),
         ("list", "export", Some("a:t"), false),
+        ("availability", "list", None, false),
+        ("pull", "check", None, true),
+        ("remove", "import", Some("b:t"), true),
         ("import", "export", Some("a:t"), true),
         ("pull", "remove", Some("a:t"), true),
         ("check", "import", Some("a:t"), true),
-        ("import", "pull", Some("b:t"), false),
+        ("import", "pull", Some("b:t"), true),
         ("remove", "prune", None, true),
         ("export", "prune", None, true),
         ("prune", "check", Some("a:t"), true),
@@ -659,15 +632,23 @@ fn concurrent_initialization_and_termination_release_locks() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("store");
     let mut workers: Vec<_> = (0..6)
-        .map(|_| Worker::start_paused(&root, "initialize", None))
+        .map(|index| {
+            Worker::start_paused(
+                &root,
+                if index % 2 == 0 {
+                    "initialize"
+                } else {
+                    "initialize-pull"
+                },
+                None,
+            )
+        })
         .collect();
     for worker in &mut workers {
         worker.begin();
     }
-    for worker in &workers {
-        worker.wait_for("WORKER_READY");
-    }
     for worker in &mut workers {
+        worker.wait_for("WORKER_READY");
         worker.release();
     }
     let mut holder = Worker::start(&root, "import", Some("a:t"));
@@ -679,11 +660,10 @@ fn concurrent_initialization_and_termination_release_locks() {
     contender.wait_for("WORKER_READY");
     contender.release();
     let handle = store(&root);
-    let reference = LocalRef::new("a:t").unwrap();
-    let lock = handle.layout.ref_lock(&reference);
+    let lock = handle.layout.store_lock();
     let inode = fs::metadata(&lock).unwrap().ino();
     let guard = handle.prepare(Operation::Remove).unwrap();
-    drop(guard.lock_ref(&reference).unwrap());
+    drop(guard);
     assert_eq!(fs::metadata(lock).unwrap().ino(), inode);
 }
 
@@ -768,10 +748,10 @@ fn initialization_syncs_only_the_root_and_its_immediate_parent_in_order() {
             ("directory-sync", root.clone()),
         ]);
         assert_eq!(events, expected);
-        for name in ["blobs/sha256", "refs", "raw_images", "tmp", "locks/refs"] {
+        for name in ["blobs/sha256", "refs", "raw_images", "tmp"] {
             assert_eq!(fs::read_dir(root.join(name)).unwrap().count(), 0);
         }
-        // A supported version-1 store has no private recovery record.
+        // A supported version-2 store has no private recovery record.
         assert!(!root.join(".store-bootstrap.json").exists());
         initialize(&root);
         assert_eq!(
@@ -929,4 +909,59 @@ fn permission_cases() {
     initialize(&prepared.join("store"));
     initialize(&prepared.join("store"));
     fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn format_two_preserves_schema_three_and_rejects_old_stores_without_changes() {
+    use crate::test_snapshot::snapshot;
+    let fixture = crate::test_support::MutationFixture::new();
+    let handle = &fixture.store;
+    let marker = handle.layout.marker();
+    assert_eq!(
+        StoreMetadata::from_json(&fs::read(&marker).unwrap())
+            .unwrap()
+            .version(),
+        2
+    );
+    assert_eq!(
+        RefMetadata::from_json(&fs::read(fixture.original_raw.join("metadata.json")).unwrap())
+            .unwrap()
+            .version(),
+        3
+    );
+    assert_eq!(
+        fs::read_dir(handle.layout.root().join("locks"))
+            .unwrap()
+            .count(),
+        1
+    );
+    for version in [1, 99] {
+        fs::write(&marker, format!("{{\"version\":{version}}}")).unwrap();
+        let before = snapshot(handle.layout.root());
+        for operation in [
+            Operation::Import,
+            Operation::Pull,
+            Operation::Remove,
+            Operation::Export,
+            Operation::List,
+            Operation::Check,
+            Operation::Availability,
+            Operation::Prune,
+        ] {
+            assert!(
+                matches!(handle.prepare(operation), Err(Error::UnsupportedVersion { kind: "store", version: found }) if found == version)
+            );
+            assert_eq!(snapshot(handle.layout.root()), before, "{operation:?}");
+        }
+    }
+}
+
+#[test]
+fn obsolete_empty_ref_lock_scaffolding_is_preserved_and_rejected() {
+    use crate::test_snapshot::snapshot;
+    let temporary = tempfile::tempdir().unwrap();
+    fs::create_dir_all(temporary.path().join("locks/refs")).unwrap();
+    let before = snapshot(temporary.path());
+    assert!(store(temporary.path()).prepare(Operation::Import).is_err());
+    assert_eq!(snapshot(temporary.path()), before);
 }

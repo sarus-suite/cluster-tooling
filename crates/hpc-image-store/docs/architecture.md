@@ -1,10 +1,10 @@
 # HPC image store architecture
 
-This is the authoritative architecture reference for the implemented first PoC.
+This is the authoritative architecture reference for the implemented PoC v2 Stage 2.
 It describes current behavior and the guarantees that changes must preserve.
 The source and tests establish what is implemented; consequential differences
-from this contract require explicit resolution. The archived design and staged
-implementation plan are historical records, not instructions for future work.
+from this contract require explicit resolution. The archived design and plan
+are historical records. The PoC v2 implementation plan defines the remaining stages, whose features are not yet implemented.
 
 ## Purpose and boundaries
 
@@ -38,7 +38,7 @@ required primitive is unavailable.
 
 ```text
 store/
-├── store.json                     # Store format 1
+├── store.json                     # Store format 2
 ├── blobs/sha256/<digest>           # Shared immutable manifests, configs, layers
 ├── refs/<encoded-key>/ref          # Relative symlink selecting a raw image
 ├── raw_images/raw-<id>/            # Complete underlying image record
@@ -50,15 +50,14 @@ store/
 │   ├── layout/
 │   └── blobs/sha256/
 └── locks/
-    ├── store.lock                 # Permanent identity
-    └── refs/<encoded-key>/ref.lock # Logical-name coordination
+    └── store.lock                 # Permanent identity; sole operation lock
 ```
 
 A ref is an explicit `name:tag`. Its key is the reversible lowercase hexadecimal
 encoding of the complete name, split into components of at most 120 characters.
-All components except the last contain exactly 120 characters. Fixed terminal
-entries `ref` and `ref.lock` avoid collisions between prefix names. Encoding
-provides filesystem-safe paths without a separate name-to-ID database.
+All components except the last contain exactly 120 characters. The fixed terminal
+entry `ref` avoids collisions between prefix names. Encoding provides
+filesystem-safe paths without a separate name-to-ID database.
 
 A raw-image ID identifies one publication instance. It is a randomly generated
 twelve-character alphanumeric value, unrelated to content or Podman's image ID.
@@ -87,7 +86,7 @@ identity or alias. Cached fields never replace authoritative OCI reachability.
 Notes and provenance may be irreplaceable operational metadata; CAS objects alone
 cannot reconstruct deleted names and history.
 
-Store format 1 and ref metadata schema 3 are separate from document versions.
+Store format 2 and ref metadata schema 3 are separate from document versions.
 Unsupported versions are rejected without migration or automatic deletion.
 
 ## Selectors and local lookup
@@ -107,7 +106,7 @@ Without a digest, local lookup selects the exact tagged ref. With a digest, the
 tag is ignored and lookup searches committed OCI roots under the same literal
 repository name. It never contacts a registry or uses config IDs, provenance,
 or unreferenced CAS objects as aliases. Healthy matches are selected
-deterministically in local-name order and revalidated under the retained ref lock.
+deterministically in local-name order under the retained shared store lock.
 A healthy match remains usable despite other damage. Without one, damage or
 incomplete discovery that prevents proving absence in the requested repository
 produces incomplete resolution rather than a definite miss. Known damage in
@@ -153,7 +152,7 @@ directory above it is opened for syncing. Interruption leaves only recognized
 setup entries eligible for retry; unexpected contents are preserved with an
 error. Completed initialization needs no private recovery record.
 
-For a marked store, import/pull/remove preparation validates under a shared
+For a marked store, import/pull/remove preparation validates under an exclusive
 store lock and syncs the marker and root again, without opening the parent.
 Seeing a marker alone does not prove its final sync succeeded. A post-publication
 initialization failure returns `Error::InitializationDurability`, reports
@@ -164,31 +163,25 @@ Created directories use mode 0700 and files 0600, subject to umask; existing
 permissions are preserved. Skopeo chooses blob permissions inside private
 directories. Reserved setup directories must be real directories; markers and
 lock files must be regular files. Committed ref pointers are intentionally
-symlinks. Read operations may create ref coordination bookkeeping.
+symlinks. Read operations create no coordination bookkeeping.
 
 ## Coordination and process lifetime
 
-Acquire the store lock before any ref lock and retain both for the operation's
-use of persistent content.
+Every operation retains the single store guard throughout selection and all use
+of persistent content. There are no per-ref lock files or guards.
 
-| Operation | Store lock | Ref lock |
-| --- | --- | --- |
-| Import, pull, remove | Shared | Exclusive on destination or selected name |
-| Export, availability | Shared | Shared on selected name throughout use |
-| List, check | Shared | Shared while inspecting each ref |
-| Prune | Exclusive | None |
+| Operation | Store lock |
+| --- | --- |
+| Import, pull, remove | Exclusive |
+| Export, availability, list, check | Shared |
+| Prune, including dry-run | Exclusive |
 
-List and all-store check provide coherent individual ref observations, not a
-single store-wide snapshot. Work on different refs can proceed concurrently;
-CAS insertion must therefore also tolerate concurrent identical objects.
-
-The store lock identity is permanent. Ref locks remain stable across ordinary
-replacement and removal, while refs are committed, and while processes hold
-or wait for them. Every holder, waiter, and transfer child retains its store
-lock until its ref descriptors close. A ref guard borrows its store guard;
-there are no cached ref descriptors outside this lifetime. Only prune under
-the exclusive store lock may reclaim recognized unused ref locks. Later
-operations can safely recreate bookkeeping for absent names.
+Shared readers coexist. Writers serialize across all names and exclude readers.
+List and all-store check observe a stable namespace throughout their operation.
+The permanent store-lock inode is never reclaimed or replaced, including while
+processes wait on it. Selection returns an explicit ref identity; resolved
+content and acquisition stages borrow the retained store guard. Mutating
+primitives require exclusive access.
 
 Lock acquisition uses nonblocking `flock` attempts, retrying every 100 ms,
 warning to stderr every 30 seconds, and timing out after five minutes. The
@@ -196,11 +189,12 @@ deadline covers acquisition attempts, not filesystem opens or subsequent work.
 Tests use short internal thresholds. Timeouts never remove lock files.
 
 Parent descriptors are close-on-exec. Immediately before a Skopeo copy, the
-child clears that flag only on the operation's store and ref descriptors. It
-inherits the same locked open-file descriptions, without an explicit unlock.
-If the wrapper dies during copying, surviving Skopeo retains both locks until
+child clears that flag only on the operation's single store descriptor. It
+inherits the same locked open-file description, without an explicit unlock.
+If the wrapper dies during copying, surviving Skopeo retains the store lock until
 its descriptors close. It can finish private work but cannot publish a ref.
-Prune and other conflicting operations remain excluded during that lifetime.
+Conflicting operations remain excluded during that lifetime; an orphan writer
+also excludes readers, while an orphan export permits other readers.
 
 ## Transfers and platform policy
 
@@ -246,7 +240,7 @@ Export rejects stored indexes and cannot choose another architecture from a
 single manifest. It checks the small source wrapper, then relies on Skopeo for
 transfer validation without a preliminary full graph check or runtime
 post-export digest inspection. It leaves persistent image data and metadata
-unchanged; coordination bookkeeping may be created. Partial destination content
+unchanged and creates no coordination bookkeeping. Partial destination content
 belongs to containers-storage. A later import cannot promise reconstruction of
 an earlier registry representation.
 
@@ -256,11 +250,11 @@ Import and pull write only into private `tmp/operation-<id>/` staging, including
 Skopeo's destination shared-blob directory. Skopeo never writes into the live
 CAS. The producer stops writers and closes writable handles before completing
 the stage. Completion binds the selected descriptor, metadata, and object list
-to the locked ref. Transfers rely on Skopeo validation and small manifest/config
-inspection; they do not run availability or independently hash layers or check
+to an explicit destination ref under the exclusive store guard. Transfers rely
+on Skopeo validation and small manifest/config inspection; they do not run availability or independently hash layers or check
 the full graph around every copy.
 
-Publication follows this order while retaining the store and exclusive ref locks:
+Publication follows this order while retaining the exclusive store lock:
 
 1. Sync staged objects and insert them into the CAS with same-filesystem hard links. Never overwrite existing paths. Reuse requires a regular file of the expected size and successful file and CAS-directory syncs; reuse preserves modification time. Unsupported hard links fail without copying instead.
 2. Exclusively create a raw-image record with matching metadata, an empty real `blobs/`, and `index.json` normalized to one root descriptor while retaining its extra fields. Sync wrapper files, `blobs/`, the raw-image directory, and `raw_images/`.
@@ -276,8 +270,8 @@ through any remaining staging hard link.
 Destination conflicts, including damaged entries, require explicit replacement.
 Replacement accepts symlinks and regular files, rejects directories and special
 entries, and leaves retired raw images for prune. Removal unlinks the terminal
-ref without following it, then syncs its parent; content and bookkeeping remain
-for explicit maintenance. Missing refs are errors, including after removal has
+ref without following it, then syncs its parent; content and empty namespace
+directories remain for explicit maintenance. Missing refs are errors, including after removal has
 initialized a previously absent store.
 
 Failures before ref publication preserve the prior ref, although unreferenced
@@ -297,8 +291,8 @@ and hard links disappear during successful cleanup.
 ## Inventory, checking, and availability
 
 Discovery enumerates the committed namespace rather than hiding malformed refs.
-Inventory inspects pointers and small wrapper files under each ref lock, with
-no graph traversal, CAS access, or external tool invocation. Healthy entries
+Inventory inspects pointers and small wrapper files under the shared store lock,
+with no graph traversal, CAS access, or external tool invocation. Healthy entries
 are `unverified`; damaged refs remain visible. Reports preserve independently
 readable fields and diagnostics, and distinguish incomplete enumeration from
 per-ref damage. Store-level failures are typed errors.
@@ -339,8 +333,8 @@ cannot generally repair immutable shared CAS damage.
 
 Both modes require initialization and hold the exclusive store lock through a
 fresh authoritative ref/graph scan, candidate enumeration, and any mutation.
-Neither creates ref locks or invokes tools. Any unresolved committed-ref error,
-conflicting descriptor, unreadable namespace, or incomplete candidate inspection
+Neither creates coordination files or invokes tools. Any unresolved committed-ref
+error, conflicting descriptor, unreadable namespace, or incomplete candidate inspection
 blocks all deletion, including staging cleanup. Previous check/availability
 results and cached sizes cannot authorize reclamation. Unknown contents instead
 preserve their whole cleanup directory and produce successful skips. Symlinks
@@ -358,11 +352,11 @@ staging/raw-image root modification times. This is object age, not time since
 removal. Exact boundaries are eligible; future timestamps remain ineligible.
 Reusing CAS objects preserves their age.
 
-Unused ref bookkeeping is eligible immediately regardless of content grace:
-empty single-link regular `ref.lock` files with valid encoded absent-ref
-identities, followed by empty encoded lock and ref directories. Committed locks,
-malformed identities, unknown lock subtrees, both bookkeeping roots, and the
-permanent store lock remain. Operational inspection failure blocks all cleanup.
+Empty encoded ref directories are eligible immediately regardless of content
+grace. Parents needed by live refs or longer prefix-sharing names remain, as do
+the `refs/` root and permanent store lock. Prune does not scan, adopt, or reclaim
+unexpected contents beneath `locks/`. Operational namespace inspection failure
+blocks all cleanup.
 
 Before destructive cleanup with any eligible candidate, sync every scanned ref
 directory from children to parents through `refs/`, including empty and
@@ -374,8 +368,8 @@ eligible/removed totals zero with `scan_complete == false`. Dry-run skips this
 barrier and cannot certify its success; deletion with no eligible candidates
 also skips it.
 
-Delete in order: staging, retired raw images, CAS objects, unused ref locks,
-empty lock directories, and empty ref directories. Remove children before
+Delete in order: staging, retired raw images, CAS objects, and empty ref
+directories. Remove children before
 parents and sync affected parents after removal. Stop at the first removal or
 sync error and retain partial progress; do not roll back.
 
@@ -385,7 +379,7 @@ candidate's top-level name is absent; `durability_confirmed == false` records
 visible removals whose parent sync failed. A later retry cannot certify an
 earlier removal that is no longer discoverable. Logical byte counts use regular
 file lengths, counting hard links separately, without promising physical space
-savings. Bookkeeping candidates have zero bytes.
+savings. Empty ref-directory candidates have zero bytes.
 
 ## Source and evidence
 

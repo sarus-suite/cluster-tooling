@@ -190,9 +190,9 @@ malformed or missing image files. Operational inspection failures return errors,
 even when other damage has already been detected. Checker reports and CLI
 output retain their existing behavior, and availability adds no CLI command.
 
-The shared store and selected-ref locks remain held throughout inspection.
+The shared store lock remains held throughout inspection.
 Results describe the content when observed and reserve nothing afterward. A
-later import or pull must check its destination under its own locks, so even
+later import or pull must check its destination under its own exclusive store lock, so even
 acquisition after `Missing` can fail with `RefExists`. Existing refs always
 require explicit replacement. Callers choose whether to report unusable content
 or request replacement; reacquiring unsupported content may reproduce the same
@@ -230,10 +230,12 @@ actual deletion use the same report types. Check `has_errors()` as well as the
 outer `Result`: scan and deletion failures are collected, while preparation and
 lock failures are returned as typed errors. The default grace is 24 hours of
 object age, rather than time since removal;
-unused ref bookkeeping is eligible immediately. Unknown contents are preserved,
+empty encoded ref directories are eligible immediately. Unknown contents are preserved,
 and any incomplete authoritative scan blocks deletion. Candidate byte counts
 are logical file lengths, not physical space savings. Inspect diagnostics,
 partial removals, and `durability_confirmed` before interpreting a report.
+`PruneKind` contains `Staging`, `RawImage`, `Blob`, and `RefDirectory`;
+the former ref-lock variants and their JSON summary keys have been removed.
 
 ## Registry settings and metadata types
 
@@ -254,7 +256,7 @@ descriptor order. Pull defaults can differ from Skopeo's import/export defaults.
 `Sha256Digest` requires a complete lowercase SHA-256 digest. Removal accepts a
 `LocalRef`, rather than an `ImageSelector`, so it never resolves a digest.
 `StoreMetadata::from_json` and `RefMetadata::from_json` validate their versions
-and identity fields. Store format 1 and ref metadata schema 3 have no migration
+and identity fields. Store format 2 and ref metadata schema 3 have no migration
 fallback. Acquisition provenance is descriptive and never a lookup alias.
 
 ## Errors and visible changes

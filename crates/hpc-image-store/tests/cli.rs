@@ -1207,13 +1207,9 @@ fn prune_cli_cleans_bookkeeping_with_default_grace_and_matches_library_reports()
             .success()
     );
     let root = fixture.root();
-    let live = LocalRef::new("tool:t").unwrap();
     let dead = LocalRef::new("unused:tag").unwrap();
-    let live_lock = root
-        .join("locks/refs")
-        .join(live.encoded_path())
-        .join("ref.lock");
-    let inode = fs::metadata(&live_lock).unwrap().ino();
+    let store_lock = root.join("locks/store.lock");
+    let inode = fs::metadata(&store_lock).unwrap().ino();
     let before = snapshots::snapshot(&root);
     let output = fixture
         .command()
@@ -1230,10 +1226,12 @@ fn prune_cli_cleans_bookkeeping_with_default_grace_and_matches_library_reports()
         })
         .unwrap();
     assert_eq!(serde_json::to_value(library).unwrap(), json);
-    for kind in ["ref_lock", "ref_lock_directory", "ref_directory"] {
-        assert_eq!(json["summaries"][kind]["eligible_count"], 1);
-        assert_eq!(json["summaries"][kind]["eligible_bytes"], 0);
-    }
+    assert_eq!(json["summaries"].as_object().unwrap().len(), 4);
+    assert!(json["summaries"].get("ref_lock").is_none());
+    assert!(json["summaries"].get("ref_lock_directory").is_none());
+    assert_eq!(json["summaries"]["ref_directory"]["eligible_count"], 1);
+    assert_eq!(json["summaries"]["ref_directory"]["eligible_bytes"], 0);
+
     for kind in ["blob", "raw_image", "staging"] {
         assert_eq!(json["summaries"][kind]["eligible_count"], 0);
     }
@@ -1244,13 +1242,10 @@ fn prune_cli_cleans_bookkeeping_with_default_grace_and_matches_library_reports()
         .unwrap();
     assert!(human.status.success());
     let text = String::from_utf8(human.stdout).unwrap();
-    for label in [
-        "unused ref locks",
-        "empty lock directories",
-        "empty ref directories",
-    ] {
-        assert!(text.contains(label));
-    }
+    assert!(text.contains("empty ref directories"));
+    assert!(!text.contains("unused ref locks"));
+    assert!(!text.contains("empty lock directories"));
+
     assert_eq!(snapshots::snapshot(&root), before);
     let actual = fixture
         .command()
@@ -1263,10 +1258,38 @@ fn prune_cli_cleans_bookkeeping_with_default_grace_and_matches_library_reports()
         String::from_utf8_lossy(&actual.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&actual.stdout).unwrap();
-    for kind in ["ref_lock", "ref_lock_directory", "ref_directory"] {
-        assert_eq!(json["summaries"][kind]["removed_count"], 1);
-    }
+    assert_eq!(json["summaries"]["ref_directory"]["removed_count"], 1);
+
     assert!(!root.join("refs").join(dead.encoded_path()).exists());
-    assert!(!root.join("locks/refs").join(dead.encoded_path()).exists());
-    assert_eq!(fs::metadata(&live_lock).unwrap().ino(), inode);
+    assert!(!root.join("locks/refs").exists());
+    assert_eq!(fs::metadata(&store_lock).unwrap().ino(), inode);
+}
+
+#[test]
+fn unsupported_store_formats_are_rejected_without_modification() {
+    let fixture = InventoryFixture::new();
+    let root = fixture.root();
+    for version in [1, 99] {
+        std::fs::write(
+            root.join("store.json"),
+            format!("{{\"version\":{version}}}"),
+        )
+        .unwrap();
+        let before = snapshots::snapshot(&root);
+        for args in [
+            vec!["list"],
+            vec!["check", "--all"],
+            vec!["export", "tool:t"],
+            vec!["remove", "tool:t"],
+            vec!["prune", "--dry-run"],
+            vec!["import", "source:tag", "dest:tag"],
+            vec!["pull", "registry.example/image:tag", "dest:tag"],
+        ] {
+            let output = fixture.command().args(&args).output().unwrap();
+            assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported store"));
+            assert_eq!(snapshots::snapshot(&root), before, "{args:?}");
+        }
+    }
 }

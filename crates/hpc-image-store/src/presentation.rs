@@ -271,8 +271,6 @@ pub fn format_prune(report: &crate::PruneReport) -> String {
             crate::PruneKind::Staging => "staging",
             crate::PruneKind::RawImage => "raw images",
             crate::PruneKind::Blob => "blobs",
-            crate::PruneKind::RefLock => "unused ref locks",
-            crate::PruneKind::RefLockDirectory => "empty lock directories",
             crate::PruneKind::RefDirectory => "empty ref directories",
         };
         rows.push(vec![

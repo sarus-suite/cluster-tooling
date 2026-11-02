@@ -19,7 +19,7 @@ use std::{
 pub struct PruneOptions {
     pub dry_run: bool,
     /// Content age, not time since the last ref was removed. Zero is supported.
-    /// Unused lock files and empty ref/lock directories are always eligible.
+    /// Empty ref directories are always eligible.
     pub grace_period: Duration,
 }
 impl Default for PruneOptions {
@@ -38,8 +38,6 @@ pub enum PruneKind {
     Staging,
     RawImage,
     Blob,
-    RefLock,
-    RefLockDirectory,
     RefDirectory,
 }
 
@@ -167,8 +165,6 @@ impl Store {
                 PruneKind::Staging,
                 PruneKind::RawImage,
                 PruneKind::Blob,
-                PruneKind::RefLock,
-                PruneKind::RefLockDirectory,
                 PruneKind::RefDirectory,
             ]
             .into_iter()
@@ -177,12 +173,11 @@ impl Store {
             skipped: Vec::new(),
             diagnostics: Vec::new(),
         };
-        let discovered = discovery::discover_exclusive(&guard)?;
+        let discovered = discovery::discover(&guard)?;
         report.scan_complete = discovered.complete;
         let mut reader = GraphReader::new(&self.layout.blobs());
         let mut live = BTreeSet::new();
         let mut active_raw = BTreeSet::new();
-        let mut committed = BTreeSet::new();
         for item in discovered.entries {
             if let Some(error) = item.diagnostic {
                 report.scan_error(&item.path, error);
@@ -191,8 +186,7 @@ impl Store {
             let Some(reference) = item.local_ref else {
                 continue;
             };
-            committed.insert(reference.clone());
-            let inspected = match refs::inspect_small_exclusive(&guard, &reference) {
+            let inspected = match refs::inspect_small(&guard, &reference) {
                 Ok(inspected) => inspected,
                 Err(error) => {
                     report.scan_error(&item.path, error);
@@ -246,7 +240,6 @@ impl Store {
         }
         candidates.extend(bookkeeping::collect(
             &guard,
-            &committed,
             &discovered.directories,
             &mut report,
         ));
@@ -255,10 +248,7 @@ impl Store {
                 .kind
                 .cmp(&b.report.kind)
                 .then_with(|| {
-                    if matches!(
-                        a.report.kind,
-                        PruneKind::RefDirectory | PruneKind::RefLockDirectory
-                    ) {
+                    if matches!(a.report.kind, PruneKind::RefDirectory) {
                         // Siblings have stable ordering, but parents must wait
                         // until their planned child removals have completed.
                         b.report
@@ -420,7 +410,7 @@ fn enumerate(
                 .and_then(|hex| Sha256Digest::new(format!("sha256:{hex}")).ok())
                 .is_some_and(|digest| live.contains(&digest)),
             PruneKind::Staging => false,
-            PruneKind::RefLock | PruneKind::RefLockDirectory | PruneKind::RefDirectory => {
+            PruneKind::RefDirectory => {
                 unreachable!("bookkeeping has a separate scanner")
             }
         };
@@ -438,7 +428,7 @@ fn enumerate(
                     name.to_str().is_some_and(valid_raw_image_id) && metadata.is_dir()
                 }
                 PruneKind::Staging => name.to_str().is_some_and(operation_id) && metadata.is_dir(),
-                PruneKind::RefLock | PruneKind::RefLockDirectory | PruneKind::RefDirectory => {
+                PruneKind::RefDirectory => {
                     unreachable!("bookkeeping has a separate scanner")
                 }
             };
@@ -533,10 +523,7 @@ fn inspect_tree(
                 ) && canonical_digest(child.file_name().unwrap())),
                 child == Path::new("ref-pointer"),
             ),
-            PruneKind::Blob
-            | PruneKind::RefLock
-            | PruneKind::RefLockDirectory
-            | PruneKind::RefDirectory => {
+            PruneKind::Blob | PruneKind::RefDirectory => {
                 unreachable!("only staged and raw-image trees are scanned here")
             }
         };
@@ -568,10 +555,7 @@ fn inspect_tree(
 
 fn remove_candidate(candidate: &mut Candidate) -> Option<PruneDiagnostic> {
     for entry in &candidate.removals {
-        let bookkeeping = matches!(
-            candidate.report.kind,
-            PruneKind::RefLock | PruneKind::RefLockDirectory | PruneKind::RefDirectory
-        );
+        let bookkeeping = matches!(candidate.report.kind, PruneKind::RefDirectory);
         let remove_point = if bookkeeping {
             "prune.bookkeeping-remove"
         } else {

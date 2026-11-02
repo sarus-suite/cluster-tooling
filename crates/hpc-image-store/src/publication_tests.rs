@@ -1,7 +1,7 @@
 use crate::{
     Error, LocalRef, NamespaceChange, RefMetadata, Sha256Digest, Store, StoreConfig, cas,
     discovery, fsutil,
-    locks::{Operation, RefGuard},
+    locks::{Operation, StoreGuard},
     oci::{self, Descriptor},
     refs,
     staging::{AcquisitionStage, BlobSpec, CompletedStage},
@@ -69,10 +69,11 @@ fn manifest(image: Image) -> Vec<u8> {
 }
 
 fn fixture<'a>(
-    guard: &'a RefGuard<'a>,
+    guard: &'a StoreGuard<'a>,
+    reference: &LocalRef,
     image: Image,
 ) -> (AcquisitionStage<'a>, Descriptor, Vec<BlobSpec>) {
-    let stage = AcquisitionStage::new(guard).unwrap();
+    let stage = AcquisitionStage::new(guard, reference).unwrap();
     let mut objects = vec![(digest(CONFIG_DIGEST), CONFIG.to_vec())];
     match image {
         Image::One | Image::Two => objects.push((root(image), manifest(image))),
@@ -110,12 +111,16 @@ fn fixture<'a>(
     (stage, descriptor, specs)
 }
 
-fn completed<'a>(guard: &'a RefGuard<'a>, image: Image) -> CompletedStage<'a> {
-    let (stage, descriptor, objects) = fixture(guard, image);
+fn completed<'a>(
+    guard: &'a StoreGuard<'a>,
+    reference: &LocalRef,
+    image: Image,
+) -> CompletedStage<'a> {
+    let (stage, descriptor, objects) = fixture(guard, reference, image);
     stage
         .complete(
             &descriptor.digest,
-            RefMetadata::new(guard.reference().clone(), descriptor.digest.clone()),
+            RefMetadata::new(reference.clone(), descriptor.digest.clone()),
             objects,
         )
         .unwrap()
@@ -123,8 +128,8 @@ fn completed<'a>(guard: &'a RefGuard<'a>, image: Image) -> CompletedStage<'a> {
 
 fn publish(handle: &Store, reference: &LocalRef, image: Image, replace: bool) -> PathBuf {
     let store_guard = handle.prepare(Operation::Import).unwrap();
-    let ref_guard = store_guard.lock_ref(reference).unwrap();
-    refs::publish(completed(&ref_guard, image), replace).unwrap()
+    let destination = reference.clone();
+    refs::publish(completed(&store_guard, &destination, image), replace).unwrap()
 }
 
 #[test]
@@ -157,11 +162,11 @@ fn publication_replacement_and_removal_preserve_retired_data_and_lock_identities
     let handle = store(temporary.path());
     let reference = reference();
     let first = publish(&handle, &reference, Image::One, false);
-    let lock = handle.layout.ref_lock(&reference);
+    let lock = handle.layout.store_lock();
     let inode = fs::metadata(&lock).unwrap().ino();
     let guard = handle.prepare(Operation::Import).unwrap();
-    let ref_guard = guard.lock_ref(&reference).unwrap();
-    let old = refs::read(&ref_guard).unwrap();
+    let destination = reference.clone();
+    let old = refs::read(&guard, &destination).unwrap();
     assert_eq!(old.root.digest, root(Image::One));
     assert_eq!(old.metadata.local_ref, reference);
     assert!(
@@ -171,21 +176,24 @@ fn publication_replacement_and_removal_preserve_retired_data_and_lock_identities
     );
     assert_eq!(fs::read_dir(first.join("blobs")).unwrap().count(), 0);
     assert!(matches!(
-        refs::publish(completed(&ref_guard, Image::Two), false),
+        refs::publish(completed(&guard, &destination, Image::Two), false),
         Err(Error::RefExists(_))
     ));
     assert_eq!(
-        refs::read(&ref_guard).unwrap().root.digest,
+        refs::read(&guard, &destination).unwrap().root.digest,
         root(Image::One)
     );
-    let second = refs::publish(completed(&ref_guard, Image::Two), true).unwrap();
+    let second = refs::publish(completed(&guard, &destination, Image::Two), true).unwrap();
     assert_ne!(first, second);
     assert!(first.exists());
-    assert_eq!(refs::read(&ref_guard).unwrap().raw_image, second);
-    refs::remove(&ref_guard).unwrap();
-    assert!(matches!(refs::read(&ref_guard), Err(Error::RefMissing(_))));
+    assert_eq!(refs::read(&guard, &destination).unwrap().raw_image, second);
+    refs::remove(&guard, &destination).unwrap();
     assert!(matches!(
-        refs::remove(&ref_guard),
+        refs::read(&guard, &destination),
+        Err(Error::RefMissing(_))
+    ));
+    assert!(matches!(
+        refs::remove(&guard, &destination),
         Err(Error::RefMissing(_))
     ));
     assert!(first.exists() && second.exists());
@@ -199,20 +207,38 @@ fn shared_guards_reject_mutation_and_metadata_cannot_change_the_destination() {
     let handle = store(temporary.path());
     publish(&handle, &reference(), Image::One, false);
     let guard = handle.prepare(Operation::List).unwrap();
-    let ref_guard = guard.lock_ref(&reference()).unwrap();
+    let destination = reference();
     assert!(matches!(
-        AcquisitionStage::new(&ref_guard),
+        AcquisitionStage::new(&guard, &destination),
         Err(Error::Coordination(_))
     ));
     assert!(matches!(
-        refs::remove(&ref_guard),
+        refs::remove(&guard, &destination),
         Err(Error::Coordination(_))
     ));
-    drop(ref_guard);
+    assert!(matches!(
+        refs::check_destination(&guard, &destination, true),
+        Err(Error::Coordination(_))
+    ));
+    let before = crate::test_snapshot::snapshot(temporary.path());
+    let blob = crate::staging::StagedBlob {
+        digest: root(Image::One),
+        size: 0,
+        path: temporary.path().join("absent-staged-object"),
+    };
+    assert!(matches!(
+        cas::insert(&guard, &blob),
+        Err(Error::Coordination(_))
+    ));
+    assert!(
+        crate::staging::cleanup_published(&guard, &handle.layout.staging().join("absent-stage"))
+            .is_some()
+    );
+    assert_eq!(crate::test_snapshot::snapshot(temporary.path()), before);
     drop(guard);
     let guard = handle.prepare(Operation::Pull).unwrap();
-    let ref_guard = guard.lock_ref(&reference()).unwrap();
-    let (stage, descriptor, objects) = fixture(&ref_guard, Image::Two);
+    let destination = reference();
+    let (stage, descriptor, objects) = fixture(&guard, &destination, Image::Two);
     let wrong_metadata = RefMetadata::new(
         LocalRef::new("another:tag").unwrap(),
         descriptor.digest.clone(),
@@ -223,7 +249,7 @@ fn shared_guards_reject_mutation_and_metadata_cannot_change_the_destination() {
             .is_err()
     );
     assert_eq!(
-        refs::read(&ref_guard).unwrap().root.digest,
+        refs::read(&guard, &destination).unwrap().root.digest,
         root(Image::One)
     );
 }
@@ -256,8 +282,8 @@ fn incompatible_cas_entries_are_never_overwritten() {
         let temporary = tempfile::tempdir().unwrap();
         let handle = store(temporary.path());
         let guard = handle.prepare(Operation::Import).unwrap();
-        let ref_guard = guard.lock_ref(&reference()).unwrap();
-        let stage = completed(&ref_guard, Image::One);
+        let destination = reference();
+        let stage = completed(&guard, &destination, Image::One);
         let target = handle.layout.blob(&root(Image::One));
         let outside = temporary.path().join("outside");
         fs::write(&outside, b"keep").unwrap();
@@ -297,8 +323,8 @@ fn interrupted_acquisition_and_invalid_layouts_preserve_previous_refs() {
         let handle = store(temporary.path());
         publish(&handle, &reference(), Image::One, false);
         let guard = handle.prepare(Operation::Import).unwrap();
-        let ref_guard = guard.lock_ref(&reference()).unwrap();
-        let (stage, descriptor, mut objects) = fixture(&ref_guard, Image::Two);
+        let destination = reference();
+        let (stage, descriptor, mut objects) = fixture(&guard, &destination, Image::Two);
         let mut metadata = RefMetadata::new(reference(), descriptor.digest.clone());
         match damage {
             "version" => fs::write(
@@ -364,7 +390,7 @@ fn interrupted_acquisition_and_invalid_layouts_preserve_previous_refs() {
             "accepted {damage}"
         );
         assert_eq!(
-            refs::read(&ref_guard).unwrap().root.digest,
+            refs::read(&guard, &destination).unwrap().root.digest,
             root(Image::One)
         );
     }
@@ -375,8 +401,8 @@ fn layout_normalization_preserves_content_and_descriptor_extensions() {
     let temporary = tempfile::tempdir().unwrap();
     let handle = store(temporary.path());
     let guard = handle.prepare(Operation::Import).unwrap();
-    let ref_guard = guard.lock_ref(&reference()).unwrap();
-    let (stage, mut descriptor, objects) = fixture(&ref_guard, Image::Index);
+    let destination = reference();
+    let (stage, mut descriptor, objects) = fixture(&guard, &destination, Image::Index);
     descriptor.extra.insert(
         "annotations".into(),
         serde_json::json!({"fixture":"selected"}),
@@ -400,7 +426,7 @@ fn layout_normalization_preserves_content_and_descriptor_extensions() {
         INDEX
     );
     assert_eq!(
-        refs::read(&ref_guard).unwrap().root.digest,
+        refs::read(&guard, &destination).unwrap().root.digest,
         root(Image::Index)
     );
 }
@@ -426,8 +452,8 @@ fn failed_precommit_steps_preserve_the_previous_ref() {
         let handle = store(temporary.path());
         publish(&handle, &reference(), Image::One, false);
         let guard = handle.prepare(Operation::Import).unwrap();
-        let ref_guard = guard.lock_ref(&reference()).unwrap();
-        let stage = completed(&ref_guard, Image::Two);
+        let destination = reference();
+        let stage = completed(&guard, &destination, Image::Two);
         fsutil::fail_once(
             point,
             if point == "blob.link" {
@@ -442,7 +468,7 @@ fn failed_precommit_steps_preserve_the_previous_ref() {
             "wrong result at {point}"
         );
         assert_eq!(
-            refs::read(&ref_guard).unwrap().root.digest,
+            refs::read(&guard, &destination).unwrap().root.digest,
             root(Image::One),
             "changed ref at {point}"
         );
@@ -473,14 +499,14 @@ fn durability_errors_identify_visible_namespace_changes() {
         let handle = store(temporary.path());
         publish(&handle, &reference(), Image::One, false);
         let guard = handle.prepare(Operation::Import).unwrap();
-        let ref_guard = guard.lock_ref(&reference()).unwrap();
-        let stage = completed(&ref_guard, Image::Two);
+        let destination = reference();
+        let stage = completed(&guard, &destination, Image::Two);
         fsutil::fail_once(point, libc::EIO);
         assert!(
             matches!(refs::publish(stage, true), Err(Error::Durability { change, .. }) if change == expected_change)
         );
         assert_eq!(
-            refs::read(&ref_guard).unwrap().root.digest,
+            refs::read(&guard, &destination).unwrap().root.digest,
             root(expected_root)
         );
         assert!(handle.layout.blob(&root(Image::Two)).exists());
@@ -493,19 +519,25 @@ fn unlink_failure_and_post_unlink_sync_failure_have_different_states() {
     let handle = store(temporary.path());
     let raw_image = publish(&handle, &reference(), Image::One, false);
     let guard = handle.prepare(Operation::Remove).unwrap();
-    let ref_guard = guard.lock_ref(&reference()).unwrap();
+    let destination = reference();
     fsutil::fail_once("ref.unlink", libc::EIO);
-    assert!(matches!(refs::remove(&ref_guard), Err(Error::Io { .. })));
-    assert!(refs::read(&ref_guard).is_ok());
+    assert!(matches!(
+        refs::remove(&guard, &destination),
+        Err(Error::Io { .. })
+    ));
+    assert!(refs::read(&guard, &destination).is_ok());
     fsutil::fail_once("ref.remove-sync", libc::EIO);
     assert!(matches!(
-        refs::remove(&ref_guard),
+        refs::remove(&guard, &destination),
         Err(Error::Durability {
             change: NamespaceChange::RefRemoved,
             ..
         })
     ));
-    assert!(matches!(refs::read(&ref_guard), Err(Error::RefMissing(_))));
+    assert!(matches!(
+        refs::read(&guard, &destination),
+        Err(Error::RefMissing(_))
+    ));
     assert!(raw_image.exists());
 }
 
@@ -527,23 +559,23 @@ fn damaged_refs_can_be_replaced_or_unlinked_without_following_them() {
             _ => unreachable!(),
         }
         let guard = handle.prepare(Operation::Remove).unwrap();
-        let ref_guard = guard.lock_ref(&reference()).unwrap();
-        assert!(refs::read(&ref_guard).is_err());
+        let destination = reference();
+        assert!(refs::read(&guard, &destination).is_err());
         assert!(matches!(
-            refs::publish(completed(&ref_guard, Image::Two), false),
+            refs::publish(completed(&guard, &destination, Image::Two), false),
             Err(Error::RefExists(_))
         ));
         if kind == "directory" {
-            assert!(refs::publish(completed(&ref_guard, Image::Two), true).is_err());
-            assert!(refs::remove(&ref_guard).is_err());
+            assert!(refs::publish(completed(&guard, &destination, Image::Two), true).is_err());
+            assert!(refs::remove(&guard, &destination).is_err());
         } else {
-            refs::remove(&ref_guard).unwrap();
+            refs::remove(&guard, &destination).unwrap();
             assert_eq!(fs::read(&outside).unwrap(), b"keep");
             // Explicit replacement itself also accepts malformed entries.
             fs::write(&path, b"damaged again").unwrap();
-            refs::publish(completed(&ref_guard, Image::Two), true).unwrap();
+            refs::publish(completed(&guard, &destination, Image::Two), true).unwrap();
             assert_eq!(
-                refs::read(&ref_guard).unwrap().root.digest,
+                refs::read(&guard, &destination).unwrap().root.digest,
                 root(Image::Two)
             );
         }
@@ -606,8 +638,11 @@ fn readers_reject_escaping_pointers_and_symlinked_raw_image_files() {
             }
         }
         let guard = handle.prepare(Operation::List).unwrap();
-        let ref_guard = guard.lock_ref(&reference()).unwrap();
-        assert!(refs::read(&ref_guard).is_err(), "accepted {damage}");
+        let destination = reference();
+        assert!(
+            refs::read(&guard, &destination).is_err(),
+            "accepted {damage}"
+        );
         assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 }
@@ -624,10 +659,10 @@ fn symlinked_namespace_parents_cannot_redirect_reads_or_mutations() {
     fs::write(outside.path().join("ref"), b"preserve").unwrap();
     symlink(outside.path(), parent).unwrap();
     let guard = handle.prepare(Operation::Import).unwrap();
-    let ref_guard = guard.lock_ref(&reference()).unwrap();
-    assert!(refs::read(&ref_guard).is_err());
-    assert!(refs::remove(&ref_guard).is_err());
-    assert!(refs::publish(completed(&ref_guard, Image::Two), true).is_err());
+    let destination = reference();
+    assert!(refs::read(&guard, &destination).is_err());
+    assert!(refs::remove(&guard, &destination).is_err());
+    assert!(refs::publish(completed(&guard, &destination, Image::Two), true).is_err());
     assert_eq!(fs::read(outside.path().join("ref")).unwrap(), b"preserve");
     assert!(!handle.layout.blob(&root(Image::Two)).exists());
 }
@@ -656,9 +691,9 @@ fn long_and_prefix_sharing_keys_publish_independently() {
             .all(|entry| entry.diagnostic.is_none())
     );
     for reference in references {
-        let ref_guard = guard.lock_ref(&reference).unwrap();
+        let destination = reference.clone();
         assert_eq!(
-            refs::read(&ref_guard).unwrap().metadata.local_ref,
+            refs::read(&guard, &destination).unwrap().metadata.local_ref,
             reference
         );
     }
@@ -860,7 +895,7 @@ fn public_remove_preserves_retired_content_and_reports_unlink_durability() {
     let temporary = tempfile::tempdir().unwrap();
     let handle = store(temporary.path());
     let raw = publish(&handle, &reference(), Image::One, false);
-    let lock = handle.layout.ref_lock(&reference());
+    let lock = handle.layout.store_lock();
     let inode = fs::metadata(&lock).unwrap().ino();
     fsutil::fail_once("ref.unlink", libc::EIO);
     assert!(matches!(handle.remove(&reference()), Err(Error::Io { .. })));
@@ -927,6 +962,12 @@ fn publication_worker() {
     let handle = store(Path::new(&root_path));
     let reference = LocalRef::new(std::env::var("HPC_PUBLICATION_REF").unwrap()).unwrap();
     let action = std::env::var("HPC_PUBLICATION_ACTION").unwrap();
+    let action = if let Some(action) = action.strip_prefix("contended-") {
+        fsutil::pause_once("lock.contended");
+        action.to_owned()
+    } else {
+        action
+    };
     println!("PUBLICATION_STARTED");
     std::io::stdout().flush().unwrap();
     if action.starts_with("stage1-") {
@@ -969,20 +1010,9 @@ fn publication_worker() {
         };
         let report = handle.check(&scope).unwrap();
         assert!(!report.has_errors(), "{report:?}");
-        if action == "check-scan-remove" {
-            assert!(report.entries.is_empty());
-        } else {
-            assert_eq!(report.entries.len(), 1);
-            assert_eq!(report.entries[0].status, CheckStatus::Passed);
-            assert_eq!(
-                report.entries[0].stored_root,
-                Some(root(if action == "check-scan-replace" {
-                    Image::Two
-                } else {
-                    Image::One
-                }))
-            );
-        }
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].status, CheckStatus::Passed);
+        assert_eq!(report.entries[0].stored_root, Some(root(Image::One)));
         println!("PUBLICATION_READY");
         return;
     }
@@ -990,16 +1020,12 @@ fn publication_worker() {
         fsutil::pause_once("inventory.discovered");
         let report = handle.list().unwrap();
         assert!(!report.has_errors());
-        if action == "inventory-remove" {
-            assert!(report.entries.is_empty());
-        } else {
-            assert_eq!(report.entries.len(), 1);
-            assert_eq!(report.entries[0].stored_root, Some(root(Image::Two)));
-            assert_eq!(
-                report.entries[0].metadata.as_ref().unwrap().stored_root,
-                root(Image::Two)
-            );
-        }
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].stored_root, Some(root(Image::One)));
+        assert_eq!(
+            report.entries[0].metadata.as_ref().unwrap().stored_root,
+            root(Image::One)
+        );
         println!("PUBLICATION_READY");
         return;
     }
@@ -1015,15 +1041,12 @@ fn publication_worker() {
             &guard,
             &ImageSelector::new(format!("{}@{}", reference.name(), root(Image::One))).unwrap(),
         );
-        if action == "select-after-remove" {
-            assert!(matches!(selected, Err(Error::DigestMissing(_))));
-        } else {
-            let selected = selected.unwrap();
-            if action == "select-after-replace" {
-                assert_eq!(selected.reference().as_str(), "analysis/tool:zzzz");
-            }
-            assert_eq!(refs::read(&selected).unwrap().root.digest, root(Image::One));
-        }
+        let selected = selected.unwrap();
+        assert_eq!(selected, reference);
+        assert_eq!(
+            refs::read(&guard, &selected).unwrap().root.digest,
+            root(Image::One)
+        );
         println!("PUBLICATION_READY");
         return;
     }
@@ -1039,9 +1062,9 @@ fn publication_worker() {
             Operation::Import
         })
         .unwrap();
-    let ref_guard = guard.lock_ref(&reference).unwrap();
+    let destination = reference.clone();
     if action == "read" {
-        let resolved = refs::read(&ref_guard).unwrap();
+        let resolved = refs::read(&guard, &destination).unwrap();
         assert_eq!(resolved.root.digest, root(Image::Two));
         assert_eq!(resolved.metadata.stored_root, resolved.root.digest);
         println!("PUBLICATION_READY");
@@ -1052,7 +1075,12 @@ fn publication_worker() {
     } else {
         Image::Two
     };
-    let stage = completed(&ref_guard, image);
+    let stage = completed(&guard, &destination, image);
+    if action == "race" {
+        refs::publish(stage, false).unwrap();
+        println!("PUBLICATION_READY");
+        return;
+    }
     println!("PUBLICATION_READY");
     std::io::stdout().flush().unwrap();
     let mut instruction = String::new();
@@ -1065,27 +1093,41 @@ fn publication_worker() {
     refs::publish(stage, action != "race").unwrap();
 }
 
+/// The reader is paused inside its shared operation. A real contended flock
+/// proves the writer cannot change even a previously enumerated namespace.
+fn finish_reader_before_mutation(root: &Path, reader: &mut Worker, remove: bool) {
+    let action = if remove {
+        "contended-remove-public"
+    } else {
+        "contended-replace"
+    };
+    let mut writer = Worker::start(root, &reference(), action);
+    writer.wait_for("PUBLICATION_PAUSED");
+    reader.proceed();
+    reader.wait_for("PUBLICATION_READY");
+    reader.finish();
+    writer.proceed();
+    writer.wait_for("PUBLICATION_READY");
+    if !remove {
+        writer.proceed();
+    }
+    writer.finish();
+}
+
 #[test]
-fn inventory_revalidates_refs_replaced_or_removed_after_enumeration() {
+fn inventory_retains_stable_namespace_after_enumeration() {
     for action in ["inventory-remove", "inventory-replace"] {
         let temporary = tempfile::tempdir().unwrap();
         let handle = store(temporary.path());
         publish(&handle, &reference(), Image::One, false);
         let mut reader = Worker::start(temporary.path(), &reference(), action);
         reader.wait_for("PUBLICATION_PAUSED");
-        if action == "inventory-remove" {
-            handle.remove(&reference()).unwrap();
-        } else {
-            publish(&handle, &reference(), Image::Two, true);
-        }
-        reader.proceed();
-        reader.wait_for("PUBLICATION_READY");
-        reader.finish();
+        finish_reader_before_mutation(temporary.path(), &mut reader, action.ends_with("remove"));
     }
 }
 
 #[test]
-fn digest_resolution_revalidates_candidates_after_namespace_scan() {
+fn digest_resolution_retains_candidates_after_namespace_scan() {
     for action in ["select-after-remove", "select-after-replace"] {
         let temporary = tempfile::tempdir().unwrap();
         let handle = store(temporary.path());
@@ -1100,14 +1142,7 @@ fn digest_resolution_revalidates_candidates_after_namespace_scan() {
         }
         let mut reader = Worker::start(temporary.path(), &reference(), action);
         reader.wait_for("PUBLICATION_PAUSED");
-        if action == "select-after-remove" {
-            handle.remove(&reference()).unwrap();
-        } else {
-            publish(&handle, &reference(), Image::Two, true);
-        }
-        reader.proceed();
-        reader.wait_for("PUBLICATION_READY");
-        reader.finish();
+        finish_reader_before_mutation(temporary.path(), &mut reader, action.ends_with("remove"));
     }
 }
 
@@ -1214,7 +1249,7 @@ impl Drop for Worker {
 }
 
 #[test]
-fn separate_processes_race_to_insert_identical_content() {
+fn separate_processes_serialize_identical_content_publication() {
     let temporary = tempfile::tempdir().unwrap();
     let handle = store(temporary.path());
     drop(handle.prepare(Operation::Import).unwrap());
@@ -1229,9 +1264,6 @@ fn separate_processes_race_to_insert_identical_content() {
         .collect();
     for worker in &workers {
         worker.wait_for("PUBLICATION_READY");
-    }
-    for worker in &mut workers {
-        worker.proceed();
     }
     for worker in &mut workers {
         worker.finish();
@@ -1288,8 +1320,8 @@ fn killed_publication_exposes_only_complete_refs_and_retains_abandoned_data() {
         writer.child.kill().unwrap();
         writer.child.wait().unwrap();
         let guard = handle.prepare(Operation::List).unwrap();
-        let ref_guard = guard.lock_ref(&reference()).unwrap();
-        let resolved = refs::read(&ref_guard).unwrap();
+        let destination = reference();
+        let resolved = refs::read(&guard, &destination).unwrap();
         assert_eq!(resolved.root.digest, root(expected_image));
         if action == "interrupt" {
             assert_eq!(resolved.raw_image, old);
@@ -1301,7 +1333,7 @@ fn killed_publication_exposes_only_complete_refs_and_retains_abandoned_data() {
     }
 }
 
-// These fixtures capture format-1 remnants. They deliberately create no future
+// These fixtures capture format-2 remnants without recovery records. They deliberately create no future
 // operation record and make no claim that these remnants can be recovered.
 struct InterruptedFixture {
     mutation: crate::test_support::MutationFixture,
@@ -1338,11 +1370,12 @@ fn interrupted_fixture(action: &str) -> InterruptedFixture {
 fn interruption_worker(handle: &Store, reference: &LocalRef, action: &str) {
     let images = crate::test_support::SharedImages::new();
     let guard = handle.prepare(Operation::Import).unwrap();
-    let selected = guard.lock_ref(reference).unwrap();
+    let selected = reference.clone();
     let stage = if action == "stage1-after-unlink" {
         None
     } else {
         Some(crate::test_support::stage_image(
+            &guard,
             &selected,
             &images.replacement,
         ))
@@ -1368,7 +1401,7 @@ fn interruption_worker(handle: &Store, reference: &LocalRef, action: &str) {
         }
         "stage1-after-unlink" => {
             fsutil::pause_once("ref.remove-sync");
-            refs::remove(&selected).unwrap();
+            refs::remove(&guard, &selected).unwrap();
         }
         _ => panic!("unknown interruption scenario: {action}"),
     }
@@ -1413,8 +1446,8 @@ fn layered_replacement_fixture_preserves_shared_objects_and_retired_content() {
         (&fixture.target, &fixture.images.replacement, &replacement),
         (&fixture.keeper, &fixture.images.keeper, &fixture.keeper_raw),
     ] {
-        let selected = guard.lock_ref(reference).unwrap();
-        let resolved = refs::read(&selected).unwrap();
+        let selected = reference.clone();
+        let resolved = refs::read(&guard, &selected).unwrap();
         assert_eq!(resolved.root.digest, image.root.digest);
         assert_eq!(&resolved.raw_image, raw);
     }
@@ -1477,13 +1510,19 @@ fn interrupted_layered_mutations_expose_expected_refs_and_preserve_shared_conten
         let published_additions = matches!(action, "stage1-before-rename" | "stage1-after-rename");
         assert_eq!(interrupted.new_raw.is_some(), published_additions);
         let guard = handle.prepare(Operation::List).unwrap();
-        let keeper = guard.lock_ref(&fixture.keeper).unwrap();
-        assert_eq!(refs::read(&keeper).unwrap().raw_image, fixture.keeper_raw);
-        let target = guard.lock_ref(&fixture.target).unwrap();
+        let keeper = fixture.keeper.clone();
+        assert_eq!(
+            refs::read(&guard, &keeper).unwrap().raw_image,
+            fixture.keeper_raw
+        );
+        let target = fixture.target.clone();
         if action == "stage1-after-unlink" {
-            assert!(matches!(refs::read(&target), Err(Error::RefMissing(_))));
+            assert!(matches!(
+                refs::read(&guard, &target),
+                Err(Error::RefMissing(_))
+            ));
         } else {
-            let resolved = refs::read(&target).unwrap();
+            let resolved = refs::read(&guard, &target).unwrap();
             let (image, raw) = if action == "stage1-after-rename" {
                 (
                     &fixture.images.replacement,
@@ -1520,11 +1559,11 @@ fn unsupported_hard_link_does_not_fall_back_to_copying() {
     let temporary = tempfile::tempdir().unwrap();
     let handle = store(temporary.path());
     let guard = handle.prepare(Operation::Import).unwrap();
-    let ref_guard = guard.lock_ref(&reference()).unwrap();
-    let stage = completed(&ref_guard, Image::One);
+    let destination = reference();
+    let stage = completed(&guard, &destination, Image::One);
     fsutil::fail_once("blob.link", libc::EXDEV);
     assert!(
-        matches!(cas::insert(&ref_guard, &stage.blobs()[0]), Err(Error::Io { source, .. }) if source.raw_os_error() == Some(libc::EXDEV))
+        matches!(cas::insert(&guard, &stage.blobs()[0]), Err(Error::Io { source, .. }) if source.raw_os_error() == Some(libc::EXDEV))
     );
     assert_eq!(fs::read_dir(handle.layout.blobs()).unwrap().count(), 0);
 }
@@ -1724,7 +1763,7 @@ fn public_check_preserves_unknown_namespace_and_reports_incomplete_scans() {
 }
 
 #[test]
-fn checking_holds_selected_ref_and_store_locks_until_graph_reading_finishes() {
+fn checking_holds_store_lock_until_graph_reading_finishes() {
     for action in ["replace", "remove-public", "check-exclusive"] {
         let temporary = tempfile::tempdir().unwrap();
         let handle = store(temporary.path());
@@ -1748,20 +1787,13 @@ fn checking_holds_selected_ref_and_store_locks_until_graph_reading_finishes() {
 }
 
 #[test]
-fn checking_revalidates_refs_after_namespace_discovery() {
+fn checking_retains_stable_namespace_after_discovery() {
     for action in ["check-scan-remove", "check-scan-replace"] {
         let temporary = tempfile::tempdir().unwrap();
         let handle = store(temporary.path());
         publish(&handle, &reference(), Image::One, false);
         let mut checker = Worker::start(temporary.path(), &reference(), action);
         checker.wait_for("PUBLICATION_PAUSED");
-        if action == "check-scan-remove" {
-            handle.remove(&reference()).unwrap();
-        } else {
-            publish(&handle, &reference(), Image::Two, true);
-        }
-        checker.proceed();
-        checker.wait_for("PUBLICATION_READY");
-        checker.finish();
+        finish_reader_before_mutation(temporary.path(), &mut checker, action.ends_with("remove"));
     }
 }

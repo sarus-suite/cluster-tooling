@@ -43,15 +43,14 @@ impl Store {
     /// repairs an image, checks registry freshness, hashes blobs, or unpacks them.
     pub fn availability(&self, selector: &ImageSelector) -> Result<ImageAvailability> {
         let guard = self.prepare(Operation::Availability)?;
-        let ref_guard = match inventory::select(&guard, selector) {
+        let reference = match inventory::select(&guard, selector) {
             Ok(selected) => selected,
             Err(Error::DigestMissing(_)) => return Ok(ImageAvailability::Missing),
             Err(error) => return Err(error),
         };
-        let reference = ref_guard.reference();
-        let path = self.layout.ref_entry(reference);
+        let path = self.layout.ref_entry(&reference);
         let mut reader = GraphReader::new(&self.layout.blobs());
-        let inspected = inspection::inspect(&ref_guard, &mut reader, || {
+        let inspected = inspection::inspect(&guard, &reference, &mut reader, || {
             fsutil::checkpoint("availability.selected", &path)
         })?;
         if inspected.missing {
@@ -73,7 +72,7 @@ impl Store {
         drop(reader);
         // Guards remain live through classification; neither selection nor
         // validation provides a reservation once this call returns.
-        outcome(findings, reference)
+        outcome(findings, &reference)
     }
 }
 

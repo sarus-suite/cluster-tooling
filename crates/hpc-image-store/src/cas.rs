@@ -1,11 +1,11 @@
 use crate::{
-    NamespaceChange, Result, error::io_error, fsutil, locks::RefGuard, staging::StagedBlob,
+    NamespaceChange, Result, error::io_error, fsutil, locks::StoreGuard, staging::StagedBlob,
 };
 use std::fs;
 
 /// Insert without overwrite. The caller's completed stage guarantees that the
 /// source has no live writers; its inode becomes immutable store content.
-pub(crate) fn insert(guard: &RefGuard<'_>, blob: &StagedBlob) -> Result<()> {
+pub(crate) fn insert(guard: &StoreGuard<'_>, blob: &StagedBlob) -> Result<()> {
     guard.require_exclusive()?;
     let source = fsutil::sized_object(&blob.path, blob.size)?;
     fsutil::checkpoint("blob.source-sync", &blob.path)?;
@@ -39,8 +39,8 @@ pub(crate) fn insert(guard: &RefGuard<'_>, blob: &StagedBlob) -> Result<()> {
             &target,
         )?;
     } else {
-        // Another publisher may have linked the object but not yet synced its
-        // directory. Confirm and sync the winning object before relying on it.
+        // An interrupted publisher may have linked the object without syncing
+        // its directory. Confirm and sync existing content before relying on it.
         let existing = fsutil::sized_object(&target, blob.size)?;
         fsutil::checkpoint("blob.reuse-sync", &target)?;
         existing

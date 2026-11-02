@@ -6,7 +6,7 @@ use crate::{
     graph::GraphReader,
     inspection,
     inventory::{self, serialize_path},
-    locks::{Operation, RefGuard},
+    locks::{Operation, StoreGuard},
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -87,8 +87,8 @@ impl Store {
         };
         match scope {
             CheckScope::Image(selector) => {
-                let ref_guard = inventory::select(&guard, selector)?;
-                inspect(&ref_guard, &mut reader, &mut report, false)?;
+                let reference = inventory::select(&guard, selector)?;
+                inspect(&guard, &reference, &mut reader, &mut report, false)?;
             }
             CheckScope::All => {
                 let discovered = discovery::discover(&guard)?;
@@ -98,10 +98,7 @@ impl Store {
                     if let Some(error) = item.diagnostic {
                         failed(&mut report, item.path, item.local_ref, error);
                     } else if let Some(reference) = item.local_ref {
-                        match guard.lock_ref(&reference) {
-                            Ok(ref_guard) => inspect(&ref_guard, &mut reader, &mut report, true)?,
-                            Err(error) => failed(&mut report, item.path, Some(reference), error),
-                        }
+                        inspect(&guard, &reference, &mut reader, &mut report, true)?;
                     }
                 }
             }
@@ -129,14 +126,14 @@ fn failed(report: &mut CheckReport, path: PathBuf, reference: Option<LocalRef>, 
 }
 
 fn inspect(
-    guard: &RefGuard<'_>,
+    guard: &StoreGuard<'_>,
+    reference: &LocalRef,
     reader: &mut GraphReader,
     report: &mut CheckReport,
     skip_missing: bool,
 ) -> Result<()> {
-    let reference = guard.reference();
     let path = guard.layout().ref_entry(reference);
-    let inspected = inspection::inspect(guard, reader, || {
+    let inspected = inspection::inspect(guard, reference, reader, || {
         fsutil::checkpoint("check.selected", &path)
     })?;
     if inspected.missing && skip_missing {

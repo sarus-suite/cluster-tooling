@@ -167,8 +167,10 @@ structure, supported types, file presence, and sizes. It does not hash blobs,
 unpack layers, compare cached display fields against content, or certify execution.
 Same-size corruption can remain undetected. Passing internal index checks does
 not imply index acquisition or export support. Check never repairs or removes
-content; it may create coordination bookkeeping. All-store inventory and checks
-observe individual refs coherently without promising a store-wide snapshot.
+content and creates no coordination bookkeeping. All-store inventory and checks
+hold a shared store lock throughout inspection and observe a stable namespace.
+Import, pull, remove, and prune take the exclusive store lock and wait for
+readers; writers targeting different names also serialize.
 
 ## Remove refs and reclaim content
 
@@ -193,9 +195,10 @@ observations never authorize later pruning.
 Content grace defaults to 24 hours of object age, not time since removal.
 `--grace-period` accepts integer seconds with an optional `s`, `m`, `h`, or `d`
 suffix, including `0`. Old content can become eligible immediately after its
-last ref is removed. Future timestamps remain ineligible. Recognized unused ref
-locks and empty ref/lock directories are eligible immediately regardless of
-grace; committed locks and the permanent store lock remain.
+last ref is removed. Future timestamps remain ineligible.
+Empty encoded ref directories are eligible immediately regardless of grace.
+Namespace prefixes needed by other names and the permanent store lock remain.
+Prune neither scans nor reclaims unexpected contents beneath `locks/`.
 
 Dry-run changes no persistent state. It does not attempt the namespace sync
 barrier required before destructive pruning and cannot certify that a later

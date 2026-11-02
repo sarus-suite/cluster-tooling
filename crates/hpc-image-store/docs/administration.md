@@ -67,9 +67,10 @@ The store relies on cooperating processes under one owner, not protection from
 that owner's direct modification. Keep published blobs immutable and preserve
 the permanent `locks/store.lock` identity.
 
-Store format 1 and metadata schema 3 have no migration fallback. Explicitly
+Store format 2 and metadata schema 3 have no migration fallback. Explicitly
 recreate obsolete disposable development stores or refs when appropriate;
-never assume the library will delete or convert them.
+format 1 is rejected without modification. Never assume the library will delete
+or convert existing stores.
 
 ## Containers-storage and registry configuration
 
@@ -108,9 +109,10 @@ predicted physical reclaim totals.
 
 Use `list` and `check` to inspect state, then explicitly remove intended refs and
 review `prune --dry-run`. Default content grace is 24 hours of object age, while
-recognized unused bookkeeping is immediately eligible. Prune requires a complete
+empty encoded ref directories are immediately eligible. Prune requires a complete
 fresh authoritative scan and waits for active operations, including surviving
-copy children. Do not manually remove locks to bypass a timeout or delete CAS
+copy children. All mutations hold the exclusive store lock, even across different
+names; shared queries can coexist. Do not manually remove locks to bypass a timeout or delete CAS
 objects based on cached reports.
 
 ## Failures, backups, and recovery limits

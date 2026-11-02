@@ -3,7 +3,9 @@
 The first PoC implements single-platform containers-storage import/export,
 manifest-preserving registry pull, inventory, structural graph checking,
 explicit ref removal, conservative pruning, and library-only availability.
-The CLI has seven commands. Store format 1 and ref metadata schema 3 are retained.
+The CLI has seven commands. Store format 2 and ref metadata schema 3 are used.
+PoC v2 Stage 2 replaces per-ref locks with one permanent store lock; the content
+lifecycle remains unchanged pending later stages.
 The crate remains private to this workspace; application integration is deferred.
 
 The [architecture](architecture.md) is authoritative. The [user guide](user-guide.md),
@@ -18,7 +20,7 @@ results and design/planning context; they do not prescribe future work.
 | Preparation and coordination | `store`, `initialization`, `layout`, `locks`; initialization and subprocess tests |
 | Transfers and publication | `transfer`, `pull`, `subprocess`, `staging`, `cas`, `refs`; publication fixtures and controlled tool tests |
 | Inspection | `discovery`, `inventory`, `inspection`, `graph`, `check`, `availability`; complete graph and availability tests |
-| Maintenance | `prune` and its bookkeeping module; reachability, partial-removal, namespace-sync, and lock-reclamation regressions |
+| Maintenance | `prune` and its bookkeeping module; reachability, partial-removal, namespace-sync, and empty-ref-directory regressions |
 | CLI and presentation | `main`, `presentation`; CLI integration tests, human/JSON parity |
 | Real tools | `tests/real_transfers.rs`, `tests/registry_pull.rs`, shared disposable-storage and registry fixtures |
 
@@ -28,6 +30,53 @@ point. Keep relative repository links out of the included library guide; use
 API references or self-contained explanations so generated rustdoc navigation
 also works.
 
+## PoC v2 Stage 2: single-store coordination and format 2
+
+Stage 2 is complete. Import, pull, remove, and both prune modes hold the
+exclusive store lock; export, list, check, and availability hold shared access.
+Selection returns an explicit ref identity, while stages and resolved content
+borrow the retained store guard. Copy children inherit one locked descriptor;
+the parent's descriptors remain close-on-exec. There are no ref-lock directories
+in new stores. Format 1 and unsupported markers are rejected without migration,
+and ref metadata remains schema 3. Prune still reclaims content and empty encoded
+ref directories; its obsolete ref-lock report variants and output were removed.
+
+The [acceptance inventory](pocv2-acceptance.md) maps LOCK-01 through LOCK-04,
+FORMAT-01, and SETUP-01 to concrete tests. Discovery tests now pause a reader and
+prove a writer reaches actual contention before letting the reader finish.
+Identical-content writers publish serially, and concurrent setup mixes import
+and pull. Controlled descriptor inspection verifies single-lock inheritance and
+unrelated descriptor closure. Orphan tests also verify that a surviving writer
+excludes readers while a surviving export permits shared access.
+
+On 2 November 2026, the full `cargo test --locked -p hpc-image-store -- --nocapture`
+run passed 198 tests: 162 library tests, 23 CLI tests, one real-transfer test,
+five controlled-registry tests, and seven doctests. Five library subprocess
+helpers, one CLI helper, and the Docker Hub smoke test remained ignored by the
+top-level runner; owning ordinary tests invoked the helpers. No live registry
+request was made. Real transfers used the existing disposable overlay-storage
+harness with Podman 5.4.2 and Skopeo 1.18.0.
+
+The initial run exposed an obsolete test assumption that a paused waiter itself
+blocks prune after the holder exits. The corrected regression permits prune
+before the waiter acquires its lock and verifies that the permanent inode
+survives; once acquired, the waiter excludes prune. Clippy also identified
+mechanical test cleanup after removing the old lock categories. After the full
+suite passed, the affected library and CLI targets were rerun following final
+test cleanup and strengthened mutation/format assertions; all 185 tests passed.
+Crate check, all-target Clippy with warnings denied, formatting, the API
+documentation build with rustdoc warnings denied, and `git diff --check` passed.
+Current Markdown links and generated API navigation were reviewed. Cargo and
+real-tool tests used the configured cache and disposable storage outside the
+filesystem sandbox.
+
+Import/pull cleanup warnings, retired content, availability, and prune remain.
+Remove can still initialize, and list cannot initialize yet. There is no durable
+mutation record or automatic recovery. Format 2 alone does not imply the final
+PoC v2 lifecycle guarantees or compatibility between incomplete stages. Local
+process tests demonstrate coordination and failure ordering, without qualifying
+crash persistence or Lustre/VAST cross-node behavior.
+
 ## PoC v2 Stage 1: contracts and acceptance fixtures
 
 Stage 1 of the [PoC v2 implementation plan](pocv2-implementation-plan.md) is
@@ -35,9 +84,9 @@ complete. The [acceptance inventory](pocv2-acceptance.md) connects the plan's
 requirements to fixtures, observable acceptance cases, test targets, and evidence,
 with stable acceptance identifiers assigned to later stages. The implementation
 plan defines the target contracts and stage boundaries.
-Those production changes remain planned; the architecture still describes the
-implemented first PoC, including format 1, metadata schema 3, per-ref locking,
-availability, prune, and deferred reclamation.
+At Stage 1 completion, production changes remained planned and the architecture
+described format 1, metadata schema 3, per-ref locking, availability, prune,
+and deferred reclamation. Stage 2 above supersedes its locking and format state.
 
 The test-only `test_support` module supplies accurately hashed synthetic images
 with shared and unique layers, original/keeper/replacement content sets, a
@@ -63,8 +112,8 @@ integration, or doctest targets, nor repeat the full check/Clippy/rustdoc checks
 The historical full-suite results below remain historical. Synthetic layers
 exercise structural storage behavior, not image execution; local interruption
 tests establish observed states rather than crash persistence or Lustre/VAST
-qualification. Stage 2 is the next planned implementation stage, covering the
-single store lock and format boundary; it has not been implemented by Stage 1.
+qualification. At that time Stage 2 was the next planned implementation stage,
+covering the single store lock and format boundary.
 
 ## PoC v1 closure record
 
@@ -183,14 +232,14 @@ The test covers library and JSON CLI round trips, OCI compression, shared-layer
 reuse, explicit platform selection, replacement, tag movement after inspection,
 image removal before copying, missing-content export failure, staging cleanup,
 and unchanged configuration. During a real containers-storage export, it also
-terminates the CLI parent, proves that the surviving Skopeo retains both store
-and ref locks, and verifies that the exported image is complete after it exits.
+terminates the CLI parent, proves that the surviving Skopeo retains the single
+store lock, and verifies that the exported image is complete after it exits.
 
 The independent real-Skopeo OCI-to-OCI lock test needs no Podman storage and
 also runs as part of the ordinary crate suite:
 
 ```sh
-cargo test --locked -p hpc-image-store actual_skopeo_retains_locks_after_parent_termination -- --nocapture
+cargo test --locked -p hpc-image-store actual_skopeo_retains_lock_after_parent_termination -- --nocapture
 ```
 
 ### Docker Hub smoke test (explicit only)

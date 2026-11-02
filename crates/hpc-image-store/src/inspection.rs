@@ -1,10 +1,10 @@
 //! Shared selected-ref inspection. Findings retain causes until each caller
 //! decides whether to collect a diagnostic or propagate an operational error.
 use crate::{
-    DiagnosticCategory, Error, ListDiagnostic, Sha256Digest,
+    DiagnosticCategory, Error, ListDiagnostic, LocalRef, Sha256Digest,
     error::io_error,
     graph::{GraphReader, GraphReport},
-    locks::RefGuard,
+    locks::StoreGuard,
     refs,
 };
 use std::{
@@ -154,18 +154,19 @@ pub(crate) struct ImageInspection {
 }
 
 pub(crate) fn inspect(
-    guard: &RefGuard<'_>,
+    guard: &StoreGuard<'_>,
+    reference: &LocalRef,
     reader: &mut GraphReader,
     after_wrappers: impl FnOnce() -> crate::Result<()>,
 ) -> crate::Result<ImageInspection> {
-    let inspected = match refs::inspect_small(guard) {
+    let inspected = match refs::inspect_small(guard, reference) {
         Ok(inspected) => inspected,
         Err(error) => {
             return Ok(ImageInspection {
                 missing: matches!(error, Error::RefMissing(_)),
                 stored_root: None,
                 wrapper_findings: vec![Finding::wrapper(
-                    &guard.layout().ref_entry(guard.reference()),
+                    &guard.layout().ref_entry(reference),
                     error,
                 )],
                 graph: None,

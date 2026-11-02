@@ -8,7 +8,6 @@ pub(crate) const DIRECTORIES: &[&str] = &[
     "raw_images",
     "tmp",
     "locks",
-    "locks/refs",
 ];
 pub(crate) const INIT_TEMP: &str = ".store-init.json";
 
@@ -34,12 +33,6 @@ impl Layout {
             .join("refs")
             .join(reference.encoded_path())
             .join("ref")
-    }
-    pub fn ref_lock(&self, reference: &LocalRef) -> PathBuf {
-        self.root
-            .join("locks/refs")
-            .join(reference.encoded_path())
-            .join("ref.lock")
     }
     pub fn blobs(&self) -> PathBuf {
         self.root.join("blobs/sha256")

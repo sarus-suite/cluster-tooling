@@ -46,12 +46,12 @@ separate operations; review prune's report before deleting content.
 - [Administration](docs/administration.md): installation, storage preparation, and maintenance.
 - [Development and PoC handoff](docs/development.md): source orientation, tests, and current validation results.
 - [Deferred validation](docs/deferred-validation.md): qualification still needed beyond this first pass.
-- [PoC v2 implementation plan](docs/pocv2-implementation-plan.md): staged next-milestone work; Stage 1 adds test fixtures and an acceptance reference only.
+- [PoC v2 implementation plan](docs/pocv2-implementation-plan.md): staged next-milestone work; current status: Stage 2.
 - [Deferred PoC v3 assessment](docs/pocv3-reference-resolution-assessment.md): reference resolution, inherited Skopeo behavior, and future Sarus integration; outside PoC v2.
 
 The PoC stores one platform-specific OCI manifest per ref. A registry tag may
 select it through an index, but complete-index acquisition, multi-platform stored
 images, and index export remain unsupported. Structural checks do not hash blobs
 or certify that an image will run. Lustre/VAST cross-node behavior and crash
-durability remain unqualified. Store format 1 and ref metadata schema 3 are retained;
-obsolete development stores are not migrated automatically.
+durability remain unqualified. Store format 2 and ref metadata schema 3 are used;
+format-1 stores are rejected without migration.

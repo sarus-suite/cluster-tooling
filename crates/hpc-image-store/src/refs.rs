@@ -5,7 +5,7 @@ use crate::{
     initialization::{create_directory, require_directory},
     inspection::Finding,
     layout::{Layout, valid_raw_image_id},
-    locks::{RefGuard, StoreGuard},
+    locks::StoreGuard,
     oci::{self, Descriptor},
     staging::CompletedStage,
 };
@@ -20,10 +20,6 @@ fn invalid(path: &Path, reason: &'static str) -> Error {
         path: path.to_owned(),
         reason,
     }
-}
-
-fn namespace_entry(guard: &RefGuard<'_>) -> Result<Option<fs::Metadata>> {
-    namespace_entry_at(guard.layout(), guard.reference())
 }
 
 fn namespace_entry_at(layout: &Layout, reference: &LocalRef) -> Result<Option<fs::Metadata>> {
@@ -63,24 +59,29 @@ fn replaceable(path: &Path, metadata: &fs::Metadata) -> Result<()> {
     Ok(())
 }
 
-/// Publish only after content and a matching raw image are durable. The ref's
-/// exclusive guard serializes the destination policy and namespace change.
-pub(crate) fn check_destination(guard: &RefGuard<'_>, replace: bool) -> Result<()> {
+/// Publish only after content and a matching raw image are durable. The
+/// exclusive store guard serializes the destination policy and namespace change.
+pub(crate) fn check_destination(
+    guard: &StoreGuard<'_>,
+    reference: &LocalRef,
+    replace: bool,
+) -> Result<()> {
     guard.require_exclusive()?;
-    if let Some(metadata) = namespace_entry(guard)? {
+    if let Some(metadata) = namespace_entry_at(guard.layout(), reference)? {
         if !replace {
-            return Err(Error::RefExists(guard.reference().clone()));
+            return Err(Error::RefExists(reference.clone()));
         }
-        replaceable(&guard.layout().ref_entry(guard.reference()), &metadata)?;
+        replaceable(&guard.layout().ref_entry(reference), &metadata)?;
     }
     Ok(())
 }
 
 pub(crate) fn publish(stage: CompletedStage<'_>, replace: bool) -> Result<PathBuf> {
     let guard = stage.guard();
+    let reference = stage.reference();
     guard.require_exclusive()?;
-    let destination = guard.layout().ref_entry(guard.reference());
-    check_destination(guard, replace)?;
+    let destination = guard.layout().ref_entry(reference);
+    check_destination(guard, reference, replace)?;
     for blob in stage.blobs() {
         cas::insert(guard, blob)?;
     }
@@ -97,11 +98,11 @@ pub(crate) fn publish(stage: CompletedStage<'_>, replace: bool) -> Result<PathBu
     fsutil::sync_before_commit(&raw_image, "raw_image.directory-sync")?;
     fsutil::sync_before_commit(&guard.layout().raw_images(), "raw_image.parent-sync")?;
 
-    // Different refs can share these namespace parents. Each publisher syncs
-    // its entire path. Prune cannot remove parents while this store guard lives.
+    // Persist the entire namespace path before publishing the ref. The exclusive
+    // store guard protects shared prefixes throughout publication.
     let mut parent = guard.layout().root().join("refs");
     let mut parents = vec![parent.clone()];
-    for component in guard.reference().encoded_path().components() {
+    for component in reference.encoded_path().components() {
         parent.push(component);
         create_directory(&parent)?;
         parents.push(parent.clone());
@@ -110,7 +111,7 @@ pub(crate) fn publish(stage: CompletedStage<'_>, replace: bool) -> Result<PathBu
         fsutil::sync_before_commit(directory, "ref.namespace-sync")?;
     }
     let id = raw_image.file_name().unwrap().to_str().unwrap();
-    let target = guard.layout().raw_image_target(guard.reference(), id);
+    let target = guard.layout().raw_image_target(reference, id);
     let temporary = stage.directory().join("ref-pointer");
     symlink(target, &temporary)
         .map_err(|source| io_error("prepare committed pointer", &temporary, source))?;
@@ -135,11 +136,11 @@ pub(crate) fn publish(stage: CompletedStage<'_>, replace: bool) -> Result<PathBu
     Ok(raw_image)
 }
 
-pub(crate) fn remove(guard: &RefGuard<'_>) -> Result<()> {
+pub(crate) fn remove(guard: &StoreGuard<'_>, reference: &LocalRef) -> Result<()> {
     guard.require_exclusive()?;
-    let path = guard.layout().ref_entry(guard.reference());
-    let metadata =
-        namespace_entry(guard)?.ok_or_else(|| Error::RefMissing(guard.reference().clone()))?;
+    let path = guard.layout().ref_entry(reference);
+    let metadata = namespace_entry_at(guard.layout(), reference)?
+        .ok_or_else(|| Error::RefMissing(reference.clone()))?;
     replaceable(&path, &metadata)?;
     fsutil::checkpoint("ref.unlink", &path)?;
     fs::remove_file(&path).map_err(|source| io_error("unlink committed ref", &path, source))?;
@@ -152,8 +153,8 @@ pub(crate) fn remove(guard: &RefGuard<'_>) -> Result<()> {
 }
 
 /// Validate the exact relative pointer shape before touching its target.
-pub(crate) fn raw_image_path(guard: &RefGuard<'_>) -> Result<PathBuf> {
-    raw_image_path_at(guard.layout(), guard.reference())
+pub(crate) fn raw_image_path(guard: &StoreGuard<'_>, reference: &LocalRef) -> Result<PathBuf> {
+    raw_image_path_at(guard.layout(), reference)
 }
 
 fn raw_image_path_at(layout: &Layout, reference: &LocalRef) -> Result<PathBuf> {
@@ -185,14 +186,14 @@ fn raw_image_path_at(layout: &Layout, reference: &LocalRef) -> Result<PathBuf> {
 /// The borrowed guard keeps the selected raw image protected from prune for
 /// the whole time the caller reads or uses it.
 pub(crate) struct ResolvedRef<'a> {
-    _guard: &'a RefGuard<'a>,
+    _guard: &'a StoreGuard<'a>,
     pub raw_image: PathBuf,
     pub root: Descriptor,
     pub metadata: RefMetadata,
 }
 
-pub(crate) fn read<'a>(guard: &'a RefGuard<'a>) -> Result<ResolvedRef<'a>> {
-    let resolved = read_small(guard)?;
+pub(crate) fn read<'a>(guard: &'a StoreGuard<'a>, reference: &LocalRef) -> Result<ResolvedRef<'a>> {
+    let resolved = read_small(guard, reference)?;
     fsutil::sized_object(
         &guard.layout().blob(&resolved.root.digest),
         resolved.root.size,
@@ -201,8 +202,11 @@ pub(crate) fn read<'a>(guard: &'a RefGuard<'a>) -> Result<ResolvedRef<'a>> {
 }
 
 /// Inventory validates only wrapper files; no CAS object is opened here.
-pub(crate) fn read_small<'a>(guard: &'a RefGuard<'a>) -> Result<ResolvedRef<'a>> {
-    let mut inspected = inspect_small(guard)?;
+pub(crate) fn read_small<'a>(
+    guard: &'a StoreGuard<'a>,
+    reference: &LocalRef,
+) -> Result<ResolvedRef<'a>> {
+    let mut inspected = inspect_small(guard, reference)?;
     if !inspected.errors.is_empty() {
         return Err(inspected.errors.remove(0).into_error());
     }
@@ -223,17 +227,7 @@ pub(crate) struct RefInspection {
 
 /// Keep independently readable fields available when another wrapper file is
 /// damaged. A cached digest never replaces an unreadable authoritative root.
-pub(crate) fn inspect_small(guard: &RefGuard<'_>) -> Result<RefInspection> {
-    inspect_small_at(guard.layout(), guard.reference())
-}
-
-/// The exclusive store lock excludes every ref writer and protects all targets.
-/// This entrypoint deliberately creates no per-ref coordination files.
-pub(crate) fn inspect_small_exclusive(
-    guard: &StoreGuard<'_>,
-    reference: &LocalRef,
-) -> Result<RefInspection> {
-    guard.require_exclusive()?;
+pub(crate) fn inspect_small(guard: &StoreGuard<'_>, reference: &LocalRef) -> Result<RefInspection> {
     inspect_small_at(guard.layout(), reference)
 }
 

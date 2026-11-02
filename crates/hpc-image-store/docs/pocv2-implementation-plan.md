@@ -3,19 +3,20 @@
 ## Purpose and current baseline
 
 PoC v2 simplifies coordination and makes each mutation finish its own content
-lifecycle. This document plans that implementation; it does not describe
-features already delivered. The [architecture](architecture.md) remains the
-authoritative reference for implemented behavior until the relevant stages
-update it. The plans and results under `archive/` remain historical records.
+lifecycle. Stages 1 and 2 are implemented; later stages remain planned. The
+[architecture](architecture.md) is the authoritative reference for delivered
+behavior and is updated as each stage completes.
+The plans and results under `archive/` remain historical records.
 
-The current PoC provides a synchronous library and a development CLI with
+At the start of PoC v2, the first PoC provided a synchronous library and a development CLI with
 import, pull, export, list, check, remove, and prune. Availability is a
 library-only query that validates the selected image graph. Normal operations
 hold a shared store lock and acquire per-ref locks; prune holds the store lock
 exclusively. Removal only unlinks a ref, replacement leaves retired raw images,
 and prune later reclaims unused content. Successful acquisition can report
 staging-cleanup warnings. Import, pull, and remove can initialize a store.
-The current store format is 1, and ref metadata uses schema 3.
+That baseline used store format 1 and ref metadata schema 3. Stage 2 now uses
+format 2 and a single store lock, while retaining the baseline content lifecycle.
 
 The implementation is primarily in `store`, `initialization`, and `locks` for
 preparation; `transfer`, `pull`, `staging`, `cas`, and `refs` for mutation;
@@ -200,7 +201,7 @@ planning/status documentation only.
 **Intermediate limits:** no production behavior changes are delivered by this
 stage. Planned guarantees remain targets, not current claims.
 
-### 2. Simplify coordination and introduce format 2
+### 2. Simplify coordination and introduce format 2 (Implemented)
 
 **Prerequisites:** Stage 1's contracts and fixtures.
 
@@ -210,7 +211,8 @@ to shared. Update initialization, selection, discovery, staging, CAS,
 publication, and subprocess descriptor inheritance to use the single guard.
 Introduce format 2 and stop creating per-ref lock directories. Adapt the
 still-present availability and prune implementations and tests to operate
-without ref locks; remove their obsolete ref-lock bookkeeping assumptions.
+without ref locks; remove their obsolete ref-lock bookkeeping assumptions,
+including the `RefLock` and `RefLockDirectory` prune report categories.
 Preserve existing preparation behavior for remove until Stage 4.3 changes it.
 Keep crate instructions and architecture descriptions aligned with the locking
 and format behavior actually completed in this stage.
@@ -231,6 +233,13 @@ cargo test --locked -p hpc-image-store --test cli
 cargo test --locked -p hpc-image-store --test real_transfers -- --nocapture
 git diff --check
 ```
+
+**Outcome:** the single store guard protects selection and persistent-content use,
+writers serialize across names, and copy children inherit one lock descriptor.
+New stores use format 2/schema 3 without ref-lock directories. Prune retains
+content and empty ref-directory cleanup, with obsolete lock report categories
+removed. The [acceptance inventory](pocv2-acceptance.md) records test evidence;
+the [development guide](development.md) records validation and intermediate limits.
 
 **Intermediate limits:** mutations still have the old content lifecycle;
 availability and prune remain available. Format 2 alone does not yet establish

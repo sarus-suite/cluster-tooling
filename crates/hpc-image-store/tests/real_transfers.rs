@@ -163,7 +163,7 @@ fn poc_lifecycle(directory: &Path, source: &str, output: &str, context: &Transfe
     let pruned = store.prune(&options).unwrap();
     assert!(!pruned.has_errors(), "{pruned:?}");
     assert!(pruned.summaries[&PruneKind::Blob].removed_count > 0);
-    for relative in ["blobs/sha256", "raw_images", "tmp", "refs", "locks/refs"] {
+    for relative in ["blobs/sha256", "raw_images", "tmp", "refs"] {
         assert_eq!(
             fs::read_dir(store.config().root().join(relative))
                 .unwrap()
@@ -239,13 +239,11 @@ fn orphaned_export(directory: &Path, config: &Path, destination: &str) {
     parent.kill().unwrap();
     parent.wait().unwrap();
     let store_lock = directory.join("store/locks/store.lock");
-    let ref_lock = directory.join("store/locks/refs/746573742f6f6e653a746167/ref.lock");
     assert!(!try_exclusive(&store_lock), "Skopeo lost store lock");
-    assert!(!try_exclusive(&ref_lock), "Skopeo lost ref lock");
     writer.write_all(&bytes).unwrap();
     drop(writer);
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !try_exclusive(&store_lock) || !try_exclusive(&ref_lock) {
+    while !try_exclusive(&store_lock) {
         assert!(Instant::now() < deadline, "Skopeo did not release locks");
         std::thread::sleep(Duration::from_millis(5));
     }

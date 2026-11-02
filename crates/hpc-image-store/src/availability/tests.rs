@@ -462,7 +462,7 @@ fn availability_retains_complete_internal_index_traversal() {
 }
 
 #[test]
-fn availability_holds_both_shared_locks_during_graph_inspection() {
+fn availability_holds_shared_store_lock_during_graph_inspection() {
     for selected in ["name", "digest"] {
         for action in ["replace", "remove-public", "check-exclusive"] {
             let temporary = tempfile::tempdir().unwrap();
@@ -497,26 +497,19 @@ fn availability_holds_both_shared_locks_during_graph_inspection() {
 }
 
 #[test]
-fn availability_revalidates_digest_candidates_after_discovery() {
+fn availability_retains_digest_candidates_after_discovery() {
     for action in ["availability-scan-remove", "availability-scan-replace"] {
         let temporary = tempfile::tempdir().unwrap();
         let handle = store(temporary.path());
         publish(&handle, &reference(), Image::One, false);
         let mut reader = Worker::start(temporary.path(), &reference(), action);
         reader.wait_for("PUBLICATION_PAUSED");
-        if action.ends_with("remove") {
-            handle.remove(&reference()).unwrap();
-        } else {
-            publish(&handle, &reference(), Image::Two, true);
-        }
-        reader.proceed();
-        reader.wait_for("PUBLICATION_READY");
-        reader.finish();
+        finish_reader_before_mutation(temporary.path(), &mut reader, action.ends_with("remove"));
     }
 }
 
 #[test]
-fn availability_propagates_store_and_ref_lock_timeouts() {
+fn availability_propagates_store_lock_timeouts() {
     let temporary = tempfile::tempdir().unwrap();
     let handle = store(temporary.path());
     publish(&handle, &reference(), Image::One, false);
@@ -531,16 +524,15 @@ fn availability_propagates_store_and_ref_lock_timeouts() {
     }
     {
         let guard = handle.prepare(Operation::Import).unwrap();
-        let ref_guard = guard.lock_ref(&reference()).unwrap();
         assert!(matches!(
             handle.availability(&selector(reference().as_str())),
             Err(Error::LockTimeout { .. })
         ));
         assert!(matches!(
             handle.availability(&selector(format!("analysis/tool@{}", root(Image::One)))),
-            Err(Error::ResolutionIncomplete { .. })
+            Err(Error::LockTimeout { .. })
         ));
-        drop(ref_guard);
+        drop(guard);
     }
     assert_eq!(snapshot(temporary.path()), before);
 }
@@ -569,11 +561,7 @@ pub(super) fn worker(handle: &Store, reference: &LocalRef, action: &str) {
         selector(format!("{}@{}", reference.name(), root(Image::One)))
     };
     let result = handle.availability(&selected).unwrap();
-    if action.starts_with("availability-scan-") {
-        assert!(matches!(result, Availability::Missing));
-    } else {
-        assert!(matches!(result, Availability::Ready));
-    }
+    assert!(matches!(result, Availability::Ready));
 }
 
 fn permission_cases() {

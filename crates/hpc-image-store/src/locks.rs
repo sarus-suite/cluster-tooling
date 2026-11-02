@@ -1,9 +1,4 @@
-use crate::{
-    Error, LocalRef, Result,
-    error::io_error,
-    initialization::{create_directory, require_regular_file},
-    layout::Layout,
-};
+use crate::{Error, Result, error::io_error, initialization::require_regular_file, layout::Layout};
 use std::{
     fs::{File, OpenOptions},
     io::{self, Write},
@@ -86,17 +81,9 @@ impl Operation {
         matches!(self, Self::Import | Self::Pull | Self::Remove)
     }
     pub fn store_mode(self) -> Mode {
-        if matches!(self, Self::Prune) {
-            Mode::Exclusive
-        } else {
-            Mode::Shared
-        }
-    }
-    pub fn ref_mode(self) -> Option<Mode> {
         match self {
-            Self::Import | Self::Pull | Self::Remove => Some(Mode::Exclusive),
-            Self::Export | Self::List | Self::Check | Self::Availability => Some(Mode::Shared),
-            Self::Prune => None,
+            Self::Import | Self::Pull | Self::Remove | Self::Prune => Mode::Exclusive,
+            Self::Export | Self::List | Self::Check | Self::Availability => Mode::Shared,
         }
     }
 }
@@ -226,37 +213,6 @@ impl<'a> StoreGuard<'a> {
             operation,
         })
     }
-
-    pub fn lock_ref(&self, reference: &LocalRef) -> Result<RefGuard<'_>> {
-        let mode = self
-            .operation
-            .ref_mode()
-            .ok_or(crate::Error::InvalidStore {
-                path: self.layout.root().to_owned(),
-                reason: "prune does not acquire ref locks",
-            })?;
-        let key = reference.encoded_path();
-        let mut parent = self.layout.root().join("locks/refs");
-        for component in key.components() {
-            parent.push(component);
-            create_directory(&parent)?;
-        }
-        Ok(RefGuard {
-            _lock: FileLock::acquire(&self.layout.ref_lock(reference), mode, true)?,
-            _store: self,
-            reference: reference.clone(),
-            mode,
-        })
-    }
-}
-
-// The store guard outlives this descriptor, including while FileLock::acquire
-// waits. Only exclusive-store prune may remove an unused ref lock afterwards.
-pub(crate) struct RefGuard<'a> {
-    _lock: FileLock,
-    _store: &'a StoreGuard<'a>,
-    reference: LocalRef,
-    mode: Mode,
 }
 
 impl StoreGuard<'_> {
@@ -271,39 +227,10 @@ impl StoreGuard<'_> {
         }
         Ok(())
     }
-    pub(crate) fn require_shared(&self) -> Result<()> {
-        if self.operation.store_mode() != Mode::Shared {
-            return Err(Error::Coordination(
-                "this operation requires a shared store lock",
-            ));
-        }
-        Ok(())
-    }
-}
-
-impl RefGuard<'_> {
-    /// Both descriptors share their flock open-file descriptions with a child.
-    /// The guards must stay alive while the child is spawned and waited for.
-    pub(crate) fn transfer_fds(&self) -> [RawFd; 2] {
-        [
-            self._store._lock._file.as_raw_fd(),
-            self._lock._file.as_raw_fd(),
-        ]
-    }
-    pub(crate) fn reference(&self) -> &LocalRef {
-        &self.reference
-    }
-    pub(crate) fn layout(&self) -> &Layout {
-        self._store.layout
-    }
-    pub(crate) fn require_exclusive(&self) -> Result<()> {
-        self._store.require_shared()?;
-        if self.mode != Mode::Exclusive {
-            return Err(Error::Coordination(
-                "ref mutation requires an exclusive ref lock",
-            ));
-        }
-        Ok(())
+    /// The copy child shares this locked open-file description. The guard
+    /// remains alive through spawning and waiting; the parent stays close-on-exec.
+    pub(crate) fn transfer_fd(&self) -> RawFd {
+        self._lock._file.as_raw_fd()
     }
 }
 

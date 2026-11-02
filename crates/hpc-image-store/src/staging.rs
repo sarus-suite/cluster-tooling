@@ -1,7 +1,7 @@
 use crate::{
-    Error, RefMetadata, Result, Sha256Digest, fsutil,
+    Error, LocalRef, RefMetadata, Result, Sha256Digest, fsutil,
     initialization::{create_directory, require_directory},
-    locks::RefGuard,
+    locks::StoreGuard,
     oci::{self, Descriptor},
 };
 use std::{
@@ -18,10 +18,13 @@ pub struct CleanupWarning {
     pub message: String,
 }
 
-/// Call only after successful durable publication, with the operation's guards
+/// Call only after successful durable publication, with the operation's guard
 /// still alive and all acquisition writers stopped. The directory is the exact
 /// private operation path retained from CompletedStage, never a discovered path.
-pub(crate) fn cleanup_published(guard: &RefGuard<'_>, directory: &Path) -> Option<CleanupWarning> {
+pub(crate) fn cleanup_published(
+    guard: &StoreGuard<'_>,
+    directory: &Path,
+) -> Option<CleanupWarning> {
     let cleanup = || -> Result<()> {
         guard.require_exclusive()?;
         let parent = guard.layout().staging();
@@ -76,18 +79,23 @@ pub(crate) struct StagedBlob {
 /// Writable paths are exposed only during acquisition. The producer must stop
 /// all writers and close their writable handles before calling `complete`.
 pub(crate) struct AcquisitionStage<'a> {
-    guard: &'a RefGuard<'a>,
+    guard: &'a StoreGuard<'a>,
+    reference: LocalRef,
     directory: PathBuf,
 }
 
 impl<'a> AcquisitionStage<'a> {
-    pub fn new(guard: &'a RefGuard<'a>) -> Result<Self> {
+    pub fn new(guard: &'a StoreGuard<'a>, reference: &LocalRef) -> Result<Self> {
         guard.require_exclusive()?;
         let directory = fsutil::unique_directory(&guard.layout().staging(), "operation-")?;
         for relative in ["layout", "layout/blobs", "blobs", "blobs/sha256"] {
             create_directory(&directory.join(relative))?;
         }
-        Ok(Self { guard, directory })
+        Ok(Self {
+            guard,
+            reference: reference.clone(),
+            directory,
+        })
     }
     pub fn layout_path(&self) -> PathBuf {
         self.directory.join("layout")
@@ -108,7 +116,7 @@ impl<'a> AcquisitionStage<'a> {
         for relative in ["layout", "layout/blobs", "blobs", "blobs/sha256"] {
             require_directory(&self.directory.join(relative))?;
         }
-        if &metadata.local_ref != self.guard.reference() || &metadata.stored_root != selected_root {
+        if metadata.local_ref != self.reference || &metadata.stored_root != selected_root {
             return Err(Error::InvalidObject {
                 path: self.layout_path(),
                 reason: "metadata disagrees with destination ref or selected root".into(),
@@ -147,6 +155,7 @@ impl<'a> AcquisitionStage<'a> {
         }
         Ok(CompletedStage {
             guard: self.guard,
+            reference: self.reference,
             directory: self.directory,
             root,
             metadata,
@@ -158,7 +167,8 @@ impl<'a> AcquisitionStage<'a> {
 /// Consumed by publication; no writable acquisition accessors are available.
 /// Failure intentionally leaves private data for conservative pruning.
 pub(crate) struct CompletedStage<'a> {
-    guard: &'a RefGuard<'a>,
+    guard: &'a StoreGuard<'a>,
+    reference: LocalRef,
     directory: PathBuf,
     root: Descriptor,
     metadata: RefMetadata,
@@ -166,8 +176,11 @@ pub(crate) struct CompletedStage<'a> {
 }
 
 impl CompletedStage<'_> {
-    pub(super) fn guard(&self) -> &RefGuard<'_> {
+    pub(super) fn guard(&self) -> &StoreGuard<'_> {
         self.guard
+    }
+    pub(super) fn reference(&self) -> &LocalRef {
+        &self.reference
     }
     pub(super) fn directory(&self) -> &Path {
         &self.directory

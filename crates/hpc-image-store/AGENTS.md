@@ -45,10 +45,10 @@ requirement, report the conflict rather than silently choosing a new design.
   current task.
 - Preserve the guarantees for immutable content, complete raw-image layouts,
   pointer confinement, lock coordination, and durable publication. Keep the
-  store lock identity permanent. Ref lock identities must remain stable for
-  committed refs and while any process holds or waits for them; only prune under
-  the exclusive store lock may reclaim unused ref locks. Every holder, waiter,
-  and transfer child must retain the store lock until its ref descriptors close.
+  store lock identity permanent. Every action retains its single store guard
+  throughout persistent-content use; transfer children share that operation's
+  locked open-file description. Mutators and prune hold exclusive access;
+  queries hold shared access. Do not create per-ref lock bookkeeping.
   Do not silently substitute copying, overwriting, or weaker filesystem behavior when
   a required primitive is unavailable.
 - After a namespace change, report potentially visible state if syncing fails.

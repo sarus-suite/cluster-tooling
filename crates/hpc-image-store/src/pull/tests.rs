@@ -687,9 +687,13 @@ fn pull_worker() {
         .unwrap();
 }
 fn try_exclusive(path: &Path) -> bool {
+    try_lock(path, libc::LOCK_EX)
+}
+
+fn try_lock(path: &Path, mode: libc::c_int) -> bool {
     let file = fs::File::open(path).unwrap();
     // SAFETY: the file owns the descriptor and this lock attempt never blocks.
-    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+    unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) == 0 }
 }
 
 #[test]
@@ -701,7 +705,7 @@ fn terminated_pull_keeps_prior_ref_and_orphan_copy_locks() {
         .store
         .availability(&selector(unused.as_str()))
         .unwrap();
-    let unused_lock = fixture.store.layout.ref_lock(&unused);
+
     let pointer = fs::read_link(fixture.pointer()).unwrap();
     let directory = fixture.temporary.path();
     let release = directory.join("release");
@@ -736,15 +740,12 @@ fn terminated_pull_keeps_prior_ref_and_orphan_copy_locks() {
     wrapper.kill().unwrap();
     wrapper.wait().unwrap();
     let store_lock = fixture.store.config().root().join("locks/store.lock");
-    let ref_lock = fixture
-        .store
-        .config()
-        .root()
-        .join("locks/refs")
-        .join(LocalRef::new(DESTINATION).unwrap().encoded_path())
-        .join("ref.lock");
     assert!(!try_exclusive(&store_lock));
-    assert!(!try_exclusive(&ref_lock));
+    assert!(
+        !try_lock(&store_lock, libc::LOCK_SH),
+        "orphan pull allowed a reader"
+    );
+
     {
         let _short = crate::locks::short_test_waits();
         assert!(matches!(
@@ -752,7 +753,7 @@ fn terminated_pull_keeps_prior_ref_and_orphan_copy_locks() {
             Err(Error::LockTimeout { .. })
         ));
     }
-    assert!(unused_lock.exists());
+    assert!(!fixture.store.config().root().join("locks/refs").exists());
     assert_eq!(fs::read_link(fixture.pointer()).unwrap(), pointer);
     assert!(
         fixture
@@ -762,7 +763,7 @@ fn terminated_pull_keeps_prior_ref_and_orphan_copy_locks() {
     );
     fs::write(release, b"continue").unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !try_exclusive(&store_lock) || !try_exclusive(&ref_lock) {
+    while !try_exclusive(&store_lock) {
         assert!(Instant::now() < deadline, "orphan failed to release locks");
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -773,14 +774,14 @@ fn terminated_pull_keeps_prior_ref_and_orphan_copy_locks() {
             .count(),
         1
     );
-    let inode = fs::metadata(&ref_lock).unwrap().ino();
+    let inode = fs::metadata(&store_lock).unwrap().ino();
     let report = fixture
         .store
         .prune(&crate::PruneOptions::default())
         .unwrap();
     assert!(!report.has_errors(), "{report:?}");
-    assert!(!unused_lock.exists());
-    assert_eq!(fs::metadata(&ref_lock).unwrap().ino(), inode);
+    assert!(!fixture.store.config().root().join("locks/refs").exists());
+    assert_eq!(fs::metadata(&store_lock).unwrap().ino(), inode);
 }
 
 #[test]

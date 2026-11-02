@@ -2,7 +2,7 @@
 //! files. They make no claim about the health of the referenced image graph.
 use crate::{
     Error, ImageSelector, LocalRef, RefMetadata, Result, Sha256Digest, Store, discovery, fsutil,
-    locks::{Operation, RefGuard, StoreGuard},
+    locks::{Operation, StoreGuard},
     refs,
 };
 use serde::{Serialize, Serializer};
@@ -146,10 +146,7 @@ impl Store {
                     &error,
                 ));
             } else if let Some(reference) = &entry.local_ref {
-                match guard
-                    .lock_ref(reference)
-                    .and_then(|ref_guard| refs::inspect_small(&ref_guard))
-                {
+                match refs::inspect_small(&guard, reference) {
                     Ok(inspected) => {
                         entry.stored_root = inspected.root.map(|root| root.digest);
                         entry.metadata = inspected.metadata;
@@ -183,22 +180,18 @@ impl Store {
     /// Remove only the explicit committed name. Retired content awaits prune.
     pub fn remove(&self, reference: &LocalRef) -> Result<RemoveReport> {
         let guard = self.prepare(Operation::Remove)?;
-        let ref_guard = guard.lock_ref(reference)?;
-        refs::remove(&ref_guard)?;
+        refs::remove(&guard, reference)?;
         Ok(RemoveReport {
             local_ref: reference.clone(),
         })
     }
 }
 
-/// Return the selected guard itself, so selection cannot race a ref mutation
-/// between scanning and transfer. At most one ref lock is held at a time.
-pub(crate) fn select<'a>(
-    guard: &'a StoreGuard<'a>,
-    selector: &ImageSelector,
-) -> Result<RefGuard<'a>> {
+/// Resolve identity under the caller's retained store guard, which protects
+/// both discovery and subsequent use from every namespace mutation.
+pub(crate) fn select(guard: &StoreGuard<'_>, selector: &ImageSelector) -> Result<LocalRef> {
     let digest = match selector.digest() {
-        None => return guard.lock_ref(&LocalRef::new(selector.reference())?),
+        None => return LocalRef::new(selector.reference()),
         Some(digest) => digest,
     };
     let mut discovered = discovery::discover(guard)?;
@@ -226,22 +219,11 @@ pub(crate) fn select<'a>(
         let Some(reference) = item.local_ref else {
             continue;
         };
-        let ref_guard = match guard.lock_ref(&reference) {
-            Ok(ref_guard) => ref_guard,
-            Err(error) => {
-                diagnostics.push(ListDiagnostic::from_error(
-                    &item.path,
-                    Some(&reference),
-                    &error,
-                ));
-                continue;
-            }
-        };
-        match refs::read_small(&ref_guard) {
+        match refs::read_small(guard, &reference) {
             Ok(resolved) if &resolved.root.digest == digest => {
                 drop(resolved);
                 fsutil::checkpoint("selector.selected", &item.path)?;
-                return Ok(ref_guard);
+                return Ok(reference);
             }
             Ok(_) | Err(Error::RefMissing(_)) => (),
             Err(error) => diagnostics.push(ListDiagnostic::from_error(

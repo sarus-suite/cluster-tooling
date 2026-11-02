@@ -69,7 +69,6 @@ fn dry_run_is_identical_without_ref_lock_files_and_matches_deletion() {
     let handle = store(temporary.path());
     let old_raw = publish(&handle, &reference(), Image::One, false);
     let active_raw = publish(&handle, &reference(), Image::Two, true);
-    fs::remove_file(handle.layout.ref_lock(&reference())).unwrap();
     let extra = orphan(&handle);
     let before = snapshot(temporary.path());
     let dry = handle.prune(&options(true)).unwrap();
@@ -98,7 +97,8 @@ fn dry_run_is_identical_without_ref_lock_files_and_matches_deletion() {
             .all(|c| c.removed && c.durability_confirmed)
     );
     assert!(active_raw.exists());
-    assert!(!handle.layout.ref_lock(&reference()).exists());
+
+    assert!(!handle.layout.root().join("locks/refs").exists());
     assert!(handle.layout.blob(&root(Image::Two)).exists());
     assert!(handle.layout.blob(&digest(CONFIG_DIGEST)).exists());
     assert!(!handle.layout.blob(&root(Image::One)).exists());
@@ -504,7 +504,7 @@ pub(super) fn worker(handle: &Store, action: &str) {
                 "namespace" => handle.layout.root().join("refs"),
                 "metadata" => raw.join("metadata.json"),
                 "candidate" => handle.layout.staging(),
-                "lock-namespace" => handle.layout.root().join("locks/refs"),
+                "lock-namespace" => handle.layout.root().join("refs"),
                 _ => {
                     let p = handle
                         .layout
@@ -537,9 +537,8 @@ pub(super) fn worker(handle: &Store, action: &str) {
             "prune-hold-pull" => Operation::Pull,
             _ => Operation::Export,
         };
-        let guard = handle.prepare(operation).unwrap();
-        let selected_ref = reference();
-        let _ref_guard = guard.lock_ref(&selected_ref).unwrap();
+        let _guard = handle.prepare(operation).unwrap();
+
         fsutil::pause_once("prune.test-held");
         fsutil::checkpoint("prune.test-held", handle.layout.root()).unwrap();
     }
@@ -659,7 +658,8 @@ fn namespace_barrier_saves_removed_refs_including_empty_dirs_and_ancestors() {
                     .all(|directory| !directory.exists())
             );
             assert!(directories.last().unwrap().is_dir());
-            assert!(!handle.layout.ref_lock(&reference).exists());
+
+            assert!(!handle.layout.root().join("locks/refs").exists());
         }
     }
     // An initialized store with no historical namespace directories still syncs
@@ -692,8 +692,8 @@ fn namespace_barrier_protects_failed_and_terminated_replacements() {
         } else {
             let guard = handle.prepare(Operation::Import).unwrap();
             let selected = reference();
-            let ref_guard = guard.lock_ref(&selected).unwrap();
-            let stage = completed(&ref_guard, Image::Two);
+            let destination = selected.clone();
+            let stage = completed(&guard, &destination, Image::Two);
             fsutil::fail_once("ref.destination-sync", libc::EIO);
             assert!(matches!(
                 refs::publish(stage, true),
@@ -706,8 +706,8 @@ fn namespace_barrier_protects_failed_and_terminated_replacements() {
         let new_raw = {
             let guard = handle.prepare(Operation::List).unwrap();
             let selected = reference();
-            let ref_guard = guard.lock_ref(&selected).unwrap();
-            let resolved = refs::read(&ref_guard).unwrap();
+            let destination = selected.clone();
+            let resolved = refs::read(&guard, &destination).unwrap();
             assert_eq!(resolved.root.digest, root(Image::Two));
             resolved.raw_image
         };

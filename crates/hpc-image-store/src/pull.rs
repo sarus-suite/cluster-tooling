@@ -212,11 +212,10 @@ impl Store {
         context.validate()?;
         oci_argument(self.config().root())?;
         let store_guard = self.prepare(Operation::Pull)?;
-        let ref_guard = store_guard.lock_ref(&reference)?;
-        refs::check_destination(&ref_guard, options.replace)?;
+        refs::check_destination(&store_guard, &reference, options.replace)?;
         context.check_capabilities()?;
         let resolved_digest = context.resolve(source)?;
-        let stage = AcquisitionStage::new(&ref_guard)?;
+        let stage = AcquisitionStage::new(&store_guard, &reference)?;
         let mut command = context.command("copy");
         command
             .arg("--preserve-digests")
@@ -228,7 +227,7 @@ impl Store {
             &mut command,
             "pull image",
             &context.skopeo,
-            Some(ref_guard.transfer_fds()),
+            Some(store_guard.transfer_fd()),
         )?;
 
         // The writer has exited. Only the small root/config objects and the
@@ -270,7 +269,7 @@ impl Store {
         let completed = stage.complete(&root.digest, metadata, objects)?;
         let directory = completed.directory().to_owned();
         refs::publish(completed, options.replace)?;
-        let cleanup_warnings = staging::cleanup_published(&ref_guard, &directory)
+        let cleanup_warnings = staging::cleanup_published(&store_guard, &directory)
             .into_iter()
             .collect();
         Ok(PullReport {

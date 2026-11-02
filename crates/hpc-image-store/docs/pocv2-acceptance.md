@@ -9,8 +9,8 @@ This inventory introduces no independent requirements.
 For context, see the plan's [baseline](pocv2-implementation-plan.md#purpose-and-current-baseline),
 [stage execution guidance](pocv2-implementation-plan.md#stage-execution-and-validation),
 and [scope](pocv2-implementation-plan.md#scope-and-document-handoff).
-Stage 1 supplies the implemented fixture evidence below; future acceptance cases
-remain **Planned**, even where existing tests cover part of the preserved behavior.
+Stages 1 and 2 supply the implemented evidence below. Unimplemented acceptance
+cases remain **Planned**, even where existing tests preserve part of their behavior.
 
 When requirements change, update the plan first, then update affected acceptance
 cases here. Record concrete passing evidence for the full case before changing
@@ -42,8 +42,8 @@ Mutation and the existing publication subprocess worker, readiness handshakes,
 bounded waits, and termination at acquisition, pre-rename, post-rename/pre-sync,
 or post-unlink/pre-sync boundaries. It retains affected refs, expected roots and
 object sets through Mutation, observed staging paths, and any new raw-image path.
-These are current format-1 remnants, without recovery records. Stage 3 will add
-recorded variants; Stage 1 does not serialize a proposed record format.
+These began as format-1 remnants and are now recreated as format-2 fixtures,
+still without recovery records. Stage 3 will add recorded variants; Stage 1 does not serialize a proposed record format.
 
 **Setup**, **Transfer**, and **Registry** mean the existing initialization/lock
 workers, controlled transfer and disposable real-tool harnesses, and controlled
@@ -73,22 +73,33 @@ development guide records the actual validation run.
 | FIX-04 | 1 | Interrupted, Snapshot | lib: `publication_tests::interrupted_layered_mutations_expose_expected_refs_and_preserve_shared_content` verifies old/new/absent ref states, staging/raw paths, owned additions, and unchanged committed content under check. | Implemented |
 | FIX-05 | 1 | Nested | lib: `publication_tests::prune_tests::shared_layers_and_complete_nested_indexes_survive_pruning` retains full traversal, damage-blocked deletion, and shared-content retention after index removal. | Implemented |
 
-## Planned acceptance inventory
+## Staged acceptance inventory
 
 ### Stage 2: coordination and format
 
 Requirements: [coordination and initialization](pocv2-implementation-plan.md#coordination-and-initialization),
 [content and format](pocv2-implementation-plan.md#authoritative-content-and-complete-mutations),
-and [Stage 2](pocv2-implementation-plan.md#2-simplify-coordination-and-introduce-format-2).
+and [Stage 2](pocv2-implementation-plan.md#2-simplify-coordination-and-introduce-format-2-implemented).
 
 | ID | Stage | Fixture | Target | Expected observation | Status |
 | --- | --- | --- | --- | --- | --- |
-| LOCK-01 | 2 | Setup, Mutation | lib | Shared readers coexist; writers exclude readers and writers targeting either the same or a different name. List and all-store check retain stable namespaces throughout inspection. | Planned |
-| LOCK-02 | 2 | Transfer | lib, real | Only the single operation lock is deliberately inherited with the same open-file description; the parent stays close-on-exec. A surviving transfer excludes writers after parent termination until descriptors close. | Planned |
-| LOCK-03 | 2 | Setup | lib | Warning/timeout thresholds and permanent lock inode survive waits, timeouts, initialization races, and retries; no contention path removes a lock. | Planned |
-| LOCK-04 | 2 | Mutation, Nested | lib, CLI | Selection, staging, publication, and all content use retain the store guard; no ref locks or ref-lock directories are created. Intermediate availability/prune still work. | Planned |
-| FORMAT-01 | 2 | Setup, Snapshot | lib, CLI | New stores use format 2/schema 3; format 1 and unsupported versions fail without changing store contents or migrating them. | Planned |
-| SETUP-01 | 2 | Setup | lib | Import/pull initialization races and recognized retries preserve prepared-parent sync ordering, permissions, stable identities, and no ancestor creation; unexpected contents and missing primitives remain errors. Remove retains its intermediate preparation policy. | Planned |
+| LOCK-01 | 2 | Setup, Mutation | lib | Shared readers coexist; writers exclude readers and writers targeting either the same or a different name. List and all-store check retain stable namespaces throughout inspection. | Implemented |
+| LOCK-02 | 2 | Transfer | lib, real | Only the single operation lock is deliberately inherited with the same open-file description; the parent stays close-on-exec. A surviving transfer excludes writers after parent termination until descriptors close. | Implemented |
+| LOCK-03 | 2 | Setup | lib | Warning/timeout thresholds and permanent lock inode survive waits, timeouts, initialization races, and retries; no contention path removes a lock. | Implemented |
+| LOCK-04 | 2 | Mutation, Nested | lib, CLI | Selection, staging, publication, and all content use retain the store guard; no ref locks or ref-lock directories are created. Intermediate availability/prune still work. | Implemented |
+| FORMAT-01 | 2 | Setup, Snapshot | lib, CLI | New stores use format 2/schema 3; format 1 and unsupported versions fail without changing store contents or migrating them. | Implemented |
+| SETUP-01 | 2 | Setup | lib | Import/pull initialization races and recognized retries preserve prepared-parent sync ordering, permissions, stable identities, and no ancestor creation; unexpected contents and missing primitives remain errors. Remove retains its intermediate preparation policy. | Implemented |
+
+Stage 2 evidence (test names are relative to their target):
+
+| Cases | Passing evidence |
+| --- | --- |
+| LOCK-01 | lib: `tests::separate_processes_obey_the_lock_matrix`; `publication_tests::{inventory_retains_stable_namespace_after_enumeration,digest_resolution_retains_candidates_after_namespace_scan,checking_retains_stable_namespace_after_discovery}` use paused readers and actual contended writers. Availability and selected-content tests retain their operation guard through graph/content use. |
+| LOCK-02 | lib: `subprocess::tests::copy_inherits_only_its_single_store_descriptor_and_parent_stays_close_on_exec`; `transfer::tests::{actual_skopeo_retains_lock_after_parent_termination,orphaned_transfer_retains_store_lock_and_inherits_environment}`; `pull::tests::terminated_pull_keeps_prior_ref_and_orphan_copy_locks`. Real: `real_rootless_round_trip`, including orphaned export. Tests distinguish surviving writer exclusion from shared export access. |
+| LOCK-03 | lib: existing `locks::tests` warning, timeout, interruption, and close-on-exec cases; initialization inode/retry tests; `publication_tests::bookkeeping_tests::store_lock_holders_exclude_cleanup_and_waiters_retain_permanent_identity`. A paused waiter does not itself hold a lock; prune preserves its inode before acquisition and waits once it acquires shared access. |
+| LOCK-04 | lib: `publication_tests::shared_guards_reject_mutation_and_metadata_cannot_change_the_destination`, existing publication/interruption and nested-index prune regressions; `publication_tests::bookkeeping_tests::missing_lookups_create_no_bookkeeping_and_namespace_cleanup_requires_the_barrier`. CLI: `prune_cli_cleans_bookkeeping_with_default_grace_and_matches_library_reports` verifies four remaining summary kinds and absence of ref-lock output. |
+| FORMAT-01 | lib: `tests::format_two_preserves_schema_three_and_rejects_old_stores_without_changes`; CLI: `unsupported_store_formats_are_rejected_without_modification`. Snapshot comparisons cover format 1 and unsupported version 99 across operations. |
+| SETUP-01 | lib: `tests::{concurrent_initialization_and_termination_release_locks,interrupted_scaffolding_can_resume,initialization_syncs_only_the_root_and_its_immediate_parent_in_order,interrupted_initialization_preserves_root_and_lock_identities,obsolete_empty_ref_lock_scaffolding_is_preserved_and_rejected}` plus existing permission, missing-parent, and sync-failure tests. Concurrent setup mixes import and pull; remove retains its initialization privilege. |
 
 ### Stage 3: bookkeeping and recovery
 
