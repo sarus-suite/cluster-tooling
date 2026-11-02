@@ -28,7 +28,45 @@ point. Keep relative repository links out of the included library guide; use
 API references or self-contained explanations so generated rustdoc navigation
 also works.
 
-## Current closure record
+## PoC v2 Stage 1: contracts and acceptance fixtures
+
+Stage 1 of the [PoC v2 implementation plan](pocv2-implementation-plan.md) is
+complete. The [acceptance inventory](pocv2-acceptance.md) connects the plan's
+requirements to fixtures, observable acceptance cases, test targets, and evidence,
+with stable acceptance identifiers assigned to later stages. The implementation
+plan defines the target contracts and stage boundaries.
+Those production changes remain planned; the architecture still describes the
+implemented first PoC, including format 1, metadata schema 3, per-ref locking,
+availability, prune, and deferred reclamation.
+
+The test-only `test_support` module supplies accurately hashed synthetic images
+with shared and unique layers, original/keeper/replacement content sets, a
+branching nested-index graph, publication adapters, a temporary mutation store,
+and encoded-prefix names. Publication tests reuse the existing subprocess worker
+to capture abandoned acquisition, interruption before ref rename, visible
+replacement before sync, and visible removal before sync. These fixtures expose
+current filesystem remnants and expected content sets without introducing an
+operation-record format or claiming recovery. The existing nested-index prune
+regression now uses the reusable graph and retains its safety assertions.
+
+On 30 October 2026, `cargo test --locked -p hpc-image-store --lib` passed
+159 tests, with zero failures and five existing internal subprocess helpers
+ignored. This adds four tests to the verified baseline of 155 passing library
+tests. The library run included the existing actual-Skopeo lock-retention test.
+`cargo fmt -p hpc-image-store -- --check` and `git diff --check` passed.
+The acceptance inventory was reviewed against each target-contract paragraph,
+and the new documentation links were checked locally. No production code,
+public interface, CLI behavior, store format, or dependency changed.
+
+This Stage 1 run did not select the CLI, controlled-registry, real-transfer
+integration, or doctest targets, nor repeat the full check/Clippy/rustdoc checks.
+The historical full-suite results below remain historical. Synthetic layers
+exercise structural storage behavior, not image execution; local interruption
+tests establish observed states rather than crash persistence or Lustre/VAST
+qualification. Stage 2 is the next planned implementation stage, covering the
+single store lock and format boundary; it has not been implemented by Stage 1.
+
+## PoC v1 closure record
 
 The reduced PoC wrap-up replaces the original broad qualification stage with
 documentation consolidation, one local lifecycle scenario, and crate-scoped

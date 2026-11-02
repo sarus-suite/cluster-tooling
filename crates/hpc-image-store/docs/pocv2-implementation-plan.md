@@ -167,7 +167,7 @@ readiness handshakes with bounded waits for process tests. Short internal lock
 thresholds should exercise warnings and timeouts. Never run the internal
 ignored subprocess workers directly or select all ignored tests.
 
-### 1. Establish the target contract and acceptance fixtures
+### 1. Establish the target contract and acceptance fixtures (Implemented)
 
 **Prerequisites:** review the current architecture, guides, source, tests, and
 working-tree status. Confirm the baseline above against the implementation.
@@ -175,9 +175,10 @@ working-tree status. Confirm the baseline above against the implementation.
 **Changes:** establish reusable fixtures for shared and unique blobs,
 replacement, long names sharing encoded prefixes, and interrupted mutations.
 Use the target contracts above to map each intended behavior to the later
-stage and test that will establish it. Record the lock matrix, initialization
-policy, format boundary, successful-state invariants, failure semantics, and
-public interface changes as the implementation reference.
+stage and test that will establish it. In the acceptance inventory, map the
+existing lock matrix, initialization policy, format boundary, successful-state
+invariants, failure semantics, and public interface changes to observable cases,
+fixtures, test targets, and evidence. Keep their requirements in this plan.
 
 **Acceptance:** each design change has an observable acceptance case. Fixtures
 represent both a short name and a longer name whose encoded path shares its
@@ -190,6 +191,11 @@ do not add failing assertions for features that have not been implemented.
 cargo test --locked -p hpc-image-store --lib
 git diff --check
 ```
+
+**Outcome:** the [acceptance inventory](pocv2-acceptance.md) connects this plan's
+requirements to reusable fixtures and acceptance cases assigned to each later
+stage, with test targets and evidence status. Stage 1 adds tests and
+planning/status documentation only.
 
 **Intermediate limits:** no production behavior changes are delivered by this
 stage. Planned guarantees remain targets, not current claims.

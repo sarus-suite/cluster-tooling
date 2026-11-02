@@ -636,9 +636,10 @@ fn symlinked_namespace_parents_cannot_redirect_reads_or_mutations() {
 fn long_and_prefix_sharing_keys_publish_independently() {
     let temporary = tempfile::tempdir().unwrap();
     let handle = store(temporary.path());
+    let (short, long) = crate::test_support::prefix_names();
     let references = [
-        LocalRef::new(format!("{}:t", "a".repeat(58))).unwrap(),
-        LocalRef::new(format!("{}:tag", "a".repeat(58))).unwrap(),
+        short,
+        long,
         LocalRef::new(format!("{}:{}", "a".repeat(255), "T".repeat(128))).unwrap(),
     ];
     for reference in &references {
@@ -928,6 +929,10 @@ fn publication_worker() {
     let action = std::env::var("HPC_PUBLICATION_ACTION").unwrap();
     println!("PUBLICATION_STARTED");
     std::io::stdout().flush().unwrap();
+    if action.starts_with("stage1-") {
+        interruption_worker(&handle, &reference, &action);
+        return;
+    }
     if action.starts_with("bookkeeping-") {
         bookkeeping_tests::worker(&handle, &reference);
         println!("PUBLICATION_READY");
@@ -1293,6 +1298,220 @@ fn killed_publication_exposes_only_complete_refs_and_retains_abandoned_data() {
         assert_eq!(fs::read_dir(handle.layout.raw_images()).unwrap().count(), 2);
         assert_eq!(fs::read_dir(handle.layout.staging()).unwrap().count(), 2);
         assert_eq!(discovery::discover(&guard).unwrap().entries.len(), 1);
+    }
+}
+
+// These fixtures capture format-1 remnants. They deliberately create no future
+// operation record and make no claim that these remnants can be recovered.
+struct InterruptedFixture {
+    mutation: crate::test_support::MutationFixture,
+    new_raw: Option<PathBuf>,
+    staging: Vec<PathBuf>,
+}
+
+fn interrupted_fixture(action: &str) -> InterruptedFixture {
+    let mutation = crate::test_support::MutationFixture::new();
+    let root = mutation.directory.path().join("store");
+    let mut worker = Worker::start(&root, &mutation.target, action);
+    worker.wait_for("PUBLICATION_READY");
+    worker.proceed();
+    worker.wait_for("PUBLICATION_PAUSED");
+    worker.child.kill().unwrap();
+    assert!(!worker.child.wait().unwrap().success());
+    let new_raw: Vec<_> = fs::read_dir(mutation.store.layout.raw_images())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| *path != mutation.original_raw && *path != mutation.keeper_raw)
+        .collect();
+    assert!(new_raw.len() <= 1);
+    let staging = fs::read_dir(mutation.store.layout.staging())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    InterruptedFixture {
+        mutation,
+        new_raw: new_raw.into_iter().next(),
+        staging,
+    }
+}
+
+fn interruption_worker(handle: &Store, reference: &LocalRef, action: &str) {
+    let images = crate::test_support::SharedImages::new();
+    let guard = handle.prepare(Operation::Import).unwrap();
+    let selected = guard.lock_ref(reference).unwrap();
+    let stage = if action == "stage1-after-unlink" {
+        None
+    } else {
+        Some(crate::test_support::stage_image(
+            &selected,
+            &images.replacement,
+        ))
+    };
+    println!("PUBLICATION_READY");
+    std::io::stdout().flush().unwrap();
+    let mut instruction = String::new();
+    std::io::stdin().read_line(&mut instruction).unwrap();
+    match action {
+        "stage1-acquisition" => {
+            // The private stage is complete, but publication has not started.
+            println!("PUBLICATION_PAUSED");
+            std::io::stdout().flush().unwrap();
+            std::io::stdin().read_line(&mut instruction).unwrap();
+        }
+        "stage1-before-rename" | "stage1-after-rename" => {
+            fsutil::pause_once(if action == "stage1-before-rename" {
+                "ref.rename"
+            } else {
+                "ref.destination-sync"
+            });
+            refs::publish(stage.unwrap(), true).unwrap();
+        }
+        "stage1-after-unlink" => {
+            fsutil::pause_once("ref.remove-sync");
+            refs::remove(&selected).unwrap();
+        }
+        _ => panic!("unknown interruption scenario: {action}"),
+    }
+}
+
+#[test]
+fn layered_replacement_fixture_preserves_shared_objects_and_retired_content() {
+    use crate::test_support::{MutationFixture, publish_image};
+    let fixture = MutationFixture::new();
+    let common = fixture.images.shared.iter().next().unwrap();
+    let before = crate::test_snapshot::snapshot(&fixture.store.layout.blob(common));
+    let keeper_before = crate::test_snapshot::snapshot(&fixture.keeper_raw);
+    let replacement = publish_image(
+        &fixture.store,
+        &fixture.target,
+        &fixture.images.replacement,
+        true,
+    );
+    assert_ne!(replacement, fixture.original_raw);
+    assert!(fixture.original_raw.is_dir());
+    assert_eq!(
+        crate::test_snapshot::snapshot(&fixture.store.layout.blob(common)),
+        before
+    );
+    assert_eq!(
+        crate::test_snapshot::snapshot(&fixture.keeper_raw),
+        keeper_before
+    );
+    for image in [
+        &fixture.images.original,
+        &fixture.images.keeper,
+        &fixture.images.replacement,
+    ] {
+        for (digest, bytes) in &image.objects {
+            assert_eq!(fs::read(fixture.store.layout.blob(digest)).unwrap(), *bytes);
+        }
+    }
+    let report = fixture.store.check(&crate::CheckScope::All).unwrap();
+    assert!(!report.has_errors(), "{report:?}");
+    let guard = fixture.store.prepare(Operation::List).unwrap();
+    for (reference, image, raw) in [
+        (&fixture.target, &fixture.images.replacement, &replacement),
+        (&fixture.keeper, &fixture.images.keeper, &fixture.keeper_raw),
+    ] {
+        let selected = guard.lock_ref(reference).unwrap();
+        let resolved = refs::read(&selected).unwrap();
+        assert_eq!(resolved.root.digest, image.root.digest);
+        assert_eq!(&resolved.raw_image, raw);
+    }
+}
+
+#[test]
+fn prefix_fixture_supports_both_names_and_a_longer_name_alone() {
+    use crate::test_support::{SharedImages, prefix_names, publish_image};
+    let images = SharedImages::new();
+    let (short, long) = prefix_names();
+    for include_short in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let handle = store(directory.path());
+        if include_short {
+            publish_image(&handle, &short, &images.original, false);
+        }
+        let long_raw = publish_image(&handle, &long, &images.keeper, false);
+        let before = crate::test_snapshot::snapshot(&long_raw);
+        let report = handle.list().unwrap();
+        assert!(!report.has_errors());
+        assert_eq!(report.entries.len(), if include_short { 2 } else { 1 });
+        if include_short {
+            handle.remove(&short).unwrap();
+        }
+        assert!(handle.layout.ref_entry(&short).parent().unwrap().is_dir());
+        assert!(
+            matches!(fs::symlink_metadata(handle.layout.ref_entry(&short)), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        );
+        assert_eq!(crate::test_snapshot::snapshot(&long_raw), before);
+        let report = handle.list().unwrap();
+        assert!(!report.has_errors());
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].local_ref.as_ref(), Some(&long));
+        assert!(!handle.check(&crate::CheckScope::All).unwrap().has_errors());
+    }
+}
+
+#[test]
+fn interrupted_layered_mutations_expose_expected_refs_and_preserve_shared_content() {
+    for action in [
+        "stage1-acquisition",
+        "stage1-before-rename",
+        "stage1-after-rename",
+        "stage1-after-unlink",
+    ] {
+        let interrupted = interrupted_fixture(action);
+        let fixture = &interrupted.mutation;
+        let handle = &fixture.store;
+        assert!(fixture.original_raw.is_dir());
+        assert!(fixture.keeper_raw.is_dir());
+        assert_eq!(
+            interrupted.staging.len(),
+            if action == "stage1-after-unlink" {
+                2
+            } else {
+                3
+            }
+        );
+        assert!(interrupted.staging.iter().all(|path| path.is_dir()));
+        let published_additions = matches!(action, "stage1-before-rename" | "stage1-after-rename");
+        assert_eq!(interrupted.new_raw.is_some(), published_additions);
+        let guard = handle.prepare(Operation::List).unwrap();
+        let keeper = guard.lock_ref(&fixture.keeper).unwrap();
+        assert_eq!(refs::read(&keeper).unwrap().raw_image, fixture.keeper_raw);
+        let target = guard.lock_ref(&fixture.target).unwrap();
+        if action == "stage1-after-unlink" {
+            assert!(matches!(refs::read(&target), Err(Error::RefMissing(_))));
+        } else {
+            let resolved = refs::read(&target).unwrap();
+            let (image, raw) = if action == "stage1-after-rename" {
+                (
+                    &fixture.images.replacement,
+                    interrupted.new_raw.as_ref().unwrap(),
+                )
+            } else {
+                (&fixture.images.original, &fixture.original_raw)
+            };
+            assert_eq!(resolved.root.digest, image.root.digest);
+            assert_eq!(&resolved.raw_image, raw);
+        }
+        for image in [&fixture.images.original, &fixture.images.keeper] {
+            for (digest, bytes) in &image.objects {
+                assert_eq!(fs::read(handle.layout.blob(digest)).unwrap(), *bytes);
+            }
+        }
+        for digest in &fixture.images.replacement_only {
+            assert_eq!(handle.layout.blob(digest).exists(), published_additions);
+        }
+        drop(target);
+        drop(keeper);
+        drop(guard);
+        let before = crate::test_snapshot::snapshot(handle.config().root());
+        assert!(!handle.check(&crate::CheckScope::All).unwrap().has_errors());
+        assert_eq!(
+            crate::test_snapshot::snapshot(handle.config().root()),
+            before
+        );
     }
 }
 

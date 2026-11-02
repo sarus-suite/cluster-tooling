@@ -393,113 +393,35 @@ fn availability_never_authorizes_a_later_prune_scan() {
 
 #[test]
 fn shared_layers_and_complete_nested_indexes_survive_pruning() {
-    use sha2::{Digest, Sha256};
+    use crate::test_support::{NestedImages, publish_image};
     let temporary = tempfile::tempdir().unwrap();
     let handle = store(temporary.path());
-    let guard = handle.prepare(Operation::Import).unwrap();
     let selected_ref = reference();
-    let ref_guard = guard.lock_ref(&selected_ref).unwrap();
-    let stage = AcquisitionStage::new(&ref_guard).unwrap();
-    let mut objects = Vec::new();
-    let mut object = |media_type: &str, bytes: Vec<u8>| {
-        let digest = Sha256Digest::new(format!("sha256:{:x}", Sha256::digest(&bytes))).unwrap();
-        let descriptor = Descriptor {
-            media_type: media_type.into(),
-            digest: digest.clone(),
-            size: bytes.len() as u64,
-            extra: BTreeMap::new(),
-        };
-        fs::write(
-            stage.shared_blob_path().join("sha256").join(digest.hex()),
-            &bytes,
-        )
-        .unwrap();
-        objects.push(BlobSpec {
-            digest,
-            size: bytes.len() as u64,
-        });
-        descriptor
-    };
-    let config = object(crate::graph::CONFIG, CONFIG.to_vec());
-    let layer = object(crate::graph::LAYERS[0], b"shared layer bytes".to_vec());
-    let first = object(crate::graph::MANIFEST, serde_json::to_vec(&json!({"schemaVersion":2,"config":config,"layers":[layer],"annotations":{"name":"one"}})).unwrap());
-    let second = object(crate::graph::MANIFEST, serde_json::to_vec(&json!({"schemaVersion":2,"config":config,"layers":[layer],"annotations":{"name":"two"}})).unwrap());
-    let nested = object(
-        crate::graph::INDEX,
-        serde_json::to_vec(&json!({"schemaVersion":2,"manifests":[first]})).unwrap(),
-    );
-    let top = object(
-        crate::graph::INDEX,
-        serde_json::to_vec(&json!({"schemaVersion":2,"manifests":[nested,second]})).unwrap(),
-    );
-    oci::write_layout(&stage.layout_path(), &top).unwrap();
-    let completed = stage
-        .complete(
-            &top.digest,
-            RefMetadata::new(selected_ref.clone(), top.digest.clone()),
-            objects.clone(),
-        )
-        .unwrap();
-    refs::publish(completed, false).unwrap();
-    drop(ref_guard);
-    drop(guard);
+    let fixture = NestedImages::new();
+    publish_image(&handle, &selected_ref, &fixture.top, false);
     let extra = orphan(&handle);
     prune(&handle);
     assert!(!extra.exists());
-    for blob in &objects {
-        assert!(handle.layout.blob(&blob.digest).exists());
+    for digest in fixture.top.objects.keys() {
+        assert!(handle.layout.blob(digest).exists());
     }
     assert!(!handle.check(&CheckScope::All).unwrap().has_errors());
-    let second_bytes = fs::read(handle.layout.blob(&second.digest)).unwrap();
-    fs::remove_file(handle.layout.blob(&second.digest)).unwrap();
+    let second_bytes = fs::read(handle.layout.blob(&fixture.second.digest)).unwrap();
+    fs::remove_file(handle.layout.blob(&fixture.second.digest)).unwrap();
     let extra = orphan(&handle);
     assert!(handle.prune(&options(false)).unwrap().has_errors());
     assert!(extra.exists());
-    fs::write(handle.layout.blob(&second.digest), second_bytes).unwrap();
+    fs::write(handle.layout.blob(&fixture.second.digest), second_bytes).unwrap();
 
     // Another committed image keeps the shared layer after the index ref goes.
     let other = LocalRef::new("analysis/tool:other").unwrap();
-    let guard = handle.prepare(Operation::Import).unwrap();
-    let ref_guard = guard.lock_ref(&other).unwrap();
-    let stage = AcquisitionStage::new(&ref_guard).unwrap();
-    oci::write_layout(&stage.layout_path(), &first).unwrap();
-    let specs: Vec<_> = objects
-        .into_iter()
-        .filter(|object| {
-            [
-                first.digest.clone(),
-                config.digest.clone(),
-                layer.digest.clone(),
-            ]
-            .contains(&object.digest)
-        })
-        .collect();
-    for blob in &specs {
-        fs::copy(
-            handle.layout.blob(&blob.digest),
-            stage
-                .shared_blob_path()
-                .join("sha256")
-                .join(blob.digest.hex()),
-        )
-        .unwrap();
-    }
-    let completed = stage
-        .complete(
-            &first.digest,
-            RefMetadata::new(other, first.digest.clone()),
-            specs,
-        )
-        .unwrap();
-    refs::publish(completed, false).unwrap();
-    drop(ref_guard);
-    drop(guard);
+    publish_image(&handle, &other, &fixture.first, false);
     handle.remove(&selected_ref).unwrap();
     prune(&handle);
-    for descriptor in [&first, &config, &layer] {
+    for descriptor in [&fixture.first.root, &fixture.config, &fixture.layer] {
         assert!(handle.layout.blob(&descriptor.digest).exists());
     }
-    for descriptor in [&top, &nested, &second] {
+    for descriptor in [&fixture.top.root, &fixture.nested, &fixture.second] {
         assert!(!handle.layout.blob(&descriptor.digest).exists());
     }
     assert!(!handle.check(&CheckScope::All).unwrap().has_errors());

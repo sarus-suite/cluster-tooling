@@ -46,7 +46,7 @@ separate operations; review prune's report before deleting content.
 - [Administration](docs/administration.md): installation, storage preparation, and maintenance.
 - [Development and PoC handoff](docs/development.md): source orientation, tests, and current validation results.
 - [Deferred validation](docs/deferred-validation.md): qualification still needed beyond this first pass.
-- [PoC v2 implementation plan](docs/pocv2-implementation-plan.md): staged next-milestone work; not yet implemented.
+- [PoC v2 implementation plan](docs/pocv2-implementation-plan.md): staged next-milestone work; Stage 1 adds test fixtures and an acceptance reference only.
 - [Deferred PoC v3 assessment](docs/pocv3-reference-resolution-assessment.md): reference resolution, inherited Skopeo behavior, and future Sarus integration; outside PoC v2.
 
 The PoC stores one platform-specific OCI manifest per ref. A registry tag may
