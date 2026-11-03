@@ -1,5 +1,6 @@
 //! Read-only OCI dependency traversal. Callers retain the store lock; this
-//! module does not acquire ref locks and can also serve an exclusive prune scan.
+//! module does not acquire ref locks. Reclamation shares declaration parsing
+//! and traversal, while skipping all configuration and layer file observations.
 use crate::{
     Sha256Digest, fsutil,
     inspection::{FailureKind, Finding},
@@ -78,6 +79,7 @@ pub(crate) struct GraphReader {
     blobs: PathBuf,
     observations: BTreeMap<Sha256Digest, Observation>,
     declarations: BTreeMap<Sha256Digest, (String, u64)>,
+    dependencies_only: bool,
 }
 
 enum Work {
@@ -91,7 +93,34 @@ impl GraphReader {
             blobs: blobs.to_owned(),
             observations: BTreeMap::new(),
             declarations: BTreeMap::new(),
+            dependencies_only: false,
         }
+    }
+
+    /// Reclamation needs declarations, not validation of config/layer files.
+    pub(crate) fn dependencies(blobs: &Path) -> Self {
+        Self {
+            dependencies_only: true,
+            ..Self::new(blobs)
+        }
+    }
+
+    pub(crate) fn dependency_objects(
+        &mut self,
+        root: &Descriptor,
+    ) -> crate::Result<Vec<crate::staging::BlobSpec>> {
+        let report = self.scan(root);
+        if let Some(diagnostic) = report.diagnostics.into_iter().next() {
+            return Err(diagnostic.finding.into_error());
+        }
+        Ok(report
+            .reachable
+            .into_iter()
+            .map(|digest| {
+                let size = self.declarations[&digest].1;
+                crate::staging::BlobSpec { digest, size }
+            })
+            .collect())
     }
 
     pub fn scan(&mut self, root: &Descriptor) -> GraphReport {
@@ -148,10 +177,27 @@ impl GraphReader {
                 );
                 continue;
             }
-            let observation = self
-                .observations
-                .entry(digest.clone())
-                .or_insert_with(|| observe(&path, &descriptor.media_type));
+            let dependencies_only = self.dependencies_only;
+            let observation = self.observations.entry(digest.clone()).or_insert_with(|| {
+                if dependencies_only && !matches!(descriptor.media_type.as_str(), MANIFEST | INDEX)
+                {
+                    Observation {
+                        size: None,
+                        children: Vec::new(),
+                        errors: Vec::new(),
+                    }
+                } else {
+                    observe(
+                        &path,
+                        &descriptor.media_type,
+                        if dependencies_only {
+                            "dependencies.observe"
+                        } else {
+                            "graph.observe"
+                        },
+                    )
+                }
+            });
             if let Some(actual) = observation.size
                 && actual != descriptor.size
             {
@@ -262,13 +308,13 @@ impl PlatformFields {
     }
 }
 
-fn observe(path: &Path, media_type: &str) -> Observation {
+fn observe(path: &Path, media_type: &str, checkpoint: &'static str) -> Observation {
     let mut observation = Observation {
         size: None,
         children: Vec::new(),
         errors: Vec::new(),
     };
-    if let Err(error) = read_object(path, media_type, &mut observation) {
+    if let Err(error) = read_object(path, media_type, checkpoint, &mut observation) {
         observation.errors.push(error);
     }
     observation
@@ -277,9 +323,10 @@ fn observe(path: &Path, media_type: &str) -> Observation {
 fn read_object(
     path: &Path,
     media_type: &str,
+    checkpoint: &'static str,
     observation: &mut Observation,
 ) -> Result<(), Finding> {
-    fsutil::checkpoint("graph.observe", path).map_err(|error| Finding::graph_error(path, error))?;
+    fsutil::checkpoint(checkpoint, path).map_err(|error| Finding::graph_error(path, error))?;
     let mut file = fsutil::open_regular(path).map_err(|error| Finding::graph_error(path, error))?;
     observation.size = Some(
         file.metadata()

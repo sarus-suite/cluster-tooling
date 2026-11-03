@@ -22,7 +22,10 @@ fn invalid(path: &Path, reason: &'static str) -> Error {
     }
 }
 
-fn namespace_entry_at(layout: &Layout, reference: &LocalRef) -> Result<Option<fs::Metadata>> {
+pub(crate) fn namespace_entry_at(
+    layout: &Layout,
+    reference: &LocalRef,
+) -> Result<Option<fs::Metadata>> {
     // Check every parent without following symlinks. Unlinking the terminal
     // entry must never mutate a directory reached through a malformed key.
     let mut parent = layout.root().join("refs");
@@ -158,9 +161,19 @@ pub(crate) fn raw_image_path(guard: &StoreGuard<'_>, reference: &LocalRef) -> Re
 }
 
 fn raw_image_path_at(layout: &Layout, reference: &LocalRef) -> Result<PathBuf> {
+    let id =
+        pointer_identity(layout, reference)?.ok_or_else(|| Error::RefMissing(reference.clone()))?;
+    let raw_image = layout.raw_image(&id);
+    require_directory(&raw_image)?;
+    Ok(raw_image)
+}
+
+/// Snapshot the terminal pointer without accessing its target.
+pub(crate) fn pointer_identity(layout: &Layout, reference: &LocalRef) -> Result<Option<String>> {
     let path = layout.ref_entry(reference);
-    let metadata = namespace_entry_at(layout, reference)?
-        .ok_or_else(|| Error::RefMissing(reference.clone()))?;
+    let Some(metadata) = namespace_entry_at(layout, reference)? else {
+        return Ok(None);
+    };
     if !metadata.file_type().is_symlink() {
         return Err(invalid(&path, "committed ref must be a symlink"));
     }
@@ -178,9 +191,7 @@ fn raw_image_path_at(layout: &Layout, reference: &LocalRef) -> Result<PathBuf> {
             "pointer must be the canonical relative path into raw_images",
         ));
     }
-    let raw_image = layout.raw_image(id);
-    require_directory(&raw_image)?;
-    Ok(raw_image)
+    Ok(Some(id.to_owned()))
 }
 
 /// The borrowed guard keeps the selected raw image protected from prune for

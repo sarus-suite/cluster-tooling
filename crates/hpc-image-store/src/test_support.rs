@@ -151,6 +151,14 @@ pub(crate) fn stage_image<'a>(
     image: &SyntheticImage,
 ) -> CompletedStage<'a> {
     let stage = AcquisitionStage::new(guard, reference).unwrap();
+    complete_image(stage, reference, image)
+}
+
+pub(crate) fn complete_image<'a>(
+    stage: AcquisitionStage<'a>,
+    reference: &LocalRef,
+    image: &SyntheticImage,
+) -> CompletedStage<'a> {
     oci::write_layout(&stage.layout_path(), &image.root).unwrap();
     let mut specs = Vec::new();
     for (digest, bytes) in &image.objects {

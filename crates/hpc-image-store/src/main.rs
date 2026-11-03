@@ -75,7 +75,7 @@ enum Action {
     },
     /// Reclaim recognized unreferenced content in an initialized store.
     Prune {
-        /// Report eligible objects without changing the store.
+        /// Report eligible objects without pruning; pending recovery may run first.
         #[arg(long)]
         dry_run: bool,
         /// Object age: integer seconds, optionally suffixed with s, m, h or d.

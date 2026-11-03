@@ -117,6 +117,22 @@ objects based on cached reports.
 
 ## Failures, backups, and recovery limits
 
+Operation preparation attempts pending recorded recovery before using image
+content; unresolved recovery blocks the requested operation. Recovery waits for
+active operations, including surviving transfer children, and can change the
+store even before a query or prune dry-run. Preserve pending records and the
+permanent lock when investigating errors; never remove them to bypass recovery.
+Malformed records, inconsistent ref states, and unexpected cleanup contents are
+preserved with contextual errors. See the
+[architecture](architecture.md#recorded-mutations-and-automatic-recovery) for
+snapshot presence and lifecycle details.
+
+Public mutators begin creating records in Stage 4. Their current unrecorded
+remnants are not automatically recovered. This foundation does not add general
+repair, migration, or a new operational recovery command. Incomplete format-2
+development stores may be recreated between stages without a compatibility
+promise. Local interruption tests do not qualify power-loss or cross-node behavior.
+
 After a durability error, a namespace change may already be visible. Inspect
 state before retrying; the library does not roll back published refs. Successful
 acquisition may report staging-cleanup warnings, leaving committed content usable.

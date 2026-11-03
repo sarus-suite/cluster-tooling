@@ -200,7 +200,9 @@ Empty encoded ref directories are eligible immediately regardless of grace.
 Namespace prefixes needed by other names and the permanent store lock remain.
 Prune neither scans nor reclaims unexpected contents beneath `locks/`.
 
-Dry-run changes no persistent state. It does not attempt the namespace sync
+On a clean store, dry-run changes no persistent state. All commands first finish
+any pending recorded mutation recovery; that prerequisite can change the store
+even for dry-run. Dry-run then does not attempt the namespace sync
 barrier required before destructive pruning and cannot certify that a later
 deletion will succeed. Real prune saves the scanned ref namespace before
 reclaiming eligible content. It stops on the first removal or sync failure and
@@ -227,9 +229,82 @@ status 0 because the image was already durably published.
 | Export cannot preserve content | Check Skopeo capability and representation support; no conversion fallback is available. |
 | Digest cannot be resolved | Use a stored root under the same literal repository. Resolve damaged candidates before treating an incomplete search as absence. |
 | Lock wait or timeout | Check active transfers, including surviving copy children. Do not delete lock files to break contention. |
-| Prune is blocked | Inspect committed refs and diagnostics; explicitly remove or replace a damaged ref only when that is the intended recovery action. |
+| Prune reports a blocked scan | After successful preparation, inspect committed refs and diagnostics; explicitly remove or replace a damaged ref only when that is the intended recovery action. |
+| Recorded recovery is blocked | Preserve the error and pending records; follow [recovery failures and manual resolution](#recovery-failures-and-manual-resolution). |
 | Durability error after mutation | Inspect current state before retrying: publication or removal may already be visible. No rollback hides that uncertainty. |
 
 Preserve unexpected contents when investigating errors. Replacing a ref cannot
-generally repair damaged shared immutable objects. See the administration guide
-for recovery limits and backup responsibilities.
+generally repair damaged shared immutable objects.
+
+## Recovery failures and manual resolution
+
+Operation preparation automatically finishes safe recorded recovery or returns
+a contextual error; there is no recovery command. Public import, pull, and remove
+do not yet record their work, so unrecorded remnants still require explicit
+maintenance. Preserve pending records and the permanent lock when recovery is
+blocked. See the
+[architecture](architecture.md#recorded-mutations-and-automatic-recovery) for the
+snapshot lifecycle and the
+[administration guide](administration.md#failures-backups-and-recovery-limits)
+for investigating failures, recovery limits, and backup responsibilities.
+
+An ordinary interruption is a case the recovery protocol is designed to handle.
+It reconciles the visible ref with the record and tolerates cleanup entries
+already removed by an earlier attempt. Recovery stops when it cannot perform
+the required filesystem operations or cannot establish that continuing is safe.
+
+| Circumstance | Why recovery stops | Possible resolution |
+| --- | --- | --- |
+| The store lock cannot be acquired | Another operation or a surviving transfer child still holds it. Lock acquisition can time out before recovery starts. | Let the operation finish. Investigate a genuinely stuck process through normal process management. Never delete or replace the lock file. |
+| Filesystem operations fail | Permissions, a read-only or unavailable filesystem, quota/capacity limits, or I/O errors prevent reading, writing snapshots, deleting entries, or syncing directories. | Restore the intended access, available capacity, or filesystem health, then retry recovery through an ordinary command. Required filesystem and durability primitives cannot be bypassed with weaker behavior. |
+| The active snapshot is invalid | JSON is malformed, its version is unsupported, fields contradict one another, or a reserved path has an unexpected type such as a symlink. | Preserve the record and investigate corruption, external changes, or a software mismatch/bug. A compatible implementation, coherent backup restore, or maintainer-reviewed repair may be needed. There is no automatic record repair or migration. |
+| The live ref contradicts the record | It matches neither the expected old state nor the intended new state, or contradicts an already-recorded cleanup outcome. | Investigate external changes, an inconsistent restore, or a bug. Use a verified repair decision or coherent backup restoration; recovery cannot safely guess the intended state. |
+| Safe reclamation cannot be established | Ref discovery is incomplete, pointers or wrapper roots are damaged, or manifest/index declarations are unreadable, conflicting, cyclic, or unsupported. | Restore access when that is the cause. Structural damage needs a coherent backup restore or maintainer-reviewed repair; unsupported declarations need implementation support. Partial reachability cannot authorize deletion. |
+| Cleanup encounters unexpected contents | A recorded tree contains unknown entries, redirected directories, wrong file types, unexpected object sizes, or a planned deletion now targets referenced content. | Preserve the contents and investigate their origin. A verified repair plan or coherent restore may be needed. Blindly deleting the offending entry is not a general resolution. |
+
+Failure does not mean that nothing changed. A new ref or removal may already
+be visible, and some cleanup may have completed. Recovery does not roll back a
+visible committed change. After correcting an environmental problem, recovery
+can resume from its recorded state rather than starting cleanup again from
+scratch.
+
+A `complete` record means content cleanup is already durable and only record
+clearing remains. Removing the record or syncing that removal can still fail.
+The latter can return an error even when the file currently appears absent;
+if it reappears after a crash, its `complete` phase authorizes only bookkeeping
+cleanup.
+
+Because objects are shared, damaged refs other than the operation's target can
+prevent recovery from proving that reclamation is safe. An abandoned acquisition
+that only needs private staging cleanup can avoid this traversal. Recovery reads
+dependency declarations for deletion safety; it does not perform a full content
+check or hash every layer.
+
+For manual resolution:
+
+1. Preserve the full error, affected ref and path, software version, store marker,
+   and pending snapshot files. Diagnose the underlying cause before changing
+   persistent contents. Do not delete `pending-mutation.json`, its temporary
+   replacement, or the permanent lock simply to unblock commands.
+2. For access, capacity, or filesystem failures, correct the environmental
+   problem first. Retry an ordinary query such as `list` to trigger recovery.
+   Inspect the resulting state before deciding whether to repeat the original
+   mutation.
+3. For structural problems, coordinate with the store owner or maintainer,
+   ensure active operations and surviving transfers have stopped, and preserve
+   a coherent backup or snapshot using site procedures before attempting repair.
+   Normal `check`, `remove`, and `prune` also require recovery to succeed; they
+   cannot bypass a blocked recovery to repair the store. Investigation may need
+   read-only filesystem inspection of the preserved state.
+4. Agree on a targeted repair whose identities and content sources can be
+   verified, or restore a coherent backup. Avoid mixing unrelated versions of
+   refs, wrappers, objects, and recovery records. The current implementation
+   provides no general repair facility, so there is no universal supported
+   sequence of manual file edits that restores every damaged store.
+
+Recreating a disposable store whose images can be reacquired is a last resort,
+not the default resolution. It can lose local names, notes, and provenance that
+image blobs alone cannot reconstruct. A tentative
+[future repair feature](development.md#future-work-guided-in-place-repair) would
+aim to restore a store to working order in place while preserving healthy
+content and operational metadata.

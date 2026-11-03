@@ -149,7 +149,8 @@ struct Candidate {
 
 impl Store {
     /// Reclaim recognized unreferenced content after a complete authoritative
-    /// scan. Both modes require an initialized store. Dry-run creates no files.
+    /// scan. Both modes require an initialized store and finish any pending
+    /// recorded recovery first. Dry-run then performs no prune mutations.
     /// Collected scan and deletion failures are returned in the report; store
     /// preparation and lock acquisition failures are returned as errors.
     pub fn prune(&self, options: &PruneOptions) -> Result<PruneReport> {

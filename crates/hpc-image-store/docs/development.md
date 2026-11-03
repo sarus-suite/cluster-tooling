@@ -5,7 +5,8 @@ manifest-preserving registry pull, inventory, structural graph checking,
 explicit ref removal, conservative pruning, and library-only availability.
 The CLI has seven commands. Store format 2 and ref metadata schema 3 are used.
 PoC v2 Stage 2 replaces per-ref locks with one permanent store lock; the content
-lifecycle remains unchanged pending later stages.
+lifecycle of public mutators remains unchanged pending Stage 4. Stage 3 adds
+durable mutation records and automatic recovery during operation preparation.
 The crate remains private to this workspace; application integration is deferred.
 
 The [architecture](architecture.md) is authoritative. The [user guide](user-guide.md),
@@ -19,6 +20,7 @@ results and design/planning context; they do not prescribe future work.
 | --- | --- |
 | Preparation and coordination | `store`, `initialization`, `layout`, `locks`; initialization and subprocess tests |
 | Transfers and publication | `transfer`, `pull`, `subprocess`, `staging`, `cas`, `refs`; publication fixtures and controlled tool tests |
+| Recorded mutations and recovery | `mutation`, `recovery`, and dependency-only traversal in `graph`; recorded synthetic fixtures, fault checkpoints, and a subprocess worker |
 | Inspection | `discovery`, `inventory`, `inspection`, `graph`, `check`, `availability`; complete graph and availability tests |
 | Maintenance | `prune` and its bookkeeping module; reachability, partial-removal, namespace-sync, and empty-ref-directory regressions |
 | CLI and presentation | `main`, `presentation`; CLI integration tests, human/JSON parity |
@@ -29,6 +31,83 @@ Rust examples remain doctests. The crate README is the short navigation entry
 point. Keep relative repository links out of the included library guide; use
 API references or self-contained explanations so generated rustdoc navigation
 also works.
+
+## Pending snapshot naming and lifecycle clarification
+
+The active snapshot is now `pending-mutation.json`, and its temporary replacement
+is `.pending-mutation-next.json`. The private layout helpers are
+`pending_mutation()` and `pending_mutation_next()`. The mutation module, operation
+and record types, public errors, JSON schema, format versions, protocol, and
+fault-checkpoint identifiers retain their existing meanings. The architecture
+and guides explicitly distinguish normal execution, clean idle state, and
+interrupted work, including the single active record and absence of a persistent
+recovery queue. See the [architecture](architecture.md#recorded-mutations-and-automatic-recovery)
+for the authoritative lifecycle. Public mutators still begin recording in Stage 4.
+
+On 3 November 2026, crate check, all 183 library tests, all 25 CLI tests,
+all-target Clippy with warnings denied, formatting, the rustdoc build with
+warnings denied, and `git diff --check` passed for this follow-up. The six
+library subprocess helpers and one CLI helper remained ignored by the top-level
+runners and were invoked by their owning ordinary tests. Existing tests now
+assert the renamed snapshot and scratch paths, their absence after cleanup,
+and renamed paths in CLI diagnostics. Current local documentation links and
+stale-name searches passed. The existing staged changes were preserved.
+
+The library target includes the existing actual-Skopeo lifetime test. The
+real-transfer integration, controlled-registry integration, and doctest targets
+were not rerun for this naming and documentation change; the Stage 3 full-suite
+results below remain historical. Cargo validation used the configured cache
+outside the filesystem sandbox. These checks add no power-loss or Lustre/VAST
+qualification.
+
+## PoC v2 Stage 3: durable mutation records and recovery
+
+Stage 3 is complete. The [architecture](architecture.md#recorded-mutations-and-automatic-recovery)
+describes the protocol, reserved files, ownership, cleanup ordering, reader
+retries, and failure semantics. The [acceptance inventory](pocv2-acceptance.md)
+maps REC-01 through REC-07 to passing library and CLI tests. The internal
+mutation handle supplies acquisition, publication, removal, and cleanup entry
+points; it never performs cleanup in its destructor. Every public operation
+finishes any pending recorded work before using persistent image content.
+
+Recorded variants reuse the original/keeper/replacement, nested-index, and
+encoded-prefix fixtures. Tests inject failures around each snapshot phase,
+namespace changes, every planned removal, syncing, and record clearing. Bounded
+subprocess handshakes cover mutation and recovery termination, competing reader
+retries, and a surviving transfer retaining the operation lock. Open-file
+instrumentation verifies that reclamation reads dependency declarations without
+opening configuration/layer files or display metadata. Unrecorded fixtures
+remain as regressions for the intermediate public lifecycle.
+
+On 2 November 2026, `cargo test --locked -p hpc-image-store -- --nocapture`
+passed 221 tests: 183 library tests, 25 CLI tests, one real-transfer test, five
+controlled-registry tests, and seven doctests. Six library subprocess helpers,
+one CLI helper, and the Docker Hub smoke test remained ignored by the top-level
+runner; owning ordinary tests invoked the helpers. No live registry request was
+made. Real transfers used the disposable overlay-storage harness with Podman
+5.4.2 and Skopeo 1.18.0. Cargo and real-tool tests used the configured cache and
+disposable storage outside the filesystem sandbox.
+
+Early checks exposed a preservation test that expected unchanged bookkeeping
+after an unexpected CAS entry, a CLI fixture missing `check --all`, and Clippy
+findings for a nested condition and a duplicate test-module declaration. Cleanup
+preflight now precedes publishing its snapshot; the fixture and mechanical
+findings were corrected. The passing full suite above followed those behavioral
+test corrections. Final review also found that joining an empty tree member
+adds a trailing slash, allowing Linux to follow a redirected tree root during
+inspection. Root paths now retain their direct spelling, and preservation cases
+cover redirected staging and raw-image roots. After that correction, all 21
+recovery tests and all 25 CLI tests passed again. Crate check, all-target Clippy
+with warnings denied, formatting, the rustdoc build with warnings denied, and
+`git diff --check` passed. Current documentation links were checked locally.
+
+Public import, pull, and remove still create no operation records. Stage 4 will
+integrate them separately; import/pull cleanup warnings and retired content,
+availability, and prune remain. Remove can still initialize, and list cannot
+initialize yet. Recovery does not adopt legacy unrecorded remnants or repair
+external corruption. Format 2/schema 3 remain, without migration or compatibility
+promises between incomplete stages. Local fault and process tests establish
+ordering and retry behavior, not power-loss persistence or Lustre/VAST qualification.
 
 ## PoC v2 Stage 2: single-store coordination and format 2
 
@@ -71,8 +150,9 @@ real-tool tests used the configured cache and disposable storage outside the
 filesystem sandbox.
 
 Import/pull cleanup warnings, retired content, availability, and prune remain.
-Remove can still initialize, and list cannot initialize yet. There is no durable
-mutation record or automatic recovery. Format 2 alone does not imply the final
+Remove can still initialize, and list cannot initialize yet. At Stage 2 completion
+there was no durable mutation record or automatic recovery; Stage 3 above adds
+that foundation. Format 2 alone does not imply the final
 PoC v2 lifecycle guarantees or compatibility between incomplete stages. Local
 process tests demonstrate coordination and failure ordering, without qualifying
 crash persistence or Lustre/VAST cross-node behavior.
@@ -183,9 +263,10 @@ lifetimes. Synthetic OCI fixtures and narrow test-only fault injection cover
 failure paths; readiness handshakes and bounded waits coordinate processes.
 Local failure injection demonstrates ordering, not actual crash persistence.
 
-The six ignored unit tests (`lock_worker`, `wait_worker`, `publication_worker`,
-`transfer_worker`, `pull_worker`, and `cleanup_warning_worker`) are internal
-subprocess helpers invoked by their owning ordinary tests. Never select them
+The six ignored library tests (`lock_worker`, `wait_worker`, `publication_worker`,
+`transfer_worker`, `pull_worker`, and `recovery_worker`) and the CLI's
+`cleanup_warning_worker` are internal subprocess helpers invoked by their owning
+ordinary tests. Never select them
 directly or use an unfiltered `--ignored` invocation. The independently ignored
 Docker Hub test requires explicit selection, as described below.
 
@@ -271,4 +352,40 @@ Imported images gain no round-trip digest comparisons.
 The six ignored subprocess helpers, including `pull_worker`, are invoked only
 by their owning tests. The Docker Hub smoke test is separately ignored for its
 network access. Never use an unfiltered `--ignored` invocation.
+
+## Future work: guided in-place repair
+
+Recorded on 3 November 2026 as a tentative capability for PoC v3 or later. This is
+a candidate for future design, outside PoC v2, with no approved implementation
+plan, delivery commitment, public API, or change to current recovery guarantees.
+The motivation is to help users restore a damaged store to working order in
+place, preserving healthy images, local names, notes, and provenance instead
+of requiring them to discard and recreate the store. Current operational
+guidance is in the [user guide](user-guide.md#recovery-failures-and-manual-resolution).
+
+A future assessment should consider:
+
+- Diagnostics that can inspect a store whose pending recovery is blocked,
+  while leaving ordinary operation preparation's recovery requirement intact.
+- A proposed repair plan and preview that distinguish verified corrections,
+  operator decisions, and irrecoverable losses. Preserve unexpected contents
+  and recovery evidence, potentially through a documented quarantine mechanism.
+- Targeted restoration of missing or damaged immutable objects from trusted
+  backups or explicitly selected sources, with verification against the stored
+  digest. Mutable tags and cached display metadata must not establish identity.
+- Reconciliation of refs, wrappers, and pending records only where the intended
+  identity and state can be established. Preserve healthy shared content and
+  operational metadata, and require explicit decisions where evidence conflicts.
+- Exclusive coordination through the permanent store lock, respect for
+  surviving transfer children, and durable, resumable repair work with a clear
+  report of changes and remaining failures.
+
+Before implementation, decide which damage classes are supported, what evidence
+authorizes each correction, how replacement sources are selected, how quarantine
+and backups are managed, and when operator input is required. Validation should
+include interrupted repair, preservation of unaffected refs and shared objects,
+and honest reporting when original bytes or metadata cannot be recovered. A
+repair facility cannot reconstruct information that has been lost without a
+trustworthy source; it must not silently drop damaged refs or metadata to report
+a healthy store. No general repair is currently implemented.
 

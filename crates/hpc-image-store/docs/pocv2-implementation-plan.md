@@ -3,7 +3,7 @@
 ## Purpose and current baseline
 
 PoC v2 simplifies coordination and makes each mutation finish its own content
-lifecycle. Stages 1 and 2 are implemented; later stages remain planned. The
+lifecycle. Stages 1 through 3 are implemented; later stages remain planned. The
 [architecture](architecture.md) is the authoritative reference for delivered
 behavior and is updated as each stage completes.
 The plans and results under `archive/` remain historical records.
@@ -245,7 +245,7 @@ the [development guide](development.md) records validation and intermediate limi
 availability and prune remain available. Format 2 alone does not yet establish
 complete mutation or recovery guarantees.
 
-### 3. Add durable operation bookkeeping and recovery
+### 3. Add durable operation bookkeeping and recovery (Implemented)
 
 **Prerequisites:** Stage 2's exclusive mutation coordination and format boundary.
 
@@ -272,6 +272,15 @@ cargo test --locked -p hpc-image-store --lib
 cargo test --locked -p hpc-image-store --test cli
 git diff --check
 ```
+
+**Outcome:** versioned atomic JSON snapshots record staging ownership, live
+addition and ref intent, the cleanup outcome and removal list, and durable
+completion. Operation preparation recovers under exclusive access; readers
+release shared access and retry after recovery. Synthetic mutations exercise
+replacement, removal, shared and nested dependencies, and interruption of both
+mutation and recovery. The [acceptance inventory](pocv2-acceptance.md) records
+REC-01 through REC-07 evidence; the [development guide](development.md) records
+validation and its limits.
 
 **Intermediate limits:** the protocol is testable, but public mutations do not
 all create operation records until their Stage 4 substage is complete. Do not

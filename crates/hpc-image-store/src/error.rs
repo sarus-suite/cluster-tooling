@@ -23,6 +23,20 @@ impl std::fmt::Display for NamespaceChange {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("invalid mutation record {path}: {reason}; preserved for investigation")]
+    InvalidMutationRecord { path: PathBuf, reason: String },
+    #[error(
+        "mutation recovery at {record_path} for {reference:?} failed during {phase} (potential namespace change: {change:?}); {remaining}: {source}"
+    )]
+    Recovery {
+        record_path: PathBuf,
+        reference: Option<crate::LocalRef>,
+        phase: &'static str,
+        change: Option<NamespaceChange>,
+        remaining: &'static str,
+        #[source]
+        source: Box<Error>,
+    },
     #[error("no committed ref selects stored root {0}")]
     DigestMissing(crate::ImageSelector),
     #[error(

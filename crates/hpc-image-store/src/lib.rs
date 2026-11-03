@@ -40,8 +40,11 @@ mod layout;
 #[allow(dead_code)]
 mod locks;
 mod metadata;
+#[allow(dead_code)]
+mod mutation;
 mod prune;
 mod pull;
+mod recovery;
 mod store;
 mod subprocess;
 mod transfer;

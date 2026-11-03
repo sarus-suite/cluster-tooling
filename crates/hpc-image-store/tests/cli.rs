@@ -1293,3 +1293,138 @@ fn unsupported_store_formats_are_rejected_without_modification() {
         }
     }
 }
+
+// This fixture intentionally writes the private versioned wire format. It
+// exercises preparation through the shipped CLI without adding a public API.
+fn recorded_acquisition(root: &std::path::Path) -> std::path::PathBuf {
+    use hpc_image_store::{Error, LocalRef, Store, StoreConfig};
+    let store = Store::new(StoreConfig::new(root).unwrap());
+    assert!(matches!(
+        store.remove(&LocalRef::new("setup:missing").unwrap()),
+        Err(Error::RefMissing(_))
+    ));
+    let stage = root.join("tmp/operation-123456789012");
+    std::fs::create_dir(&stage).unwrap();
+    std::fs::create_dir(stage.join("layout")).unwrap();
+    std::fs::write(stage.join("layout/index.json"), b"interrupted acquisition").unwrap();
+    let record = serde_json::json!({
+        "version":1,"id":"123456789012","kind":"import","reference":"tool:tag",
+        "phase":"acquiring","old_raw":null,"new_raw":null,"staging":"operation-123456789012",
+        "owned":[],"reused":[],"retired":[],"namespace_created":[],"cleanup":null
+    });
+    std::fs::write(
+        root.join("pending-mutation.json"),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+    stage
+}
+
+#[test]
+fn commands_finish_recorded_recovery_before_execution_and_keep_json_clean() {
+    use std::fs;
+    for action in [
+        "list", "check", "prune", "remove", "import", "pull", "export",
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("store");
+        let stage = recorded_acquisition(&root);
+        let mut command = cli();
+        command.arg("--store").arg(&root).args([
+            "--json",
+            "--podman",
+            "/unavailable/podman",
+            "--skopeo",
+            "/unavailable/skopeo",
+            action,
+        ]);
+        match action {
+            "prune" => {
+                command.arg("--dry-run");
+            }
+            "check" => {
+                command.arg("--all");
+            }
+            "list" => (),
+            _ => {
+                command.arg("tool:tag");
+            }
+        }
+        let output = command.output().unwrap();
+        assert!(
+            !root.join("pending-mutation.json").exists(),
+            "{action}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !root.join(".pending-mutation-next.json").exists(),
+            "{action}"
+        );
+        assert!(!stage.exists(), "{action}");
+        if matches!(action, "list" | "check" | "prune") {
+            assert!(
+                output.status.success(),
+                "{action}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+            assert!(output.stderr.is_empty());
+        } else {
+            assert_eq!(output.status.code(), Some(1), "{action}");
+            assert!(output.stdout.is_empty(), "{action}");
+        }
+        assert_eq!(fs::read_dir(root.join("tmp")).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn recovery_errors_block_commands_and_preserve_pending_evidence() {
+    use std::fs;
+    for action in [
+        "list", "check", "prune", "remove", "import", "pull", "export",
+    ] {
+        for json in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().join("store");
+            recorded_acquisition(&root);
+            fs::write(root.join("pending-mutation.json"), b"{invalid record").unwrap();
+            fs::write(
+                root.join(".pending-mutation-next.json"),
+                b"preserve this draft too",
+            )
+            .unwrap();
+            let before = snapshots::snapshot(&root);
+            let mut command = cli();
+            command.arg("--store").arg(&root).args([
+                "--podman",
+                "/unavailable/podman",
+                "--skopeo",
+                "/unavailable/skopeo",
+            ]);
+            if json {
+                command.arg("--json");
+            }
+            command.arg(action);
+            match action {
+                "check" => {
+                    command.arg("--all");
+                }
+                "list" => (),
+                "prune" => {
+                    command.arg("--dry-run");
+                }
+                _ => {
+                    command.arg("tool:tag");
+                }
+            }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(1), "{action}");
+            assert!(output.stdout.is_empty());
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(error.contains("mutation recovery"), "{action}: {error}");
+            assert!(error.contains("pending-mutation.json"));
+            assert!(!error.contains("using /unavailable"));
+            assert_eq!(snapshots::snapshot(&root), before);
+        }
+    }
+}

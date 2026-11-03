@@ -9,7 +9,7 @@ This inventory introduces no independent requirements.
 For context, see the plan's [baseline](pocv2-implementation-plan.md#purpose-and-current-baseline),
 [stage execution guidance](pocv2-implementation-plan.md#stage-execution-and-validation),
 and [scope](pocv2-implementation-plan.md#scope-and-document-handoff).
-Stages 1 and 2 supply the implemented evidence below. Unimplemented acceptance
+Stages 1 through 3 supply the implemented evidence below. Unimplemented acceptance
 cases remain **Planned**, even where existing tests preserve part of their behavior.
 
 When requirements change, update the plan first, then update affected acceptance
@@ -43,7 +43,9 @@ bounded waits, and termination at acquisition, pre-rename, post-rename/pre-sync,
 or post-unlink/pre-sync boundaries. It retains affected refs, expected roots and
 object sets through Mutation, observed staging paths, and any new raw-image path.
 These began as format-1 remnants and are now recreated as format-2 fixtures,
-still without recovery records. Stage 3 will add recorded variants; Stage 1 does not serialize a proposed record format.
+still without recovery records. Stage 3 adds recorded variants in `recovery::tests`
+using the same synthetic images and mutation store. The original unrecorded
+variants remain regression evidence for the intermediate public lifecycle.
 
 **Setup**, **Transfer**, and **Registry** mean the existing initialization/lock
 workers, controlled transfer and disposable real-tool harnesses, and controlled
@@ -105,17 +107,29 @@ Stage 2 evidence (test names are relative to their target):
 
 Requirements: [recovery](pocv2-implementation-plan.md#recovery-and-query-boundaries),
 [mutation durability](pocv2-implementation-plan.md#authoritative-content-and-complete-mutations),
-and [Stage 3](pocv2-implementation-plan.md#3-add-durable-operation-bookkeeping-and-recovery).
+and [Stage 3](pocv2-implementation-plan.md#3-add-durable-operation-bookkeeping-and-recovery-implemented).
 
 | ID | Stage | Fixture | Target | Expected observation | Status |
 | --- | --- | --- | --- | --- | --- |
-| REC-01 | 3 | Recorded Mutation/Interrupted variants | lib | One active record exists only under exclusive coordination; staging is recorded before acquisition, additions and intent before live mutation, with identities sufficient to distinguish pre-existing shared objects. | Planned |
-| REC-02 | 3 | Recorded Interrupted variants | lib | Before visible publication, repeated recovery removes safe owned additions/staging and preserves the previous ref and every pre-existing shared object. | Planned |
-| REC-03 | 3 | Recorded Interrupted variants | lib | Visible replacement/removal is reconciled even without a completion update; ref namespace durability precedes deletion, persisted cleanup precedes record removal, and no rollback conceals failed syncing. | Planned |
-| REC-04 | 3 | Recorded Interrupted variants | lib | Fault/termination at each record, namespace, cleanup, and record-removal boundary leaves clean or recorded recoverable work; recovery tolerates completed removals and interruption of recovery itself. | Planned |
-| REC-05 | 3 | Setup, recorded Mutation | lib, CLI | Readers release shared access, exclusively recheck/recover, and retry shared preparation; writers recover first; unresolved recovery blocks the requested action with typed context and never invokes check. | Planned |
-| REC-06 | 3 | Transfer, recorded Interrupted variants | lib, CLI | Recovery cannot remove staging while a surviving transfer holds the operation lock. | Planned |
-| REC-07 | 3 | Recorded variants, Snapshot | lib, CLI | Malformed/inconsistent records, escaping pointers, unknown contents, and unrecorded remnants are preserved with contextual errors; recovery performs no general repair or speculative adoption. | Planned |
+| REC-01 | 3 | Recorded Mutation/Interrupted variants | lib | One active record exists only under exclusive coordination; staging is recorded before acquisition, additions and intent before live mutation, with identities sufficient to distinguish pre-existing shared objects. | Implemented |
+| REC-02 | 3 | Recorded Interrupted variants | lib | Before visible publication, repeated recovery removes safe owned additions/staging and preserves the previous ref and every pre-existing shared object. | Implemented |
+| REC-03 | 3 | Recorded Interrupted variants | lib | Visible replacement/removal is reconciled even without a completion update; ref namespace durability precedes deletion, persisted cleanup precedes record removal, and no rollback conceals failed syncing. | Implemented |
+| REC-04 | 3 | Recorded Interrupted variants | lib | Fault/termination at each record, namespace, cleanup, and record-removal boundary leaves clean or recorded recoverable work; recovery tolerates completed removals and interruption of recovery itself. | Implemented |
+| REC-05 | 3 | Setup, recorded Mutation | lib, CLI | Readers release shared access, exclusively recheck/recover, and retry shared preparation; writers recover first; unresolved recovery blocks the requested action with typed context and never invokes check. | Implemented |
+| REC-06 | 3 | Transfer, recorded Interrupted variants | lib, CLI | Recovery cannot remove staging while a surviving transfer holds the operation lock. | Implemented |
+| REC-07 | 3 | Recorded variants, Snapshot | lib, CLI | Malformed/inconsistent records, escaping pointers, unknown contents, and unrecorded remnants are preserved with contextual errors; recovery performs no general repair or speculative adoption. | Implemented |
+
+Stage 3 evidence (library names below are relative to `recovery::tests`):
+
+| Cases | Passing evidence |
+| --- | --- |
+| REC-01 | `ownership_is_recorded_before_staging_and_shared_objects_remain_immutable`, `failed_snapshots_never_authorize_unrecorded_live_mutations`, and `fresh_publication_and_abort_finish_owned_namespace_directories` cover the single record, absent staging before acquisition, intent ordering, reused objects, and owned namespace paths. |
+| REC-02 | `aborted_publication_recovers_owned_additions_and_preserves_legacy_remnants` covers interruption before publication, repeated preparation, and preservation of old/keeper wrappers, shared objects, unrecorded staging, and the permanent lock inode. |
+| REC-03 | `visible_replacement_recovers_forward_without_a_completion_update`, `removal_reclaims_only_unused_content_and_preserves_longer_names`, and `namespace_sync_failure_blocks_all_reclamation_and_keeps_the_visible_ref` establish forward recovery and the namespace barrier. `completed_record_can_be_cleared_after_a_later_namespace_change` limits completed records to clearing bookkeeping. |
+| REC-04 | `failed_snapshots_never_authorize_unrecorded_live_mutations`, `snapshot_failures_during_cleanup_and_completion_remain_recoverable`, `cleanup_retries_after_each_removal_and_failed_sync_without_retired_manifests`, `termination_at_record_publication_and_cleanup_boundaries_is_recoverable`, and `recovery_itself_can_be_terminated_and_repeated` cover snapshots, every planned removal, parent syncing, record clearing, and process death. |
+| REC-05 | `readers_recheck_after_releasing_shared_and_after_recovery` exercises another process recovering first and another record appearing before shared retry. `clean_preparation_never_traverses_dependencies_or_runs_check` preserves the clean preparation boundary. CLI: `commands_finish_recorded_recovery_before_execution_and_keep_json_clean` and `recovery_errors_block_commands_and_preserve_pending_evidence` cover every command, including dry-run prune, with contextual failures and clean JSON. |
+| REC-06 | `a_surviving_transfer_prevents_recovery_from_removing_recorded_staging` terminates the wrapper while a controlled child retains its inherited locked description, observes a reader timeout without store changes, and then releases the child for recovery. Existing real-Skopeo lifetime tests remain regression coverage. |
+| REC-07 | `malformed_records_and_reserved_entries_are_preserved`, `inconsistent_namespace_unknown_tree_and_escaping_pointer_block_cleanup`, and `cleanup_snapshot_rejects_escaping_unauthorized_and_omitted_entries` compare preserved snapshots. `unreadable_or_unsupported_live_dependencies_block_reclamation` and `dependency_cycles_and_unknown_branches_cannot_authorize_cleanup` cover incomplete safety proofs. `nested_reachability_preserves_all_live_branches_without_opening_terminals_or_metadata` verifies traversal and open-file boundaries. CLI preservation is covered by `recovery_errors_block_commands_and_preserve_pending_evidence`. |
 
 ### Stage 4: complete mutators
 

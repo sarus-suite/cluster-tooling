@@ -55,8 +55,25 @@ impl Store {
         } else {
             crate::initialization::validate_read_prerequisites(&self.layout)?;
         }
-        let guard = crate::locks::StoreGuard::acquire(&self.layout, operation)?;
-        crate::initialization::validate_initialized(&self.layout)?;
-        Ok(guard)
+        loop {
+            let guard = crate::locks::StoreGuard::acquire(&self.layout, operation)?;
+            crate::initialization::validate_initialized(&self.layout)?;
+            if operation.store_mode() == crate::locks::Mode::Exclusive {
+                crate::recovery::recover(&guard)?;
+                return Ok(guard);
+            }
+            if !crate::recovery::pending(&self.layout)? {
+                return Ok(guard);
+            }
+            drop(guard);
+            crate::fsutil::checkpoint("recovery.reader-released", self.layout.root())?;
+            // Never upgrade flock or hold a second descriptor while locked.
+            let recovery =
+                crate::locks::StoreGuard::acquire(&self.layout, crate::locks::Operation::Recovery)?;
+            crate::initialization::validate_initialized(&self.layout)?;
+            crate::recovery::recover(&recovery)?;
+            drop(recovery);
+            crate::fsutil::checkpoint("recovery.reader-retry", self.layout.root())?;
+        }
     }
 }

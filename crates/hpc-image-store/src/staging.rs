@@ -85,6 +85,38 @@ pub(crate) struct AcquisitionStage<'a> {
 }
 
 impl<'a> AcquisitionStage<'a> {
+    /// Create staging at a path already recorded by the caller
+    /// as belonging to its mutation. This function checks exclusive access and
+    /// path placement, but does not verify the mutation record.
+    /// The caller is responsible for entering the path in the mutation record
+    /// before invoking this function.
+    pub(crate) fn recorded(
+        guard: &'a StoreGuard<'a>,
+        reference: &LocalRef,
+        directory: PathBuf,
+    ) -> Result<Self> {
+        guard.require_exclusive()?;
+        if directory.parent() != Some(guard.layout().staging().as_path()) {
+            return Err(Error::Coordination(
+                "recorded staging must be a direct child of tmp",
+            ));
+        }
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .map_err(|source| {
+                crate::error::io_error("create recorded staging", &directory, source)
+            })?;
+        for relative in ["layout", "layout/blobs", "blobs", "blobs/sha256"] {
+            create_directory(&directory.join(relative))?;
+        }
+        Ok(Self {
+            guard,
+            reference: reference.clone(),
+            directory,
+        })
+    }
     pub fn new(guard: &'a StoreGuard<'a>, reference: &LocalRef) -> Result<Self> {
         guard.require_exclusive()?;
         let directory = fsutil::unique_directory(&guard.layout().staging(), "operation-")?;

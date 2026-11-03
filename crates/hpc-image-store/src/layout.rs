@@ -25,6 +25,12 @@ impl Layout {
     pub fn marker(&self) -> PathBuf {
         self.root.join("store.json")
     }
+    pub fn pending_mutation(&self) -> PathBuf {
+        self.root.join("pending-mutation.json")
+    }
+    pub fn pending_mutation_next(&self) -> PathBuf {
+        self.root.join(".pending-mutation-next.json")
+    }
     pub fn store_lock(&self) -> PathBuf {
         self.root.join("locks/store.lock")
     }

@@ -1,6 +1,6 @@
 # HPC image store architecture
 
-This is the authoritative architecture reference for the implemented PoC v2 Stage 2.
+This is the authoritative architecture reference for the implemented PoC v2 Stage 3.
 It describes current behavior and the guarantees that changes must preserve.
 The source and tests establish what is implemented; consequential differences
 from this contract require explicit resolution. The archived design and plan
@@ -39,6 +39,8 @@ required primitive is unavailable.
 ```text
 store/
 ├── store.json                     # Store format 2
+├── pending-mutation.json          # Active snapshot during a recorded mutation
+├── .pending-mutation-next.json    # Temporary replacement snapshot, when present
 ├── blobs/sha256/<digest>           # Shared immutable manifests, configs, layers
 ├── refs/<encoded-key>/ref          # Relative symlink selecting a raw image
 ├── raw_images/raw-<id>/            # Complete underlying image record
@@ -163,7 +165,8 @@ Created directories use mode 0700 and files 0600, subject to umask; existing
 permissions are preserved. Skopeo chooses blob permissions inside private
 directories. Reserved setup directories must be real directories; markers and
 lock files must be regular files. Committed ref pointers are intentionally
-symlinks. Read operations create no coordination bookkeeping.
+symlinks. Read operations create no coordination bookkeeping. Their preparation
+can first finish recorded recovery under exclusive access, as described below.
 
 ## Coordination and process lifetime
 
@@ -175,6 +178,7 @@ of persistent content. There are no per-ref lock files or guards.
 | Import, pull, remove | Exclusive |
 | Export, availability, list, check | Shared |
 | Prune, including dry-run | Exclusive |
+| Pending mutation recovery | Exclusive |
 
 Shared readers coexist. Writers serialize across all names and exclude readers.
 List and all-store check observe a stable namespace throughout their operation.
@@ -288,6 +292,101 @@ exist. Prune handles recognized abandoned remnants later. Staging must fit an
 entire acquisition even when final content deduplicates; duplicate staged copies
 and hard links disappear during successful cleanup.
 
+## Recorded mutations and automatic recovery
+
+Stage 3 supplies internal recorded mutation primitives and automatic recovery
+in every operation's preparation. Public import, pull, and remove still use the
+publication and cleanup behavior above until their Stage 4 changes. No public
+operation currently creates mutation records, and legacy unrecorded remnants
+are not automatically recovered. The protocol is exercised by synthetic
+mutations and controlled subprocesses. It adds no recovery command or public
+method, changes no initialization permissions, and retains format 2/schema 3.
+Intermediate format-2 stores may be recreated as the protocol is completed;
+compatibility between incomplete stages is not promised.
+
+`pending-mutation.json` is the durable snapshot of a mutation whose lifecycle
+has not yet finished. It exists during normal execution of a recorded mutation;
+its presence alone does not indicate interruption, failure, or corruption.
+A clean, idle store contains neither `pending-mutation.json` nor
+`.pending-mutation-next.json`. An interrupted or failed operation can leave the
+snapshot for recovery.
+
+There is at most one active snapshot per store and no persistent recovery queue.
+The exclusive store lock serializes mutations, and pending recovery must finish
+before another operation proceeds. An unresolved recovery blocks that operation.
+The temporary `.pending-mutation-next.json` can coexist with the active snapshot
+while preparing a replacement snapshot of the same mutation.
+
+The versioned snapshot carries the operation and ref identities, expected old
+and intended new pointer identities, private staging, owned and reused objects, retired raw
+images and their dependency declarations, and namespace-directory ownership.
+Paths are derived from validated identities and fixed tree-member names. The
+record phases are `acquiring`, `intent`, `cleaning`, and `complete`.
+
+Snapshot publication creates `.pending-mutation-next.json` exclusively, writes
+and syncs it, renames it over `pending-mutation.json`, and syncs the store root.
+Only then may the corresponding live change begin. Staging ownership is durable
+before the staging directory is created. Publication intent and ownership of
+unused CAS and raw-image identities are durable before inserting live content. Reused
+objects never become owned additions. These primitives retain immutable hard
+link insertion, complete wrappers, canonical pointers, and namespace syncing.
+There is no cleanup in a mutation handle's destructor.
+
+Recovery validates the active record before discarding any regular scratch
+snapshot. Scratch is never promoted or interpreted as an instruction to mutate
+content. A scratch-only interruption authorizes removal of that reserved
+regular file and a root sync. Malformed active records, redirected reserved
+entries, unexpected tree members, and inconsistent namespace states are
+preserved with errors. Only recognized operation contents are eligible for
+cleanup; recovery performs no general repair or discovery of abandoned work.
+
+Recovery compares the actual terminal pointer with the recorded old and new
+states. If the old state remains, it abandons acquisition and cleans safe owned
+additions. If the intended pointer or removal is visible, it establishes that
+namespace's durability and finishes reclamation. A completion flag is not
+required to recognize a visible change, and recovery never restores the old
+ref. Other states block the requested operation.
+
+Reclamation reads authoritative roots and manifest/index declarations under
+the exclusive lock, following every supported branch, including nested indexes.
+It does not open configuration or layer files, consult display metadata, or run
+check, availability, prune, or external tools. Incomplete discovery, unreadable
+declarations, conflicting descriptors, unsupported dependencies, and cycles
+block unsafe deletion. This traversal establishes reachability for deletion;
+it is not a content check or execution certificate.
+
+Before deleting content, recovery syncs the changed ref namespace and the
+namespace used to determine reachability. It persists a `cleaning` snapshot
+with the outcome and a complete removal list before the first deletion, so
+later attempts need not reopen retired manifests already removed. Cleanup is
+limited to recorded candidates that no remaining ref uses. It preserves shared
+objects, live raw images, and namespace prefixes needed by longer names.
+Unexpected contents and entry types block deletion rather than being adopted.
+All planned trees are inspected before deletion, and resumed cleanup rechecks
+live reachability and remaining obligations.
+
+Removal proceeds from children to parents, syncing affected parents. Missing
+entries explained by the durable plan are valid retry states; recovery syncs
+their surviving parent or planned ancestor before confirming cleanup. It then
+persists `complete`, unlinks the record, and syncs the root. A failure still
+returns an error, including uncertain record removal. A surviving or resurrected
+`complete` record authorizes only record clearing, never further content deletion.
+
+Writers recover before beginning their requested action. A reader finding
+pending work releases shared access, acquires the same permanent lock
+exclusively, revalidates and rechecks pending work, and recovers. It then releases
+exclusive access and retries shared preparation, including another pending-work
+check. There is no lock upgrade and no second descriptor retained alongside a
+held operation lock. A surviving transfer continues to exclude recovery until
+its inherited locked descriptor closes. Prune dry-run also performs prerequisite
+recovery; dry-run suppresses the subsequent prune deletions.
+
+`Error::InvalidMutationRecord` identifies invalid bookkeeping;
+`Error::Recovery` includes record path, available ref identity, phase, potential
+namespace change, remaining work, and the contextual underlying error. Recovery
+failure blocks ordinary actions. Local fault and termination tests establish
+ordering and retry behavior, not power-loss persistence or Lustre/VAST qualification.
+
 ## Inventory, checking, and availability
 
 Discovery enumerates the committed namespace rather than hiding malformed refs.
@@ -333,6 +432,7 @@ cannot generally repair immutable shared CAS damage.
 
 Both modes require initialization and hold the exclusive store lock through a
 fresh authoritative ref/graph scan, candidate enumeration, and any mutation.
+This pruning work follows any prerequisite recorded recovery described above.
 Neither creates coordination files or invokes tools. Any unresolved committed-ref
 error, conflicting descriptor, unreadable namespace, or incomplete candidate inspection
 blocks all deletion, including staging cleanup. Previous check/availability
@@ -385,7 +485,8 @@ savings. Empty ref-directory candidates have zero bytes.
 
 `store`, `initialization`, `layout`, and `locks` own preparation and coordination.
 `transfer`, `pull`, and `subprocess` own tool interactions. `staging`, `cas`, and
-`refs` own publication. `discovery`, `inventory`, `inspection`, `graph`, `check`,
+`refs` own publication. `mutation` and `recovery` own recorded operations and
+their preparation barrier. `discovery`, `inventory`, `inspection`, `graph`, `check`,
 and `availability` inspect committed content. `prune` and its bookkeeping module
 perform maintenance; `main` and `presentation` handle the CLI.
 

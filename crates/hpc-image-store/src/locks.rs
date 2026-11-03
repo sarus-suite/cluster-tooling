@@ -75,6 +75,7 @@ pub(crate) enum Operation {
     Check,
     Availability,
     Prune,
+    Recovery,
 }
 impl Operation {
     pub fn initializes(self) -> bool {
@@ -82,7 +83,9 @@ impl Operation {
     }
     pub fn store_mode(self) -> Mode {
         match self {
-            Self::Import | Self::Pull | Self::Remove | Self::Prune => Mode::Exclusive,
+            Self::Import | Self::Pull | Self::Remove | Self::Prune | Self::Recovery => {
+                Mode::Exclusive
+            }
             Self::Export | Self::List | Self::Check | Self::Availability => Mode::Shared,
         }
     }

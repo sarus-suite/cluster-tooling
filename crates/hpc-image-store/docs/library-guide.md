@@ -22,6 +22,13 @@ Constructing the configuration and handle does not change the filesystem.
 A relative store path is resolved against the current working directory when
 the configuration is constructed. Import, pull, and export perform their own
 store preparation and locking, so callers do not need to coordinate those steps.
+All operations finish pending recorded recovery during preparation. Shared
+queries may temporarily require exclusive access for this prerequisite, then
+retry under their normal shared lock. A clean preparation performs no content
+graph traversal. Unrecorded remnants are not automatically recovered.
+
+Public import, pull, and remove do not yet create these records; their
+integration is planned for Stage 4.
 
 Checking returns collected damage as a report, while store and selection
 failures return typed errors:
@@ -266,6 +273,15 @@ typed `Error` values with context. List, check, and prune can instead return
 collected reports containing failures; check their `has_errors()` methods.
 Availability's `Unusable` is a classified observation rather than an operational
 error, and may carry several diagnostics.
+
+`Error::InvalidMutationRecord` identifies invalid durable bookkeeping.
+`Error::Recovery` reports the record path, available ref identity, phase,
+potential namespace change, remaining work, and underlying cause. Recovery
+failures block the requested action, including explicit check and prune dry-run,
+and preserve pending evidence for investigation. The library does not repair or
+adopt inconsistent contents. No public recovery
+method or report type is added. Prune dry-run suppresses prune deletions after
+any required recorded recovery has finished.
 
 `Error::Durability` identifies a potentially visible blob insertion, ref
 publication, or removal through `NamespaceChange` and the failed sync path.

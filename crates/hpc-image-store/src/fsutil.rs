@@ -10,6 +10,12 @@ use std::{
 };
 
 pub(crate) fn open_regular(path: &Path) -> Result<File> {
+    #[cfg(test)]
+    OPENED.with(|slot| {
+        if let Some(paths) = slot.borrow_mut().as_mut() {
+            paths.push(path.to_owned());
+        }
+    });
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -149,6 +155,21 @@ pub(crate) fn fault(_point: &'static str) -> io::Result<()> {
 #[cfg(test)]
 thread_local! {
     static FAILURE: std::cell::RefCell<Option<(&'static str, FaultAction)>> = const { std::cell::RefCell::new(None) };
+    static OPENED: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn track_opens() {
+    OPENED.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+}
+
+#[cfg(test)]
+pub(crate) fn take_opens() -> Vec<PathBuf> {
+    OPENED.with(|slot| {
+        slot.borrow_mut()
+            .take()
+            .expect("opened files tracking started")
+    })
 }
 
 #[cfg(test)]
