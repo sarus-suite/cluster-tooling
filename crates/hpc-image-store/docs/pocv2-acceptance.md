@@ -9,7 +9,7 @@ This inventory introduces no independent requirements.
 For context, see the plan's [baseline](pocv2-implementation-plan.md#purpose-and-current-baseline),
 [stage execution guidance](pocv2-implementation-plan.md#stage-execution-and-validation),
 and [scope](pocv2-implementation-plan.md#scope-and-document-handoff).
-Stages 1 through 3 and Stages 4.1 and 4.2 supply the implemented evidence below.
+Stages 1 through 3 and Stages 4.1 through 4.3 supply the implemented evidence below.
 Unimplemented acceptance
 cases remain **Planned**, even where existing tests preserve part of their behavior.
 
@@ -46,7 +46,7 @@ object sets through Mutation, observed staging paths, and any new raw-image path
 These began as format-1 remnants and are now recreated as format-2 fixtures,
 still without recovery records. Stage 3 adds recorded variants in `recovery::tests`
 using the same synthetic images and mutation store. The original unrecorded
-variants remain regression evidence for the intermediate public lifecycle.
+variants remain regression evidence for legacy remnants; public mutators now use recorded lifecycles.
 
 **Setup**, **Transfer**, and **Registry** mean the existing initialization/lock
 workers, controlled transfer and disposable real-tool harnesses, and controlled
@@ -102,7 +102,7 @@ Stage 2 evidence (test names are relative to their target):
 | LOCK-03 | lib: existing `locks::tests` warning, timeout, interruption, and close-on-exec cases; initialization inode/retry tests; `publication_tests::bookkeeping_tests::store_lock_holders_exclude_cleanup_and_waiters_retain_permanent_identity`. A paused waiter does not itself hold a lock; prune preserves its inode before acquisition and waits once it acquires shared access. |
 | LOCK-04 | lib: `publication_tests::shared_guards_reject_mutation_and_metadata_cannot_change_the_destination`, existing publication/interruption and nested-index prune regressions; `publication_tests::bookkeeping_tests::missing_lookups_create_no_bookkeeping_and_namespace_cleanup_requires_the_barrier`. CLI: `prune_cli_cleans_bookkeeping_with_default_grace_and_matches_library_reports` verifies four remaining summary kinds and absence of ref-lock output. |
 | FORMAT-01 | lib: `tests::format_two_preserves_schema_three_and_rejects_old_stores_without_changes`; CLI: `unsupported_store_formats_are_rejected_without_modification`. Snapshot comparisons cover format 1 and unsupported version 99 across operations. |
-| SETUP-01 | lib: `tests::{concurrent_initialization_and_termination_release_locks,interrupted_scaffolding_can_resume,initialization_syncs_only_the_root_and_its_immediate_parent_in_order,interrupted_initialization_preserves_root_and_lock_identities,obsolete_empty_ref_lock_scaffolding_is_preserved_and_rejected}` plus existing permission, missing-parent, and sync-failure tests. Concurrent setup mixes import and pull; remove retains its initialization privilege. |
+| SETUP-01 | lib: `tests::{concurrent_initialization_and_termination_release_locks,interrupted_scaffolding_can_resume,initialization_syncs_only_the_root_and_its_immediate_parent_in_order,interrupted_initialization_preserves_root_and_lock_identities,obsolete_empty_ref_lock_scaffolding_is_preserved_and_rejected}` plus existing permission, missing-parent, and sync-failure tests. Concurrent setup mixes import and pull; at Stage 2, remove retained its initialization privilege, which Stage 4.3 removes. |
 
 ### Stage 3: bookkeeping and recovery
 
@@ -138,7 +138,7 @@ Requirements: [complete mutations](pocv2-implementation-plan.md#authoritative-co
 [recovery](pocv2-implementation-plan.md#recovery-and-query-boundaries), and the
 [import](pocv2-implementation-plan.md#41-import-implemented),
 [pull](pocv2-implementation-plan.md#42-pull-implemented), and
-[remove](pocv2-implementation-plan.md#43-remove) substages of Stage 4.
+[remove](pocv2-implementation-plan.md#43-remove-implemented) substages of Stage 4.
 Removal's initialization policy follows the
 [coordination contract](pocv2-implementation-plan.md#coordination-and-initialization).
 
@@ -153,10 +153,10 @@ Removal's initialization policy follows the
 | CONTENT-04 | 4.1 | Interrupted | lib | Namespace syncing precedes retired-content deletion; partial deletion/sync failure remains visible and recorded; cleanup is persisted before clearing the record or returning success. | Implemented |
 | PULL-01 | 4.2 | Mutation, Registry | lib, registry, CLI | Pull/replacement finish the same lifecycle; shared objects survive; cleanup failures are errors. Pull warning fields/CLI handling and the now-unused shared warning type disappear. | Implemented |
 | PULL-02 | 4.2 | Registry, Interrupted | lib, registry, CLI | Pinned manifest acquisition, digest preservation, platform selection, registry settings and provenance survive failure/recovery; missing capabilities and unsupported representations fail without weaker retry or conversion. | Implemented |
-| REMOVE-01 | 4.3 | Setup, Snapshot | lib, CLI | Missing roots/parents, empty directories, and interrupted setup remain unchanged, without lock bookkeeping; initialized stores support recovery and retain the missing-ref error. | Planned |
-| REMOVE-02 | 4.3 | Shared, Mutation | lib, CLI, real | Removing one ref preserves shared content; removing the last use durably reclaims blobs, raw images, staging, and unnecessary namespace directories before success, without grace or prune. | Planned |
-| REMOVE-03 | 4.3 | Prefix | lib, CLI | Removing the short name leaves its terminal ref absent and preserves longer names, their content, and necessary namespace parents. | Planned |
-| REMOVE-04 | 4.3 | Interrupted | lib, CLI | Partial deletion and failed sync report visible changes, retain recovery information, and never report premature success or roll back. Removal still requires `LocalRef` and rejects digest selectors. | Planned |
+| REMOVE-01 | 4.3 | Setup, Snapshot | lib, CLI | Missing roots/parents, empty directories, and interrupted setup remain unchanged, without lock bookkeeping; initialized stores support recovery and retain the missing-ref error. | Implemented |
+| REMOVE-02 | 4.3 | Shared, Mutation | lib, CLI, real | Removing one ref preserves shared content; removing the last use durably reclaims blobs, raw images, staging, and unnecessary namespace directories before success, without grace or prune. | Implemented |
+| REMOVE-03 | 4.3 | Prefix | lib, CLI | Removing the short name leaves its terminal ref absent and preserves longer names, their content, and necessary namespace parents. | Implemented |
+| REMOVE-04 | 4.3 | Interrupted | lib, CLI | Partial deletion and failed sync report visible changes, retain recovery information, and never report premature success or roll back. Removal still requires `LocalRef` and rejects digest selectors. | Implemented |
 
 Stage 4.1 evidence (library names are relative to `transfer::tests` unless noted):
 
@@ -180,6 +180,20 @@ Stage 4.2 evidence (library names are relative to `pull::tests` unless noted):
 | PULL-01, PULL-02 | `lifecycle_tests::{pull_failures_recover_without_harming_prior_or_shared_content,acquisition_errors_remain_typed_and_recover_without_registry_requests,terminated_pull_recovers_at_publication_and_cleanup_boundaries}` cover typed acquisition and filesystem errors, unsupported staged declarations, pre/post-publication state, termination, tool-free repeated recovery, and record-clearing uncertainty. `terminated_pull_keeps_prior_ref_and_orphan_copy_locks` verifies the recorded attempt excludes query recovery until the surviving child releases its inherited store descriptor; subsequent `list` finishes cleanup and retains the permanent lock inode. |
 | PULL-02 | Existing raw hashing, manifest/index selection, tag-movement pinning, digest-source naming/precedence, completed platform validation, capability rejection, registry-setting, provenance, and export-preservation tests remain passing. Registry: `pull_cli_reports_pinned_identity_notices_and_configuration`, `pull_cli_optional_destinations_and_digest_sources_match_library`, `pull_cli_operation_failure_preserves_ref_and_returns_status_one`, and `pulled_export_cli_preserves_identity_and_reports_failures_without_modification`. The controlled producer requires digest preservation and rejects conversion flags. |
 | PULL-01, PULL-02 | CLI: `cleanup_failure_is_an_error_and_recovery_keeps_json_clean` now also exercises public pull replacement with removal and sync permission failures, in human and JSON modes: status 1, empty stdout, visible publication, retained records, and repeated tool-free CLI `list` recovery after access is restored. Registry success tests verify pull's JSON omits the warning field; source review confirms removal of the shared warning type, export, and CLI handling. |
+
+Stage 4.3 evidence (library names are relative to
+`publication_tests::removal_tests` unless noted):
+
+| Cases | Passing evidence |
+| --- | --- |
+| REMOVE-01 | `remove_never_creates_or_resumes_store_setup` and CLI `remove_requires_completed_setup_and_preserves_every_uninitialized_entry` compare snapshots for missing roots/ancestors, empty directories, incomplete lock scaffolding, interrupted markers with/without a lock, unsupported formats, and damaged initialized structure; initialized missing refs retain their error. Existing CLI `commands_finish_recorded_recovery_before_execution_and_keep_json_clean` also covers removal preparation. |
+| REMOVE-02, REMOVE-03 | `removal_reclaims_shared_content_and_prefixes_before_success_without_reading_terminals` covers unique/shared objects, both prefix names, metadata-cache independence, unchanged keeper bytes/inodes, permanent lock identity, and no staging or pending records. `removal_preserves_every_nested_keeper_branch_and_unrecorded_remnants` follows nested and direct manifest branches without opening config/layer objects. CLI `cli_remove_reclaims_content_preserves_longer_names_and_ignores_metadata_damage` verifies both output modes with producer executables removed. Real `real_rootless_round_trip` asserts immediate wrapper cleanup and shared-object retention after the first removal, then an empty content namespace after the last, before further maintenance. |
+| REMOVE-04 | `public_remove_errors_recover_at_every_durable_boundary`, `public_remove_retries_every_cleanup_deletion_and_parent_sync`, and `terminated_public_remove_recovers_forward_or_abandons_without_unlinking` exercise intent snapshots, unlink/sync, namespace barriers, every planned removal and parent sync (including last-ref namespace directories), completion, and uncertain record clearing. Repeated query preparation abandons an uncommitted removal or finishes visible removal forward. CLI `cleanup_failure_is_an_error_and_recovery_keeps_json_clean` covers post-removal deletion/sync permission failures, status 1, empty stdout, `RefRemoved` context, and repeated tool-free JSON recovery. Existing digest-selector rejection tests remain passing. |
+| REMOVE-02, REMOVE-04 | `damaged_target_declarations_are_preserved_before_removal_intent` and `publication_tests::public_remove_rejects_damaged_refs_without_following_them` preserve invalid targets without starting removal. `unrelated_dependency_damage_blocks_all_operations_after_visible_removal` proves the agreed lockout behavior, preserved unsafe-to-delete content, and repeated recovery after restoring known fixture bytes. CLI `damaged_inventory_blocks_cleanup_after_visible_removal` establishes the same conservative boundary for unknown namespace contents. |
+
+Prune tests now explicitly construct legacy unrecorded unlink remnants; they no
+longer rely on public removal leaving deferred content. Clean removal fixtures
+use the recorded acquisition primitives and contain no unrelated staging.
 
 ### Stage 5: lightweight existence
 

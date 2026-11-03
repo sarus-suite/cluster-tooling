@@ -3,7 +3,7 @@
 ## Purpose and current baseline
 
 PoC v2 simplifies coordination and makes each mutation finish its own content
-lifecycle. Stages 1 through 3 and Stages 4.1 and 4.2 are implemented; later substages
+lifecycle. Stages 1 through 3 and Stages 4.1 through 4.3 are implemented; later substages
 remain planned. The [architecture](architecture.md) is the authoritative reference for delivered
 behavior and is updated as each stage completes.
 The plans and results under `archive/` remain historical records.
@@ -369,7 +369,7 @@ and PULL-02 evidence; the development guide records validation and its limits.
 availability still exist. Controlled fixtures establish registry behavior;
 this stage does not require a live registry test.
 
-#### 4.3. Remove
+#### 4.3. Remove (Implemented)
 
 **Prerequisites:** Stages 4.1 and 4.2, including their reclamation and recovery
 primitives and shared-content tests.
@@ -408,6 +408,20 @@ cargo test --locked -p hpc-image-store --test cli
 cargo test --locked -p hpc-image-store --test real_transfers -- --nocapture
 git diff --check
 ```
+
+**Outcome:** public removal now uses the recorded mutation lifecycle and requires
+an existing initialized store. Success includes immediate unused-content and
+namespace cleanup; shared objects, longer names, and unrecorded remnants are
+preserved. Target identity and authoritative dependencies must be readable
+before intent is recorded. The acceptance inventory records REMOVE-01 through
+REMOVE-04 evidence; the development guide records validation and its limits.
+
+The existing sequence is retained without an extra reachability preflight:
+record intent, unlink and sync the ref, then prove remaining reachability and
+finish cleanup. Damage in another ref can leave the name removed and recovery
+pending, blocking ordinary access, including list, check, remove, and prune.
+The guides explain this limitation and preserving recovery evidence. Addressing
+it is deferred to PoC v3 or later; PoC v2 adds no repair or recovery bypass.
 
 **Intermediate limits:** all three mutators now complete their lifecycle, but
 availability and prune remain public until Stages 5 and 6. This does not

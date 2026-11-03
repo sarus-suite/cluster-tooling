@@ -27,8 +27,9 @@ queries may temporarily require exclusive access for this prerequisite, then
 retry under their normal shared lock. A clean preparation performs no content
 graph traversal. Unrecorded remnants are not automatically recovered.
 
-Import and pull record their complete mutation lifecycle. Remove does not yet
-create records; its integration remains planned for Stage 4.3.
+Import, pull, and remove record their complete mutation lifecycle. Only import
+and pull may initialize a missing or empty store at this stage. Remove requires
+an initialized store and never creates a missing root or resumes setup.
 
 Checking returns collected damage as a report, while store and selection
 failures return typed errors:
@@ -138,8 +139,13 @@ flag describes namespace enumeration, separately from damage. Store-level
 failures return `Err`; per-ref failures stay in the report. `ListEntry` preserves
 independently readable root and metadata fields when another wrapper file is
 damaged. `RemoveReport` identifies the removed name without estimating reclaimed
-space. `export` returns `ExportReport`, including the deterministically chosen
-local ref.
+space. A successful `remove(&LocalRef)` means the name's removal, unused recorded
+content reclamation, namespace cleanup, and record clearing are durable. It
+preserves shared objects and prefixes needed by longer names. It requires a
+canonical pointer, readable wrapper index, and supported readable dependency
+declarations; damaged display metadata alone does not block it. Removal rejects
+damaged identities rather than acting as a repair operation. `export` returns
+`ExportReport`, including the deterministically chosen local ref.
 
 ## Pulling from the Rust library
 
@@ -309,10 +315,19 @@ any required recorded recovery has finished.
 publication, or removal through `NamespaceChange` and the failed sync path.
 `Error::InitializationDurability` similarly reports a potentially published
 marker. Do not assume `Err` means no change occurred or retry replacement
-blindly. Import and pull errors after recording begins use `Error::Recovery`, retaining
+blindly. Import, pull, and remove errors after recording begins use `Error::Recovery`, retaining
 the underlying typed cause, including `Error::ToolFailed` or `Error::Durability`.
-Cleanup failures are errors even after publication; a later operation finishes
-recorded work during preparation. Neither acquisition cleans up in a destructor.
+Cleanup failures are errors even after publication or removal; a later operation
+attempts recorded work during preparation. No mutation cleans up in a destructor.
+
+Removal checks remaining refs after unlinking, without an additional early
+preflight. Damage in another ref can therefore leave the name absent while
+cleanup remains pending. Until safe recovery is possible, all ordinary operations
+are blocked, including list, explicit check, remove, and prune. They provide no
+recovery bypass. Preserve pending records and the permanent lock; structural
+damage may need coherent restoration or maintainer-reviewed repair. Addressing
+this access limitation is deferred to PoC v3 or later, outside PoC v2.
+
 Pull recovery does not retry the transfer or contact the registry. Capability
 and source-resolution failures before recording retain their original error
 types. Prune

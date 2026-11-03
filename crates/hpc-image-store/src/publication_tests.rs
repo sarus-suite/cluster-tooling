@@ -17,6 +17,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "removal_tests.rs"]
+mod removal_tests;
+
 #[path = "availability/tests.rs"]
 mod availability_tests;
 
@@ -130,6 +133,13 @@ fn publish(handle: &Store, reference: &LocalRef, image: Image, replace: bool) ->
     let store_guard = handle.prepare(Operation::Import).unwrap();
     let destination = reference.clone();
     refs::publish(completed(&store_guard, &destination, image), replace).unwrap()
+}
+
+// Deliberately construct unrecorded remnants for the still-supported prune tests.
+// Public removal now reclaims its recorded content before success.
+fn legacy_unlink(handle: &Store, reference: &LocalRef) -> crate::Result<()> {
+    let guard = handle.prepare(Operation::Remove)?;
+    refs::remove(&guard, reference)
 }
 
 #[test]
@@ -887,26 +897,28 @@ fn public_inventory_reports_unknown_namespace_and_incomplete_enumeration() {
 }
 
 #[test]
-fn public_remove_preserves_retired_content_and_reports_unlink_durability() {
+fn public_remove_finishes_retired_content_and_reports_unlink_durability() {
     let temporary = tempfile::tempdir().unwrap();
     let handle = store(temporary.path());
     let raw = publish(&handle, &reference(), Image::One, false);
     let lock = handle.layout.store_lock();
     let inode = fs::metadata(&lock).unwrap().ino();
     fsutil::fail_once("ref.unlink", libc::EIO);
-    assert!(matches!(handle.remove(&reference()), Err(Error::Io { .. })));
+    assert!(
+        matches!(handle.remove(&reference()), Err(Error::Recovery { source, .. }) if matches!(*source, Error::Io { .. }))
+    );
     assert_eq!(handle.list().unwrap().entries.len(), 1);
     fsutil::fail_once("ref.remove-sync", libc::EIO);
     assert!(matches!(
         handle.remove(&reference()),
-        Err(Error::Durability {
-            change: NamespaceChange::RefRemoved,
-            ..
-        })
+        Err(Error::Recovery { change: Some(NamespaceChange::RefRemoved), source, .. })
+        if matches!(*source, Error::Durability { change: NamespaceChange::RefRemoved, .. })
     ));
+    assert!(raw.exists());
+    assert!(handle.layout.pending_mutation().exists());
     assert!(handle.list().unwrap().entries.is_empty());
-    assert!(raw.join("metadata.json").is_file());
-    assert!(handle.layout.blob(&root(Image::One)).is_file());
+    assert!(!raw.exists());
+    assert!(!handle.layout.blob(&root(Image::One)).exists());
     assert_eq!(fs::metadata(&lock).unwrap().ino(), inode);
     assert!(matches!(
         handle.remove(&reference()),
@@ -915,7 +927,7 @@ fn public_remove_preserves_retired_content_and_reports_unlink_durability() {
 }
 
 #[test]
-fn public_remove_unlinks_damaged_refs_without_following_them() {
+fn public_remove_rejects_damaged_refs_without_following_them() {
     for kind in ["file", "broken", "escape", "directory", "fifo", "parent"] {
         let temporary = tempfile::tempdir().unwrap();
         let handle = store(temporary.path());
@@ -942,11 +954,9 @@ fn public_remove_unlinks_damaged_refs_without_following_them() {
             _ => unreachable!(),
         }
         let result = handle.remove(&reference());
-        if matches!(kind, "directory" | "fifo" | "parent") {
-            assert!(result.is_err());
-        } else {
-            assert_eq!(result.unwrap().local_ref, reference());
-        }
+        assert!(result.is_err(), "{kind}");
+        assert!(fs::symlink_metadata(&path).is_ok(), "{kind}");
+        assert!(!handle.layout.pending_mutation().exists());
         assert_eq!(fs::read(outside.join("ref")).unwrap(), b"preserve");
     }
 }
@@ -1046,7 +1056,12 @@ fn publication_worker() {
         println!("PUBLICATION_READY");
         return;
     }
-    if action == "remove-public" {
+    if action == "remove-public" || action.starts_with("remove-at-") {
+        if let Some(point) = action.strip_prefix("remove-at-") {
+            // Only this internal worker selects the existing test checkpoints.
+            let point = removal_tests::removal_checkpoint(point);
+            fsutil::pause_once(point);
+        }
         handle.remove(&reference).unwrap();
         println!("PUBLICATION_READY");
         return;

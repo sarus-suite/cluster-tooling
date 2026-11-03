@@ -32,6 +32,12 @@ elif a[-1].startswith('oci:'):
     print('subprocess output must not leak into result JSON')
 "#;
 
+// Construct legacy leftovers for prune without depending on public removal.
+fn unlink_fixture_ref(root: &std::path::Path, name: &str) {
+    let reference = hpc_image_store::LocalRef::new(name).unwrap();
+    std::fs::remove_file(root.join("refs").join(reference.encoded_path()).join("ref")).unwrap();
+}
+
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_hpc-image-store"))
 }
@@ -186,6 +192,7 @@ fn check_reports_human_and_json_results_without_external_tools() {
         .root()
         .join("blobs/sha256")
         .join(root_digest.strip_prefix("sha256:").unwrap());
+    let manifest_bytes = fs::read(&manifest_path).unwrap();
     fs::remove_file(&manifest_path).unwrap();
     fs::write(raw.join("metadata.json"), b"{").unwrap();
     for args in [
@@ -209,7 +216,18 @@ fn check_reports_human_and_json_results_without_external_tools() {
     let output = fixture.command().args(["check", "--all"]).output().unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stdout).contains("tool:t: failed"));
-    // Explicit-name removal also works after both metadata and graph damage.
+    // Unreadable authoritative dependencies block removal before unlinking.
+    let rejected = fixture
+        .command()
+        .args(["remove", "tool:t"])
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(rejected.stdout.is_empty());
+    assert!(!fixture.root().join("pending-mutation.json").exists());
+    assert!(raw.exists());
+    // Restore known fixture bytes; damaged cached metadata alone is harmless.
+    fs::write(&manifest_path, manifest_bytes).unwrap();
     assert!(
         fixture
             .command()
@@ -498,7 +516,7 @@ fn inventory_usage_errors_and_missing_store_are_distinct() {
 }
 
 #[test]
-fn damaged_inventory_prints_partial_results_and_explicit_remove_does_not_follow_it() {
+fn damaged_inventory_blocks_cleanup_after_visible_removal() {
     use std::fs;
     let fixture = InventoryFixture::new();
     fixture.import("healthy:t");
@@ -534,11 +552,22 @@ fn damaged_inventory_prints_partial_results_and_explicit_remove_does_not_follow_
         .args(["--json", "remove", "tool:t"])
         .output()
         .unwrap();
-    assert!(removed.status.success());
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&removed.stdout).unwrap()["local_ref"],
-        "tool:t"
-    );
+    assert_eq!(removed.status.code(), Some(1));
+    assert!(removed.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&removed.stderr).contains("recovery"));
+    assert!(fixture.root().join("pending-mutation.json").exists());
+    for action in ["list", "check", "prune", "remove"] {
+        let mut command = fixture.command();
+        command.arg(action);
+        if action == "remove" {
+            command.arg("healthy:t");
+        } else if action == "check" {
+            command.arg("--all");
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+    }
     assert!(raw.exists());
     assert!(fs::symlink_metadata(pointer).is_err());
     assert_eq!(fs::read(unknown).unwrap(), b"preserve");
@@ -774,7 +803,61 @@ fn exercise_cleanup_failure() {
     ] {
         exercise_import_cleanup_failure(json, failure);
         exercise_pull_cleanup_failure(json, failure);
+        exercise_remove_cleanup_failure(json, failure);
     }
+}
+
+fn exercise_remove_cleanup_failure(json: bool, failure: &str) {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let fixture = InventoryFixture::new();
+    let root = fixture.root();
+    let reference = hpc_image_store::LocalRef::new("tool:t").unwrap();
+    let pointer = root.join("refs").join(reference.encoded_path()).join("ref");
+    let raw = fs::canonicalize(&pointer).unwrap();
+    let blocked = if failure == "remove" {
+        raw.clone()
+    } else {
+        root.join("raw_images")
+    };
+    fs::set_permissions(
+        &blocked,
+        fs::Permissions::from_mode(if failure == "remove" { 0o500 } else { 0o300 }),
+    )
+    .unwrap();
+    let mut command = fixture.command();
+    if json {
+        command.arg("--json");
+    }
+    let output = command.args(["remove", "tool:t"]).output().unwrap();
+    // Restore access before assertions so teardown and recovery remain possible.
+    if blocked.exists() {
+        fs::set_permissions(blocked, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{diagnostic}");
+    assert!(output.stdout.is_empty());
+    assert!(
+        diagnostic.contains("mutation recovery") && diagnostic.contains("RefRemoved"),
+        "{diagnostic}"
+    );
+    assert!(fs::symlink_metadata(pointer).is_err());
+    assert!(root.join("pending-mutation.json").is_file());
+    for tool in ["podman", "skopeo"] {
+        fs::remove_file(fixture.directory.path().join(tool)).unwrap();
+    }
+    for _ in 0..2 {
+        let output = fixture.command().args(["--json", "list"]).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(report["entries"].as_array().unwrap().is_empty());
+    }
+    assert_cleanup_complete(&root);
+    assert!(!raw.exists());
+    assert_eq!(fs::read_dir(root.join("blobs/sha256")).unwrap().count(), 0);
 }
 
 fn exercise_import_cleanup_failure(json: bool, failure: &str) {
@@ -1182,13 +1265,8 @@ fn fail_child_fsync(command: &mut Command) {
 fn prune_namespace_sync_failure_has_human_and_json_reports_without_deletion() {
     use std::fs;
     let fixture = InventoryFixture::new();
-    let removed = fixture
-        .command()
-        .args(["remove", "tool:t"])
-        .output()
-        .unwrap();
-    assert!(removed.status.success());
     let root = fixture.root();
+    unlink_fixture_ref(&root, "tool:t");
     let stage = root.join("tmp/operation-aaaaaaaaaaaa");
     fs::create_dir(&stage).unwrap();
     let before = snapshots::snapshot(&root);
@@ -1270,16 +1348,8 @@ fn prune_cli_cleans_bookkeeping_with_default_grace_and_matches_library_reports()
     use std::{fs, os::unix::fs::MetadataExt};
     let fixture = InventoryFixture::new();
     fixture.import("unused:tag");
-    assert!(
-        fixture
-            .command()
-            .args(["remove", "unused:tag"])
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
     let root = fixture.root();
+    unlink_fixture_ref(&root, "unused:tag");
     let dead = LocalRef::new("unused:tag").unwrap();
     let store_lock = root.join("locks/store.lock");
     let inode = fs::metadata(&store_lock).unwrap().ino();
@@ -1369,13 +1439,20 @@ fn unsupported_store_formats_are_rejected_without_modification() {
 
 // This fixture intentionally writes the private versioned wire format. It
 // exercises preparation through the shipped CLI without adding a public API.
+fn initialize_fixture_store(root: &std::path::Path) {
+    // Import preparation initializes before the deliberately unavailable producer.
+    let output = cli()
+        .arg("--store")
+        .arg(root)
+        .args(["--podman", "/unavailable/podman", "import", "setup:missing"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(root.join("store.json").is_file());
+}
+
 fn recorded_acquisition(root: &std::path::Path) -> std::path::PathBuf {
-    use hpc_image_store::{Error, LocalRef, Store, StoreConfig};
-    let store = Store::new(StoreConfig::new(root).unwrap());
-    assert!(matches!(
-        store.remove(&LocalRef::new("setup:missing").unwrap()),
-        Err(Error::RefMissing(_))
-    ));
+    initialize_fixture_store(root);
     let stage = root.join("tmp/operation-123456789012");
     std::fs::create_dir(&stage).unwrap();
     std::fs::create_dir(stage.join("layout")).unwrap();
@@ -1498,6 +1575,144 @@ fn recovery_errors_block_commands_and_preserve_pending_evidence() {
             assert!(error.contains("pending-mutation.json"));
             assert!(!error.contains("using /unavailable"));
             assert_eq!(snapshots::snapshot(&root), before);
+        }
+    }
+}
+
+#[test]
+fn remove_requires_completed_setup_and_preserves_every_uninitialized_entry() {
+    use std::fs;
+    for scenario in [
+        "missing",
+        "ancestors",
+        "empty",
+        "locks",
+        "bootstrap",
+        "interrupted",
+        "interrupted-no-lock",
+        "unsupported",
+        "damaged",
+        "missing-ref",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = if scenario == "ancestors" {
+            directory.path().join("missing/parent/store")
+        } else {
+            directory.path().join("store")
+        };
+        match scenario {
+            "missing" | "ancestors" => (),
+            "empty" => fs::create_dir(&root).unwrap(),
+            "locks" | "bootstrap" => {
+                fs::create_dir(&root).unwrap();
+                fs::create_dir(root.join("locks")).unwrap();
+                if scenario == "bootstrap" {
+                    fs::write(root.join("locks/store.lock"), b"").unwrap();
+                }
+            }
+            _ => {
+                initialize_fixture_store(&root);
+                match scenario {
+                    "unsupported" => {
+                        fs::write(root.join("store.json"), br#"{"version":99}"#).unwrap()
+                    }
+                    "damaged" => fs::remove_dir(root.join("raw_images")).unwrap(),
+                    "missing-ref" => (),
+                    _ => {
+                        fs::rename(root.join("store.json"), root.join(".store-init.json")).unwrap();
+                        if scenario == "interrupted-no-lock" {
+                            fs::remove_file(root.join("locks/store.lock")).unwrap();
+                        }
+                    }
+                }
+            }
+        }
+        let before = snapshots::snapshot(directory.path());
+        for json in [false, true] {
+            let mut command = cli();
+            command.arg("--store").arg(&root).args([
+                "--podman",
+                "/unavailable/podman",
+                "--skopeo",
+                "/unavailable/skopeo",
+            ]);
+            if json {
+                command.arg("--json");
+            }
+            let output = command.args(["remove", "missing:t"]).output().unwrap();
+            assert_eq!(output.status.code(), Some(1), "{scenario}");
+            assert!(output.stdout.is_empty());
+            assert!(!output.stderr.is_empty());
+            if scenario == "missing-ref" {
+                assert!(String::from_utf8_lossy(&output.stderr).contains("missing:t"));
+            }
+            assert_eq!(snapshots::snapshot(directory.path()), before, "{scenario}");
+        }
+    }
+}
+
+#[test]
+fn cli_remove_reclaims_content_preserves_longer_names_and_ignores_metadata_damage() {
+    use std::fs;
+    for json in [false, true] {
+        let fixture = InventoryFixture::new();
+        let short = format!("{}:t", "a".repeat(58));
+        let long = format!("{}:tag", "a".repeat(58));
+        fixture.import(&short);
+        fixture.import(&long);
+        let root = fixture.root();
+        let pointer = |name: &str| {
+            root.join("refs")
+                .join(hpc_image_store::LocalRef::new(name).unwrap().encoded_path())
+                .join("ref")
+        };
+        let raw = fs::canonicalize(pointer(&short)).unwrap();
+        let keeper = fs::canonicalize(pointer(&long)).unwrap();
+        fs::write(raw.join("metadata.json"), b"{").unwrap();
+        let kept = snapshots::snapshot(&keeper);
+        let blobs = snapshots::snapshot(&root.join("blobs/sha256"));
+        for tool in ["podman", "skopeo"] {
+            fs::remove_file(fixture.directory.path().join(tool)).unwrap();
+        }
+        let mut command = fixture.command();
+        if json {
+            command.arg("--json");
+        }
+        let output = command.args(["remove", &short]).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        if json {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+                serde_json::json!({"local_ref": short})
+            );
+        } else {
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                format!("Removed {short}\n")
+            );
+        }
+        assert!(!raw.exists());
+        assert!(fs::symlink_metadata(pointer(&short)).is_err());
+        assert!(pointer(&short).parent().unwrap().is_dir());
+        assert_eq!(snapshots::snapshot(&keeper), kept);
+        assert_eq!(snapshots::snapshot(&root.join("blobs/sha256")), blobs);
+        assert_cleanup_complete(&root);
+        for name in [&long, "tool:t"] {
+            let output = fixture.command().args(["remove", name]).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert_cleanup_complete(&root);
+        for relative in ["refs", "raw_images", "blobs/sha256"] {
+            assert_eq!(fs::read_dir(root.join(relative)).unwrap().count(), 0);
         }
     }
 }

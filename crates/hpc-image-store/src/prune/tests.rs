@@ -118,7 +118,7 @@ fn grace_is_object_age_and_reuse_preserves_blob_age() {
     let after = fs::metadata(&path).unwrap();
     assert_eq!(before.ino(), after.ino());
     assert_eq!(before.modified().unwrap(), after.modified().unwrap());
-    handle.remove(&reference()).unwrap();
+    legacy_unlink(&handle, &reference()).unwrap();
     let future = handle.layout.blobs().join("e".repeat(64));
     fs::write(&future, b"future bytes").unwrap();
     modify_time(
@@ -382,7 +382,7 @@ fn availability_never_authorizes_a_later_prune_scan() {
     let before = snapshot(temporary.path());
     assert!(handle.prune(&options(false)).unwrap().has_errors());
     assert_eq!(snapshot(temporary.path()), before);
-    handle.remove(&reference()).unwrap();
+    legacy_unlink(&handle, &reference()).unwrap();
     assert!(matches!(
         handle.availability(&selected),
         Ok(ImageAvailability::Missing)
@@ -416,7 +416,7 @@ fn shared_layers_and_complete_nested_indexes_survive_pruning() {
     // Another committed image keeps the shared layer after the index ref goes.
     let other = LocalRef::new("analysis/tool:other").unwrap();
     publish_image(&handle, &other, &fixture.first, false);
-    handle.remove(&selected_ref).unwrap();
+    legacy_unlink(&handle, &selected_ref).unwrap();
     prune(&handle);
     for descriptor in [&fixture.first.root, &fixture.config, &fixture.layer] {
         assert!(handle.layout.blob(&descriptor.digest).exists());
@@ -605,8 +605,8 @@ fn namespace_barrier_saves_removed_refs_including_empty_dirs_and_ancestors() {
         reference(),
         LocalRef::new(format!("{}:release", "a".repeat(180))).unwrap(),
     ] {
-        // Every encoded directory remains after removal. Fail each directory's
-        // sync in turn, including intermediate chunks and the refs root. If an
+        // The legacy unlink fixture leaves every encoded directory behind.
+        // Fail each directory's sync, including chunks and the refs root. If an
         // ancestor or empty leaf were omitted, pruning would wrongly proceed.
         let encoded_depth = reference.encoded_path().components().count();
         for failed_sync in 0..=encoded_depth {
@@ -615,7 +615,7 @@ fn namespace_barrier_saves_removed_refs_including_empty_dirs_and_ancestors() {
             let raw = publish(&handle, &reference, Image::One, false);
             fsutil::fail_once("ref.remove-sync", libc::EIO);
             assert!(matches!(
-                handle.remove(&reference),
+                legacy_unlink(&handle, &reference),
                 Err(Error::Durability {
                     change: NamespaceChange::RefRemoved,
                     ..

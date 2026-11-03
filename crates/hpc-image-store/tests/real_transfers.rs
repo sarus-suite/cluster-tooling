@@ -128,7 +128,21 @@ fn poc_lifecycle(directory: &Path, source: &str, output: &str, context: &Transfe
     .unwrap();
     assert_eq!(restored["config"]["Env"][0], "MARKER=one");
 
+    let target_pointer = store
+        .config()
+        .root()
+        .join("refs")
+        .join(target.encoded_path())
+        .join("ref");
+    let target_raw = fs::canonicalize(target_pointer).unwrap();
+    let shared_before = snapshot::snapshot(&store.config().root().join("blobs/sha256"));
     store.remove(&target).unwrap();
+    assert!(!target_raw.exists());
+    assert_eq!(
+        snapshot::snapshot(&store.config().root().join("blobs/sha256")),
+        shared_before
+    );
+    assert!(!store.config().root().join("pending-mutation.json").exists());
     assert!(matches!(
         store.availability(&target_selector).unwrap(),
         ImageAvailability::Missing
@@ -140,12 +154,7 @@ fn poc_lifecycle(directory: &Path, source: &str, output: &str, context: &Transfe
     let before = snapshot::snapshot(store.config().root());
     let preview = store.prune(&options).unwrap();
     assert!(!preview.has_errors(), "{preview:?}");
-    assert!(
-        preview
-            .candidates
-            .iter()
-            .any(|candidate| candidate.eligible)
-    );
+    assert!(preview.candidates.is_empty());
     assert_eq!(snapshot::snapshot(store.config().root()), before);
     let options = PruneOptions {
         dry_run: false,
@@ -153,16 +162,15 @@ fn poc_lifecycle(directory: &Path, source: &str, output: &str, context: &Transfe
     };
     let pruned = store.prune(&options).unwrap();
     assert!(!pruned.has_errors(), "{pruned:?}");
-    assert!(pruned.candidates.iter().any(|candidate| candidate.removed));
+    assert!(pruned.candidates.is_empty());
     assert_eq!(pruned.summaries[&PruneKind::Blob].removed_count, 0);
     assert!(matches!(
         store.availability(&keeper_selector).unwrap(),
         ImageAvailability::Ready
     ));
     store.remove(&keeper).unwrap();
-    let pruned = store.prune(&options).unwrap();
-    assert!(!pruned.has_errors(), "{pruned:?}");
-    assert!(pruned.summaries[&PruneKind::Blob].removed_count > 0);
+    // Assert completion immediately, without another maintenance action.
+    assert!(!store.config().root().join("pending-mutation.json").exists());
     for relative in ["blobs/sha256", "raw_images", "tmp", "refs"] {
         assert_eq!(
             fs::read_dir(store.config().root().join(relative))

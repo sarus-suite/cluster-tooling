@@ -82,7 +82,7 @@ enum Action {
         #[arg(long, default_value = "24h", value_parser = parse_duration)]
         grace_period: Duration,
     },
-    /// Remove one named ref, leaving its content for future pruning.
+    /// Remove a named ref and reclaim unused content; requires an initialized store.
     Remove { local_ref: LocalRef },
     /// Check metadata and all supported local OCI dependencies, without hashing.
     Check {

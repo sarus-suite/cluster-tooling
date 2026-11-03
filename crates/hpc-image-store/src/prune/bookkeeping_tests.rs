@@ -22,7 +22,7 @@ fn default_prune_cleans_the_example_without_touching_live_identity_or_young_cont
     let raw = publish(&handle, &live, Image::One, false);
     for reference in &dead {
         publish(&handle, reference, Image::One, false);
-        handle.remove(reference).unwrap();
+        legacy_unlink(&handle, reference).unwrap();
     }
     let store_inode = fs::metadata(handle.layout.store_lock()).unwrap().ino();
     let raw_before = snapshot(&raw);
@@ -83,9 +83,9 @@ fn missing_lookups_create_no_bookkeeping_and_namespace_cleanup_requires_the_barr
     assert_eq!(snapshot(temporary.path()), before);
     assert!(!temporary.path().join("locks/refs").exists());
 
-    // A removed ref leaves only namespace directories eligible at default grace.
+    // A legacy unlink leaves namespace directories eligible at default grace.
     publish(&handle, &reference(), Image::One, false);
-    handle.remove(&reference()).unwrap();
+    legacy_unlink(&handle, &reference()).unwrap();
     let before = snapshot(temporary.path());
     fsutil::fail_once("prune.namespace-sync", libc::EIO);
     let blocked = handle.prune(&PruneOptions::default()).unwrap();
@@ -123,7 +123,7 @@ fn shared_encoded_prefixes_retain_live_ancestors_and_remove_children_first() {
         publish(&handle, &live, Image::One, false);
         publish(&handle, &dead, Image::Two, false);
         let live_inode = fs::metadata(handle.layout.ref_entry(&live)).unwrap().ino();
-        handle.remove(&dead).unwrap();
+        legacy_unlink(&handle, &dead).unwrap();
         prune(&handle);
         assert!(handle.layout.ref_entry(&live).exists());
         assert_eq!(
@@ -131,7 +131,7 @@ fn shared_encoded_prefixes_retain_live_ancestors_and_remove_children_first() {
             live_inode
         );
         assert!(!handle.layout.ref_entry(&dead).parent().unwrap().exists());
-        handle.remove(&live).unwrap();
+        legacy_unlink(&handle, &live).unwrap();
         let report = prune(&handle);
         let dirs: Vec<_> = report
             .candidates
@@ -175,7 +175,7 @@ fn incomplete_bookkeeping_scan_blocks_all_reclamation() {
     let temporary = tempfile::tempdir().unwrap();
     let handle = store(temporary.path());
     publish(&handle, &reference(), Image::One, false);
-    handle.remove(&reference()).unwrap();
+    legacy_unlink(&handle, &reference()).unwrap();
     let before = snapshot(temporary.path());
     fsutil::fail_once("prune.bookkeeping-enumerate", libc::EACCES);
     let report = handle
@@ -202,7 +202,7 @@ fn bookkeeping_remove_and_sync_errors_stop_with_visible_progress_and_allow_retry
             let handle = store(temporary.path());
             let reference = LocalRef::new(format!("{}:tag", "x".repeat(130))).unwrap();
             publish(&handle, &reference, Image::One, false);
-            handle.remove(&reference).unwrap();
+            legacy_unlink(&handle, &reference).unwrap();
             let blob_before = snapshot(&handle.layout.blobs());
             fsutil::fail_after(point, completed, libc::EIO);
             let report = handle.prune(&PruneOptions::default()).unwrap();

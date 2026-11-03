@@ -419,7 +419,7 @@ fn initialized_stores_are_not_repaired() {
 
 #[test]
 fn operation_matrix_is_explicit() {
-    for operation in [Operation::Import, Operation::Pull, Operation::Remove] {
+    for operation in [Operation::Import, Operation::Pull] {
         assert_eq!(operation.store_mode(), Mode::Exclusive);
         assert!(operation.initializes());
     }
@@ -432,6 +432,8 @@ fn operation_matrix_is_explicit() {
         assert_eq!(operation.store_mode(), Mode::Shared);
         assert!(!operation.initializes());
     }
+    assert_eq!(Operation::Remove.store_mode(), Mode::Exclusive);
+    assert!(!Operation::Remove.initializes());
     assert_eq!(Operation::Prune.store_mode(), Mode::Exclusive);
     assert!(!Operation::Prune.initializes());
 }

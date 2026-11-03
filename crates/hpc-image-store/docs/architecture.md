@@ -1,6 +1,6 @@
 # HPC image store architecture
 
-This is the authoritative architecture reference for the implemented PoC v2 Stage 4.2.
+This is the authoritative architecture reference for the implemented PoC v2 Stage 4.3.
 It describes current behavior and the guarantees that changes must preserve.
 The source and tests establish what is implemented; consequential differences
 from this contract require explicit resolution. The archived design and plan
@@ -129,10 +129,10 @@ explicit tagged ref and rejects every digest-bearing selector.
 ## Initialization and preparation
 
 Constructing `StoreConfig` anchors a relative path to the current working
-directory. Constructing `Store` performs no filesystem access. Import, pull,
-and remove can initialize a missing or empty store; there is no `init` command.
-Export, inventory, checking, availability, and both prune modes require an
-initialized store and never resume setup.
+directory. Constructing `Store` performs no filesystem access. Import and pull
+can initialize a missing or empty store; there is no `init` command.
+Remove, export, inventory, checking, availability, and both prune modes require
+an initialized store and never create a missing root or resume setup.
 
 The immediate parent must already be prepared, including persistence of the
 directory names needed to reach it. Initialization opens and syncs that parent;
@@ -154,7 +154,7 @@ directory above it is opened for syncing. Interruption leaves only recognized
 setup entries eligible for retry; unexpected contents are preserved with an
 error. Completed initialization needs no private recovery record.
 
-For a marked store, import/pull/remove preparation validates under an exclusive
+For a marked store, import/pull preparation validates under an exclusive
 store lock and syncs the marker and root again, without opening the parent.
 Seeing a marker alone does not prove its final sync succeeded. A post-publication
 initialization failure returns `Error::InitializationDurability`, reports
@@ -307,11 +307,32 @@ registry resolution, and capability failures before recording retain their origi
 types. Recovery never retries acquisition or contacts the registry; a separate
 new pull request resolves its source normally.
 
-Removal still unlinks the terminal ref without following it and syncs its
-parent; content and empty namespace directories remain for prune. Missing refs are errors, including after removal initializes a store.
+Removal requires an existing initialized store and an explicit `LocalRef`.
+Missing refs return `Error::RefMissing`. Before recording intent, it reads the
+canonical confined pointer, old wrapper index, and authoritative dependency
+declarations. Damaged identities or unreadable/unsupported declarations reject
+removal without unlinking; damaged display metadata alone does not block it.
+Removal creates no acquisition staging.
+
+The removal intent durably records the old identity and retired dependencies
+before unlinking the terminal ref and syncing its parent. The same exclusive
+guard then protects recorded recovery, which proves remaining reachability,
+reclaims unused recorded content and empty namespace tails, and durably clears
+the record before returning success. Shared objects and longer names survive;
+unrecorded remnants are preserved. Errors after recording retain typed causes
+inside `Error::Recovery`, including potentially visible `RefRemoved` changes.
+
+There is no extra reachability preflight before unlinking. If another ref has
+unreadable declarations, removal may already be durable when cleanup fails.
+Unsafe-to-delete content and the pending record remain; ordinary operations,
+including list, check, remove, and prune, are blocked by preparation until safe
+recovery can finish. Recovery does not restore the removed name. Structural
+damage can therefore lock users out of ordinary store access without a built-in
+resolution. Preserve records and locks; general repair and ways to restore
+access are currently deferred and not on the design scope.
 
 After a namespace change, `Error::Durability` identifies the potentially visible
-change and failed sync path; recorded acquisition errors retain this as their cause.
+change and failed sync path; recorded mutation errors retain this as their cause.
 The library never rolls back committed pointers to hide uncertainty. Staging
 must fit an entire acquisition even when final content deduplicates; duplicate
 staged copies and hard links disappear during successful cleanup.
@@ -319,12 +340,12 @@ staged copies and hard links disappear during successful cleanup.
 ## Recorded mutations and automatic recovery
 
 Stage 3 supplies recorded mutation primitives and automatic recovery in every
-operation's preparation. Stages 4.1 and 4.2 integrate public import and pull
-with that protocol. Remove retains its intermediate behavior until Stage 4.3.
-Legacy unrecorded remnants are not automatically recovered. There is no recovery
-command or public method, and initialization permissions and format
-2/schema 3 remain unchanged. Intermediate format-2 stores may be recreated as
-the protocol is completed; compatibility between incomplete stages is not promised.
+operation's preparation. Stages 4.1 through 4.3 integrate public import, pull,
+and remove with that protocol. Legacy unrecorded remnants are not automatically
+recovered. There is no recovery command or public method. Only import and pull
+may initialize stores at this stage; format 2/schema 3 remain unchanged.
+Intermediate format-2 stores may be recreated as the protocol is completed;
+compatibility between incomplete stages is not promised.
 
 `pending-mutation.json` is the durable snapshot of a mutation whose lifecycle
 has not yet finished. It exists during normal execution of a recorded mutation;

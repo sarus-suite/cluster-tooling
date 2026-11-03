@@ -3,6 +3,7 @@
 use crate::{
     Error, ImageSelector, LocalRef, RefMetadata, Result, Sha256Digest, Store, discovery, fsutil,
     locks::{Operation, StoreGuard},
+    mutation::{Kind, Mutation},
     refs,
 };
 use serde::{Serialize, Serializer};
@@ -177,10 +178,14 @@ impl Store {
         Ok(report)
     }
 
-    /// Remove only the explicit committed name. Retired content awaits prune.
+    /// Remove an explicit name and durably reclaim its unused recorded content.
+    /// Requires an initialized store. Cleanup failure can leave removal visible
+    /// and block ordinary operations until pending recovery can finish.
     pub fn remove(&self, reference: &LocalRef) -> Result<RemoveReport> {
         let guard = self.prepare(Operation::Remove)?;
-        refs::remove(&guard, reference)?;
+        let mut mutation = Mutation::begin(&guard, reference, Kind::Remove)?;
+        mutation.remove()?;
+        mutation.finish()?;
         Ok(RemoveReport {
             local_ref: reference.clone(),
         })

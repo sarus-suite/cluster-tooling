@@ -189,10 +189,26 @@ hpc-image-store --store /scratch/me/images --json prune --dry-run --grace-period
 hpc-image-store --store /scratch/me/images prune
 ```
 
-Removal accepts only an explicit `name:tag`, including for a damaged ref.
-Digest-bearing selectors are rejected. It removes that logical name while
-leaving its raw image and shared content for prune. It can initialize a missing
-store beneath its prepared parent before reporting the ref missing.
+Removal accepts only an explicit `name:tag`; digest-bearing selectors are
+rejected. It requires an initialized store and never creates a missing root,
+resumes setup, or creates missing ancestors. A missing ref is an error.
+
+Successful removal durably removes that name, its unused raw image and blobs,
+and unnecessary namespace directories before reporting success. Shared content
+and prefixes needed by longer names survive. No grace period or prune is needed.
+The target must have a canonical confined pointer, a readable wrapper index,
+and supported readable dependency declarations. Damage to those inputs rejects
+removal before unlinking; damaged display metadata alone does not block it.
+Removal is not a way to repair or discard an otherwise unreadable ref.
+
+An error can occur after the name is removed. In particular, unreadable
+dependencies in another ref can block safe cleanup and then prevent all ordinary
+store operations. See [recovery failures and manual resolution](#recovery-failures-and-manual-resolution)
+before retrying; a retry may finish recovery and then report the original name
+missing rather than repeat a successful removal.
+
+Prune remains available for unrecorded remnants until its planned retirement.
+The commands above illustrate that separate maintenance interface.
 
 Prune requires an initialized store in both modes. It performs a fresh complete
 scan and preserves all content if unresolved committed-ref damage or an
@@ -251,9 +267,8 @@ generally repair damaged shared immutable objects.
 ## Recovery failures and manual resolution
 
 Operation preparation automatically finishes safe recorded recovery or returns
-a contextual error; there is no recovery command. Import and pull record their
-work; remove does not yet do so, and unrecorded remnants still require explicit
-maintenance. Preserve pending records and the permanent lock when recovery is
+a contextual error; there is no recovery command. Import, pull, and remove
+record their work. Unrecorded remnants still require explicit maintenance. Preserve pending records and the permanent lock when recovery is
 blocked. See the
 [architecture](architecture.md#recorded-mutations-and-automatic-recovery) for the
 snapshot lifecycle and the
@@ -291,6 +306,16 @@ prevent recovery from proving that reclamation is safe. An abandoned acquisition
 that only needs private staging cleanup can avoid this traversal. Recovery reads
 dependency declarations for deletion safety; it does not perform a full content
 check or hash every layer.
+
+Removal validates its target, records intent, and durably unlinks the name before
+checking remaining refs for safe reclamation. There is no additional early
+reachability preflight. A damaged remaining manifest can therefore leave the
+name absent but cleanup unfinished. The pending record blocks ordinary access
+to the entire store, including list, check, remove, and prune, even for healthy
+images. If that damage cannot be resolved, PoC v2 has no built-in way to restore
+ordinary access. Recovery never rolls back the visible removal. Addressing this
+limitation is future work for PoC v3 or later; do not delete the record or lock
+to bypass it.
 
 For manual resolution:
 

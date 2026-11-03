@@ -79,7 +79,7 @@ pub(crate) enum Operation {
 }
 impl Operation {
     pub fn initializes(self) -> bool {
-        matches!(self, Self::Import | Self::Pull | Self::Remove)
+        matches!(self, Self::Import | Self::Pull)
     }
     pub fn store_mode(self) -> Mode {
         match self {

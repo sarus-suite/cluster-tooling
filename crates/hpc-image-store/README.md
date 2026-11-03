@@ -34,12 +34,18 @@ hpc-image-store --store /scratch/me/images remove analysis/tool:release
 hpc-image-store --store /scratch/me/images prune --dry-run
 ```
 
-Import, pull, and remove initialize a missing or empty store beneath its prepared
-parent. There is no separate `init` command. Removal and content reclamation are
-separate operations; review prune's report before deleting content. Import,
-pull, and their replacements complete their own durable staging cleanup and
-unused-content reclamation. Their cleanup failures are errors recovered during
-later operation preparation; removal retains its intermediate lifecycle behavior.
+Import and pull initialize a missing or empty store beneath its prepared parent.
+There is no separate `init` command. Remove requires an initialized store and
+finishes unused-content reclamation before success, preserving shared objects
+and namespace prefixes needed by other names. Import, pull, and their replacements
+also complete their own durable staging cleanup and reclamation. Prune remains
+available for unrecorded remnants until its planned retirement.
+
+Cleanup failures are errors recovered during later operation preparation. A
+removed name can already be absent when damage elsewhere blocks cleanup and
+prevents ordinary store access. See the user guide's
+[recovery guidance](docs/user-guide.md#recovery-failures-and-manual-resolution);
+PoC v2 provides no repair command or recovery bypass.
 
 ## Documentation
 
@@ -49,7 +55,7 @@ later operation preparation; removal retains its intermediate lifecycle behavior
 - [Administration](docs/administration.md): installation, storage preparation, and maintenance.
 - [Development and PoC handoff](docs/development.md): source orientation, tests, and current validation results.
 - [Deferred validation](docs/deferred-validation.md): qualification still needed beyond this first pass.
-- [PoC v2 implementation plan](docs/pocv2-implementation-plan.md): staged next-milestone work; current status: Stage 4.2.
+- [PoC v2 implementation plan](docs/pocv2-implementation-plan.md): staged next-milestone work; current status: Stage 4.3.
 - [Deferred PoC v3 assessment](docs/pocv3-reference-resolution-assessment.md): reference resolution, inherited Skopeo behavior, and future Sarus integration; outside PoC v2.
 
 The PoC stores one platform-specific OCI manifest per ref. A registry tag may

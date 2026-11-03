@@ -6,9 +6,10 @@ explicit ref removal, conservative pruning, and library-only availability.
 The CLI has seven commands. Store format 2 and ref metadata schema 3 are used.
 PoC v2 Stage 2 replaces per-ref locks with one permanent store lock; the content
 lifecycle was retained through Stage 3, which adds durable mutation records and
-automatic recovery during operation preparation. Stages 4.1 and 4.2 integrate
-import and pull: success includes durable cleanup and immediate unused-content
-reclamation. Remove retains its intermediate behavior until Stage 4.3.
+automatic recovery during operation preparation. Stages 4.1 through 4.3 integrate
+import, pull, and remove: success includes durable cleanup and immediate
+unused-content reclamation. Only import and pull may initialize stores; list
+initialization remains planned for Stage 7.
 The crate remains private to this workspace; application integration is deferred.
 
 The [architecture](architecture.md) is authoritative. The [user guide](user-guide.md),
@@ -33,6 +34,67 @@ Rust examples remain doctests. The crate README is the short navigation entry
 point. Keep relative repository links out of the included library guide; use
 API references or self-contained explanations so generated rustdoc navigation
 also works.
+
+## PoC v2 Stage 4.3: complete recorded removal
+
+Stage 4.3 is complete. Public removal now uses `Kind::Remove` through the
+existing mutation protocol, retaining one exclusive guard from preparation
+through durable cleanup and record clearing. Only import and pull initialize
+stores; removal preserves missing roots, empty directories, and interrupted
+setup unchanged. List still requires a completed store until Stage 7.
+`LocalRef`, `RemoveReport`, CLI result formats, store format 2, ref schema 3,
+and mutation snapshot version 1 are unchanged. Availability and prune remain.
+
+Removal records a canonical old pointer and authoritative dependencies before
+unlinking. Damaged target identities or declarations reject the operation;
+damaged display metadata alone does not block it. Success immediately reclaims
+unused recorded wrappers, blobs, and namespace tails while preserving shared
+content, longer names, permanent store structure, and unrecorded remnants.
+Failures after recording retain typed causes in `Error::Recovery`, including
+potentially visible `RefRemoved` state. Recovery abandons pre-unlink removal or
+finishes visible removal forward, without rollback, tools, check, or prune.
+
+The agreed order deliberately has no extra reachability preflight. Another
+ref's unreadable declarations can block cleanup after the name is gone. Pending
+recovery then blocks ordinary operations, including list, check, remove, and
+prune, even for healthy images. The architecture and user/library/administration
+guides explain the pitfall and preserving recovery evidence. The future repair
+note below records restoring ordinary access as a PoC v3-or-later concern;
+PoC v2 adds no bypass or repair interface.
+
+REMOVE-01 through REMOVE-04 in the acceptance inventory identify concrete tests.
+Eight public-removal library tests cover setup snapshots, sharing and encoded
+prefixes, nested dependencies, cache independence, conservative rejection,
+blocked recovery, fault boundaries, and process termination. Tests verify every
+planned deletion and parent sync, including empty namespace tails after the
+last ref. CLI permission tests run without root's DAC override, return clean
+failure output in both modes, and recover through repeated JSON list commands
+with producer executables removed. Prune tests construct explicit legacy
+remnants; the real-transfer lifecycle now checks immediate reclamation before
+maintenance rather than depending on prune.
+
+On 3 November 2026, the full crate suite passed 251 tests: 211 library tests,
+27 CLI tests, one real-transfer test, five controlled-registry tests, and seven
+doctests. The six library subprocess helpers and one CLI helper remained ignored
+by top-level runners and were invoked only by their owning tests. The separately
+ignored Docker Hub smoke test was not selected; no live registry was contacted.
+Real transfers used the documented disposable overlay-storage harness with
+Podman 5.4.2 and Skopeo 1.18.0.
+
+Crate check, all-target Clippy with warnings denied, formatting verification,
+rustdoc with warnings denied, and diff checks passed. After the complete suite,
+the every-deletion retry test was expanded to include last-ref namespace cleanup
+and passed separately; all-target Clippy was rerun successfully. Current local
+Markdown links and generated API navigation were reviewed. Cargo required access
+to its configured cache outside the filesystem sandbox. Initial integration
+runs exposed old lifecycle expectations in library/CLI fixtures and an
+unsupported-content fixture that attempted to recreate existing wrapper files;
+these were corrected before the passing runs.
+
+Local tests establish ordering, coordination, and retry behavior, not power-loss
+persistence or Lustre/VAST cross-node qualification. Unrecorded remnants still
+need explicit maintenance, and structural damage can block recorded recovery
+without a built-in resolution. Stages 5 through 8 remain planned.
 
 ## PoC v2 Stage 4.2: complete pull mutations
 
@@ -511,6 +573,15 @@ The motivation is to help users restore a damaged store to working order in
 place, preserving healthy images, local names, notes, and provenance instead
 of requiring them to discard and recreate the store. Current operational
 guidance is in the [user guide](user-guide.md#recovery-failures-and-manual-resolution).
+
+Stage 4.3 retains the existing removal order: record intent, durably unlink the
+target, then prove remaining reachability and reclaim content. A damaged
+remaining ref can block cleanup after the name is gone, leaving a pending record
+that prevents ordinary access even to healthy images. If that damage cannot be
+resolved, PoC v2 provides no built-in recovery path to restore access. Assessing
+ways to avoid or resolve this lockout belongs to PoC v3 or later, alongside the
+repair work below. Stage 4.3 deliberately adds no preflight traversal, diagnostic
+bypass, or repair facility.
 
 A future assessment should consider:
 

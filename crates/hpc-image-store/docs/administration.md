@@ -53,10 +53,11 @@ permission in that parent. The crate creates only the store root and its
 internal structure, never missing ancestors. Do not put a store inside another
 store; initialization does not search ancestors to detect that setup error.
 
-Import, pull, and remove initialize missing or empty stores. Other operations,
-including dry-run prune, require a completed store. An interrupted setup can be
-retried using recognized empty setup entries and `.store-init.json`. Unexpected
-contents, unsupported markers, and incompatible reserved entries are preserved
+Import and pull initialize missing or empty stores. Other operations, including
+remove and dry-run prune, require a completed store. Remove does not create a
+root or lock bookkeeping and does not resume interrupted setup. Import and pull
+can retry interrupted setup using recognized empty setup entries and
+`.store-init.json`. Unexpected contents, unsupported markers, and incompatible reserved entries are preserved
 with errors, rather than adopted or deleted. Do not manually replace the store
 lock to force a retry. Initialization durability errors may leave a visible
 marker and are resolved only by successful subsequent syncing.
@@ -104,13 +105,15 @@ Budget temporary space for an entire acquisition even if the final content is
 already shared. Newly linked staged files share storage with CAS files, while
 duplicate transfers of existing CAS objects consume separate temporary space
 until cleanup. Successful import, pull, and their replacements durably finish
-staging cleanup and reclaim unused superseded content. Removal still leaves
-retired content for prune, and unrecorded remnants also consume space. Cached per-image
-sizes cannot be summed into total usage or predicted physical reclaim totals.
+staging cleanup and reclaim unused superseded content. Successful removal also
+durably reclaims unused recorded content and empty namespace tails, preserving
+shared objects and longer names. Unrecorded remnants still consume space.
+Cached per-image sizes cannot be summed into total usage or predicted physical reclaim totals.
 
-Use `list` and `check` to inspect state, then explicitly remove intended refs and
-review `prune --dry-run`. Default content grace is 24 hours of object age, while
-empty encoded ref directories are immediately eligible. Prune requires a complete
+Use `list` and `check` to inspect state, then explicitly remove intended refs.
+Prune remains available for unrecorded remnants; review `prune --dry-run` before
+that separate maintenance action. Default content grace is 24 hours of object
+age, while empty encoded ref directories are immediately eligible. Prune requires a complete
 fresh authoritative scan and waits for active operations, including surviving
 copy children. All mutations hold the exclusive store lock, even across different
 names; shared queries can coexist. Do not manually remove locks to bypass a timeout or delete CAS
@@ -128,20 +131,29 @@ preserved with contextual errors. See the
 [architecture](architecture.md#recorded-mutations-and-automatic-recovery) for
 snapshot presence and lifecycle details.
 
-Import and pull create records and finish their lifecycle before success.
-Remove remains unrecorded until Stage 4.3; unrecorded remnants are not
-automatically recovered. Import and pull replacement reject damaged old identities
-or unreadable dependency declarations before publication, preserving evidence.
+Import, pull, and remove create records and finish their lifecycle before
+success. Unrecorded remnants are not automatically recovered. Import and pull
+replacement, and removal, reject damaged target identities or unreadable
+dependency declarations before changing the ref, preserving evidence.
 This does not add general
 repair, migration, or a new operational recovery command. Incomplete format-2
 development stores may be recreated between stages without a compatibility
 promise. Local interruption tests do not qualify power-loss or cross-node behavior.
 
 After a durability error, a namespace change may already be visible. Inspect
-state before retrying; the library does not roll back published refs. Import
-and pull cleanup failures are errors with pending-work context; fix environmental
+state before retrying; the library does not roll back published refs. Import, pull,
+and remove cleanup failures are errors with pending-work context; fix environmental
 failures and retry an ordinary operation to finish recorded recovery. Recovery
 never retries a pull or contacts its registry.
+
+Removal checks remaining reachability after durably unlinking the name. Damage
+in another ref can block that cleanup, leaving the name absent and preventing
+all ordinary access to the store, including list, check, remove, and prune.
+An unresolved structural failure may require coherent backup restoration or
+maintainer-reviewed repair; PoC v2 offers no built-in repair or recovery bypass.
+Preserve records and locks. Addressing this limitation is deferred to PoC v3
+or later.
+
 Prune preserves unknown data and reports partial progress when removal or syncing
 fails. Keep that evidence rather than treating every failure as an uncommitted
 operation.
