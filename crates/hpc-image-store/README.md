@@ -36,10 +36,10 @@ hpc-image-store --store /scratch/me/images prune --dry-run
 
 Import, pull, and remove initialize a missing or empty store beneath its prepared
 parent. There is no separate `init` command. Removal and content reclamation are
-separate operations; review prune's report before deleting content. Import and
-replacement complete their own durable staging cleanup and unused-content
-reclamation. Import cleanup failures are errors recovered during later operation
-preparation; pull and removal retain their intermediate lifecycle behavior.
+separate operations; review prune's report before deleting content. Import,
+pull, and their replacements complete their own durable staging cleanup and
+unused-content reclamation. Their cleanup failures are errors recovered during
+later operation preparation; removal retains its intermediate lifecycle behavior.
 
 ## Documentation
 
@@ -49,7 +49,7 @@ preparation; pull and removal retain their intermediate lifecycle behavior.
 - [Administration](docs/administration.md): installation, storage preparation, and maintenance.
 - [Development and PoC handoff](docs/development.md): source orientation, tests, and current validation results.
 - [Deferred validation](docs/deferred-validation.md): qualification still needed beyond this first pass.
-- [PoC v2 implementation plan](docs/pocv2-implementation-plan.md): staged next-milestone work; current status: Stage 4.1.
+- [PoC v2 implementation plan](docs/pocv2-implementation-plan.md): staged next-milestone work; current status: Stage 4.2.
 - [Deferred PoC v3 assessment](docs/pocv3-reference-resolution-assessment.md): reference resolution, inherited Skopeo behavior, and future Sarus integration; outside PoC v2.
 
 The PoC stores one platform-specific OCI manifest per ref. A registry tag may

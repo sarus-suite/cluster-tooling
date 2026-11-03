@@ -71,6 +71,10 @@ for name in ['oci-layout', 'index.json']:
     (layout / name).write_bytes((fixture / name).read_bytes())
 for blob in (fixture / 'blobs' / 'sha256').iterdir():
     (blobs / blob.name).write_bytes(blob.read_bytes())
+if c.get('deny_cleanup') == 'remove':
+    layout.chmod(0o500)
+elif c.get('deny_cleanup') == 'sync':
+    layout.parent.parent.chmod(0o300)
 print('tool progress stays out of result JSON')
 "#;
 
@@ -139,6 +143,41 @@ impl Fixture {
         };
         result.save();
         result
+    }
+    /// Select an independent, accurately hashed producer layout. Keeping each
+    /// layout separate prevents stale fixture blobs from entering acquisitions.
+    pub fn select_image<'a>(
+        &mut self,
+        manifest: &'a [u8],
+        objects: impl IntoIterator<Item = &'a [u8]>,
+    ) {
+        let root = digest(manifest);
+        let layout = self
+            .temporary
+            .path()
+            .join(format!("fixture-{}", root.hex()));
+        fs::create_dir_all(layout.join("blobs/sha256")).unwrap();
+        for bytes in objects.into_iter().chain(std::iter::once(manifest)) {
+            fs::write(layout.join("blobs/sha256").join(digest(bytes).hex()), bytes).unwrap();
+        }
+        fs::write(
+            layout.join("oci-layout"),
+            br#"{"imageLayoutVersion":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            layout.join("index.json"),
+            serde_json::to_vec(
+                &json!({"schemaVersion":2,"manifests":[descriptor(manifest, MANIFEST_TYPE)]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        self.config["fixture"] = json!(layout);
+        self.manifest = manifest.to_vec();
+        self.root = root;
+        self.set_raw(manifest);
+        self.save();
     }
     pub fn save(&self) {
         fs::write(

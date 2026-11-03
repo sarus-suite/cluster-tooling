@@ -3,7 +3,7 @@
 ## Purpose and current baseline
 
 PoC v2 simplifies coordination and makes each mutation finish its own content
-lifecycle. Stages 1 through 3 and Stage 4.1 are implemented; later substages
+lifecycle. Stages 1 through 3 and Stages 4.1 and 4.2 are implemented; later substages
 remain planned. The [architecture](architecture.md) is the authoritative reference for delivered
 behavior and is updated as each stage completes.
 The plans and results under `archive/` remain historical records.
@@ -335,7 +335,7 @@ CONTENT-01 through CONTENT-04 evidence; the development guide records validation
 reclamation; remove still has its original preparation and unlink behavior.
 The shared cleanup-warning type remains while pull uses it.
 
-#### 4.2. Pull
+#### 4.2. Pull (Implemented)
 
 **Prerequisites:** Stage 4.1's integrated lifecycle and Stage 3's recovery protocol.
 
@@ -357,6 +357,13 @@ cargo test --locked -p hpc-image-store --test registry_pull
 cargo test --locked -p hpc-image-store --test cli
 git diff --check
 ```
+
+**Outcome:** public pull now uses the recorded mutation lifecycle, returns
+errors for incomplete cleanup, and reclaims unused superseded content before
+success. Replacement applies import's canonical-pointer and authoritative
+old-dependency requirements. Pull's cleanup-warning field, CLI warning handling,
+and shared warning type are removed. The acceptance inventory records PULL-01
+and PULL-02 evidence; the development guide records validation and its limits.
 
 **Intermediate limits:** remove remains incomplete until Stage 4.3; prune and
 availability still exist. Controlled fixtures establish registry behavior;

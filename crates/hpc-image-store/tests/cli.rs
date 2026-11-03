@@ -1,5 +1,9 @@
 use std::process::Command;
 
+#[allow(dead_code)]
+#[path = "support/registry.rs"]
+mod registry;
+
 const PRODUCER: &str = r#"#!/usr/bin/python3
 import hashlib, json, os, pathlib, sys
 assert pathlib.Path(os.environ['CONTAINERS_STORAGE_CONF']).read_text() == 'caller configuration sentinel\n'
@@ -761,7 +765,6 @@ fn cleanup_failure_worker() {
 }
 
 fn exercise_cleanup_failure() {
-    use std::{fs, os::unix::fs::PermissionsExt};
     assert_ne!(unsafe { libc::geteuid() }, 0);
     for (json, failure) in [
         (false, "remove"),
@@ -769,85 +772,151 @@ fn exercise_cleanup_failure() {
         (false, "sync"),
         (true, "sync"),
     ] {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().join("store");
-        let config = temporary.path().join("storage.conf");
-        fs::write(&config, "caller configuration sentinel\n").unwrap();
-        let podman = temporary.path().join("podman");
-        let skopeo = temporary.path().join("skopeo");
-        for tool in [&podman, &skopeo] {
-            fs::write(tool, PRODUCER).unwrap();
-            fs::set_permissions(tool, fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let mut command = cli();
-        command
-            .arg("--store")
-            .arg(&root)
-            .arg("--podman")
-            .arg(&podman)
-            .arg("--skopeo")
-            .arg(&skopeo);
-        if json {
-            command.arg("--json");
-        }
-        let imported = command
-            .args(["import", "localhost/source:tag", "tool:tag"])
-            .env("CONTAINERS_STORAGE_CONF", &config)
-            .env("HPC_TEST_DENY_CLEANUP", failure)
-            .output()
-            .unwrap();
-        // Restore the deliberately blocked private directory for test teardown,
-        // even if an assertion below fails. The application must not do this.
-        if root.join("tmp").is_dir() {
-            fs::set_permissions(root.join("tmp"), fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        if let Ok(entries) = fs::read_dir(root.join("tmp")) {
-            for entry in entries {
-                let blocked = entry.unwrap().path().join("layout");
-                if blocked.is_dir() {
-                    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
-                }
-            }
-        }
-        assert_eq!(
-            imported.status.code(),
-            Some(1),
-            "{}",
-            String::from_utf8_lossy(&imported.stderr)
-        );
-        assert!(imported.stdout.is_empty());
-        let diagnostic = String::from_utf8(imported.stderr).unwrap();
-        assert!(
-            diagnostic.contains("mutation recovery") && diagnostic.contains("RefPublished"),
-            "{diagnostic}"
-        );
-        assert!(root.join("pending-mutation.json").is_file());
-        let exported = cli()
-            .arg("--store")
-            .arg(&root)
-            .arg("--skopeo")
-            .arg(&skopeo)
-            .args([
-                "--podman",
-                "/unavailable/podman",
-                "--json",
-                "export",
-                "tool:tag",
-                "localhost/output:tag",
-            ])
-            .env("CONTAINERS_STORAGE_CONF", &config)
-            .output()
-            .unwrap();
-        assert!(
-            exported.status.success(),
-            "{}",
-            String::from_utf8_lossy(&exported.stderr)
-        );
-        let _: serde_json::Value = serde_json::from_slice(&exported.stdout).unwrap();
-        assert!(exported.stderr.is_empty());
-        assert!(!root.join("pending-mutation.json").exists());
-        assert_eq!(fs::read_dir(root.join("tmp")).unwrap().count(), 0);
+        exercise_import_cleanup_failure(json, failure);
+        exercise_pull_cleanup_failure(json, failure);
     }
+}
+
+fn exercise_import_cleanup_failure(json: bool, failure: &str) {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("store");
+    let config = temporary.path().join("storage.conf");
+    fs::write(&config, "caller configuration sentinel\n").unwrap();
+    let podman = temporary.path().join("podman");
+    let skopeo = temporary.path().join("skopeo");
+    for tool in [&podman, &skopeo] {
+        fs::write(tool, PRODUCER).unwrap();
+        fs::set_permissions(tool, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut command = cli();
+    command
+        .arg("--store")
+        .arg(&root)
+        .arg("--podman")
+        .arg(&podman)
+        .arg("--skopeo")
+        .arg(&skopeo);
+    if json {
+        command.arg("--json");
+    }
+    let imported = command
+        .args(["import", "localhost/source:tag", "tool:tag"])
+        .env("CONTAINERS_STORAGE_CONF", &config)
+        .env("HPC_TEST_DENY_CLEANUP", failure)
+        .output()
+        .unwrap();
+    restore_staging_permissions(&root);
+    assert_published_cleanup_failure(&root, &imported);
+    let exported = cli()
+        .arg("--store")
+        .arg(&root)
+        .arg("--skopeo")
+        .arg(&skopeo)
+        .args([
+            "--podman",
+            "/unavailable/podman",
+            "--json",
+            "export",
+            "tool:tag",
+            "localhost/output:tag",
+        ])
+        .env("CONTAINERS_STORAGE_CONF", &config)
+        .output()
+        .unwrap();
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let _: serde_json::Value = serde_json::from_slice(&exported.stdout).unwrap();
+    assert!(exported.stderr.is_empty());
+    assert_cleanup_complete(&root);
+}
+
+fn exercise_pull_cleanup_failure(json: bool, failure: &str) {
+    use std::fs;
+    let mut fixture = registry::Fixture::new();
+    fixture.pull(false).unwrap();
+    let previous = fs::read_link(fixture.pointer()).unwrap();
+    fixture.config["deny_cleanup"] = serde_json::json!(failure);
+    fixture.save();
+    let mut command = fixture.cli(env!("CARGO_BIN_EXE_hpc-image-store"));
+    if json {
+        command.arg("--json");
+    }
+    let output = command
+        .args(["pull", registry::SOURCE, registry::DESTINATION, "--replace"])
+        .output()
+        .unwrap();
+    let root = fixture.store.config().root();
+    restore_staging_permissions(root);
+    assert_published_cleanup_failure(root, &output);
+    assert_ne!(fs::read_link(fixture.pointer()).unwrap(), previous);
+    let calls = fixture.calls().len();
+    fs::remove_file(&fixture.context.skopeo).unwrap();
+    for _ in 0..2 {
+        let output = cli()
+            .arg("--store")
+            .arg(root)
+            .args(["--json", "list"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(output.stderr.is_empty());
+    }
+    assert_eq!(fixture.calls().len(), calls);
+    assert_cleanup_complete(root);
+    assert_eq!(fs::read_dir(root.join("raw_images")).unwrap().count(), 1);
+}
+
+fn restore_staging_permissions(root: &std::path::Path) {
+    use std::{fs, io::ErrorKind, os::unix::fs::PermissionsExt, path::Path};
+
+    fn restore_directory_permissions(path: &Path) {
+        match fs::set_permissions(path, fs::Permissions::from_mode(0o700)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => panic!("restore permissions on {}: {error}", path.display()),
+        }
+    }
+
+    // Restore deliberately blocked directories before assertions, so recovery
+    // and test teardown can proceed even if an assertion subsequently fails.
+    let staging = root.join("tmp");
+    restore_directory_permissions(&staging);
+    let entries = match fs::read_dir(&staging) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return,
+        Err(error) => panic!("read staging directory {}: {error}", staging.display()),
+    };
+    for entry in entries {
+        let entry = entry
+            .unwrap_or_else(|error| panic!("read staging entry in {}: {error}", staging.display()));
+        restore_directory_permissions(&entry.path().join("layout"));
+    }
+}
+
+fn assert_published_cleanup_failure(root: &std::path::Path, output: &std::process::Output) {
+    let diagnostic = std::str::from_utf8(&output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{diagnostic}");
+    assert!(output.stdout.is_empty(), "{diagnostic}");
+    assert!(
+        diagnostic.contains("mutation recovery") && diagnostic.contains("RefPublished"),
+        "{diagnostic}"
+    );
+    assert!(root.join("pending-mutation.json").is_file());
+}
+
+fn assert_cleanup_complete(root: &std::path::Path) {
+    assert!(!root.join("pending-mutation.json").exists());
+    assert!(!root.join(".pending-mutation-next.json").exists());
+    assert_eq!(std::fs::read_dir(root.join("tmp")).unwrap().count(), 0);
 }
 
 #[test]

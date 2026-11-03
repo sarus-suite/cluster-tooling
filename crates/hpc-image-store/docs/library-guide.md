@@ -27,8 +27,8 @@ queries may temporarily require exclusive access for this prerequisite, then
 retry under their normal shared lock. A clean preparation performs no content
 graph traversal. Unrecorded remnants are not automatically recovered.
 
-Import records its complete mutation lifecycle. Pull and remove do not yet
-create records; their integration remains planned for Stages 4.2 and 4.3.
+Import and pull record their complete mutation lifecycle. Remove does not yet
+create records; its integration remains planned for Stage 4.3.
 
 Checking returns collected damage as a report, while store and selection
 failures return typed errors:
@@ -104,7 +104,7 @@ external damage or reclaim unrelated unrecorded content.
 Completed import and pull acquisitions validate their staged dependency
 declarations with recovery's parser before publication. Unsupported objects,
 including subject/artifact-bearing manifests, are rejected while private.
-For import this returns acquiring-phase `Error::Recovery` context and allows
+For both acquisitions this returns acquiring-phase `Error::Recovery` context and allows
 later preparation to clean abandoned staging without changing a committed ref.
 
 Inventory and removal need no transfer context. Formatters only turn a collected
@@ -156,9 +156,15 @@ assert_eq!(report.resolved_digest, report.stored_root);
 
 `PullOptions` supplies replacement and notes. `PullReport` returns the actual
 committed ref, requested selector, resolved digest, stored root, content
-metadata, ignored explicit destination digest, and cleanup warnings. Pull has no
+metadata, and ignored explicit destination digest. Pull has no
 containers-storage image ID. Stored-root lookup uses the committed destination's
 literal repository name, even when it differs from the registry source.
+
+Pull success includes durable cleanup and immediate reclamation of unused
+superseded content. Replacement follows import's safety policy: the old pointer
+and authoritative dependencies must be readable and supported; display metadata
+is not used to authorize reclamation. There is no cleanup-warning report field
+or shared warning type.
 
 ## Inspecting image availability
 
@@ -303,10 +309,11 @@ any required recorded recovery has finished.
 publication, or removal through `NamespaceChange` and the failed sync path.
 `Error::InitializationDurability` similarly reports a potentially published
 marker. Do not assume `Err` means no change occurred or retry replacement
-blindly. Import errors after recording begins use `Error::Recovery`, retaining
+blindly. Import and pull errors after recording begins use `Error::Recovery`, retaining
 the underlying typed cause, including `Error::ToolFailed` or `Error::Durability`.
 Cleanup failures are errors even after publication; a later operation finishes
-recorded work during preparation. Import never cleans up in a destructor.
-Successful pull reports can still contain `cleanup_warnings` after durable
-publication; those warnings do not undo the committed ref. Prune
+recorded work during preparation. Neither acquisition cleans up in a destructor.
+Pull recovery does not retry the transfer or contact the registry. Capability
+and source-resolution failures before recording retain their original error
+types. Prune
 reports expose partial removals and uncertain durability separately.

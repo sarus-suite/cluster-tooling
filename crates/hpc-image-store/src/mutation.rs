@@ -2,7 +2,7 @@
 //! mutate the store contents. If operations are interrupted and these snapshots
 //! are left behind, they are used by recovery operations to bring the store
 //! to a stable, usable state again.
-//! Import uses these primitives; pull and remove adopt them in later Stage 4 substages.
+//! Import and pull use these primitives; remove adopts them in Stage 4.3.
 //! No Drop implementation performs filesystem work: a surviving producer may
 //! still own the locked open-file description after its wrapper disappears.
 use crate::{

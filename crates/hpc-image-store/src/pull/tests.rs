@@ -208,7 +208,12 @@ fn pull_pins_tag_once_builds_provenance_and_checks_locally() {
         assert_eq!(report.stored_root, fixture.root);
         assert_eq!(report.resolved_digest, fixture.root);
         assert_eq!(report.requested_reference, SOURCE);
-        assert!(report.cleanup_warnings.is_empty());
+        assert!(
+            serde_json::to_value(&report)
+                .unwrap()
+                .get("cleanup_warnings")
+                .is_none()
+        );
         let metadata = fixture.metadata();
         assert_eq!(metadata.version(), 3);
         assert_eq!(metadata.notes.as_deref(), Some("retained notes"));
@@ -603,31 +608,6 @@ fn availability_observations_do_not_reserve_pull_destinations_or_contact_registr
 }
 
 #[test]
-fn pull_publication_and_cleanup_keep_existing_failure_semantics() {
-    let fixture = Fixture::new();
-    fixture.pull(false).unwrap();
-    let pointer = fs::read_link(fixture.pointer()).unwrap();
-    fsutil::fail_once("ref.rename", libc::EIO);
-    assert!(fixture.pull(true).is_err());
-    assert_eq!(fs::read_link(fixture.pointer()).unwrap(), pointer);
-    fsutil::fail_once("ref.destination-sync", libc::EIO);
-    assert!(matches!(
-        fixture.pull(true),
-        Err(Error::Durability {
-            change: NamespaceChange::RefPublished,
-            ..
-        })
-    ));
-    assert_ne!(fs::read_link(fixture.pointer()).unwrap(), pointer);
-    for checkpoint in ["staging.cleanup-remove", "staging.cleanup-parent-sync"] {
-        fsutil::fail_once(checkpoint, libc::EIO);
-        let report = fixture.pull(true).unwrap();
-        assert_eq!(report.cleanup_warnings.len(), 1);
-        assert!(!fixture.store.check(&CheckScope::All).unwrap().has_errors());
-    }
-}
-
-#[test]
 fn concurrent_pulls_share_immutable_objects() {
     let fixture = Fixture::new();
     let barrier = std::sync::Barrier::new(2);
@@ -674,6 +654,18 @@ fn pull_worker() {
         skopeo: directory.join("skopeo"),
         ..PullContext::default()
     };
+    if let Some(point) = std::env::var_os("HPC_PULL_PAUSE") {
+        let point = point.to_str().unwrap();
+        let checkpoint = match point {
+            "mutation.intent-durable" => "mutation.intent-durable",
+            "ref.destination-sync" => "ref.destination-sync",
+            "recovery.cleaning-durable" => "recovery.cleaning-durable",
+            "recovery.removed" => "recovery.removed",
+            "recovery.complete-durable" => "recovery.complete-durable",
+            _ => panic!("unknown pull checkpoint"),
+        };
+        fsutil::pause_once(checkpoint);
+    }
     store
         .pull(
             &selector(SOURCE),
@@ -740,6 +732,7 @@ fn terminated_pull_keeps_prior_ref_and_orphan_copy_locks() {
     wrapper.kill().unwrap();
     wrapper.wait().unwrap();
     let store_lock = fixture.store.config().root().join("locks/store.lock");
+    assert!(fixture.store.layout.pending_mutation().is_file());
     assert!(!try_exclusive(&store_lock));
     assert!(
         !try_lock(&store_lock, libc::LOCK_SH),
@@ -749,7 +742,7 @@ fn terminated_pull_keeps_prior_ref_and_orphan_copy_locks() {
     {
         let _short = crate::locks::short_test_waits();
         assert!(matches!(
-            fixture.store.prune(&crate::PruneOptions::default()),
+            fixture.store.list(),
             Err(Error::LockTimeout { .. })
         ));
     }
@@ -775,62 +768,14 @@ fn terminated_pull_keeps_prior_ref_and_orphan_copy_locks() {
         1
     );
     let inode = fs::metadata(&store_lock).unwrap().ino();
-    let report = fixture
-        .store
-        .prune(&crate::PruneOptions::default())
-        .unwrap();
-    assert!(!report.has_errors(), "{report:?}");
+    let calls = fixture.calls().len();
+    fixture.store.list().unwrap();
+    fixture.store.list().unwrap();
+    lifecycle_tests::assert_idle(&fixture);
+    assert_eq!(fixture.calls().len(), calls);
     assert!(!fixture.store.config().root().join("locks/refs").exists());
     assert_eq!(fs::metadata(&store_lock).unwrap().ino(), inode);
 }
 
-#[test]
-fn prune_reclaims_failed_pull_and_cleanup_warning_remnants_without_tools() {
-    for case in ["copy-failure", "ref.rename", "staging.cleanup-remove"] {
-        let mut fixture = Fixture::new();
-        fixture.pull(false).unwrap();
-        if case == "copy-failure" {
-            fixture.config["copy_failure"] = json!("controlled failure");
-            fixture.save();
-        } else {
-            fsutil::fail_once(
-                if case == "ref.rename" {
-                    "ref.rename"
-                } else {
-                    "staging.cleanup-remove"
-                },
-                libc::EIO,
-            );
-        }
-        let result = fixture.pull(true);
-        if case == "staging.cleanup-remove" {
-            assert_eq!(result.unwrap().cleanup_warnings.len(), 1);
-        } else {
-            assert!(result.is_err());
-        }
-        let calls = fixture.calls().len();
-        let report = fixture
-            .store
-            .prune(&crate::PruneOptions {
-                dry_run: false,
-                grace_period: Duration::ZERO,
-            })
-            .unwrap();
-        assert!(!report.has_errors(), "{report:?}");
-        assert!(report.summaries[&crate::PruneKind::Staging].removed_count > 0);
-        assert_eq!(
-            fs::read_dir(fixture.store.config().root().join("tmp"))
-                .unwrap()
-                .count(),
-            0
-        );
-        assert_eq!(
-            fs::read_dir(fixture.store.config().root().join("raw_images"))
-                .unwrap()
-                .count(),
-            1
-        );
-        assert_eq!(fixture.calls().len(), calls);
-        assert!(!fixture.store.check(&CheckScope::All).unwrap().has_errors());
-    }
-}
+#[path = "lifecycle_tests.rs"]
+mod lifecycle_tests;

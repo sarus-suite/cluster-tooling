@@ -227,12 +227,12 @@ Status 0 means success, 1 means an operation or collected check/report failed,
 and 2 means invalid CLI usage. JSON results go to stdout, with diagnostics,
 skips, and warnings on stderr. Tools' output is captured so it cannot corrupt
 JSON. A store-preparation or selector-resolution failure may occur before any
-JSON report exists. Successful import finishes durable cleanup and reclamation.
-Import cleanup failures return status 1
+JSON report exists. Successful import and pull finish durable cleanup and
+reclamation. Their cleanup failures return status 1
 and contextual stderr diagnostics, with no success text or JSON report. A ref
 can already be visible when an error occurs; subsequent operations first finish
-recorded recovery. Successful pull can still return cleanup warnings and status
-0 because the image was already durably published.
+recorded recovery. Recovery does not retry a pull or contact the registry. A
+separately requested pull resolves its source normally.
 
 | Symptom | Action |
 | --- | --- |
@@ -241,7 +241,7 @@ recorded recovery. Successful pull can still return cleanup warnings and status
 | Export cannot preserve content | Check Skopeo capability and representation support; no conversion fallback is available. |
 | Digest cannot be resolved | Use a stored root under the same literal repository. Resolve damaged candidates before treating an incomplete search as absence. |
 | Lock wait or timeout | Check active transfers, including surviving copy children. Do not delete lock files to break contention. |
-| Prune reports a blocked scan | After successful preparation, inspect committed refs and diagnostics; investigate damage before attempting maintenance. Import replacement requires readable old identity and dependency declarations. |
+| Prune reports a blocked scan | After successful preparation, inspect committed refs and diagnostics; investigate damage before attempting maintenance. Import and pull replacement require readable old identity and dependency declarations. |
 | Recorded recovery is blocked | Preserve the error and pending records; follow [recovery failures and manual resolution](#recovery-failures-and-manual-resolution). |
 | Durability error after mutation | Inspect current state before retrying: publication or removal may already be visible. No rollback hides that uncertainty. |
 
@@ -251,8 +251,8 @@ generally repair damaged shared immutable objects.
 ## Recovery failures and manual resolution
 
 Operation preparation automatically finishes safe recorded recovery or returns
-a contextual error; there is no recovery command. Import records its work;
-pull and remove do not yet do so, and unrecorded remnants still require explicit
+a contextual error; there is no recovery command. Import and pull record their
+work; remove does not yet do so, and unrecorded remnants still require explicit
 maintenance. Preserve pending records and the permanent lock when recovery is
 blocked. See the
 [architecture](architecture.md#recorded-mutations-and-automatic-recovery) for the

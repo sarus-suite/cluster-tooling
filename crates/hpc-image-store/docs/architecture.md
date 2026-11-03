@@ -1,6 +1,6 @@
 # HPC image store architecture
 
-This is the authoritative architecture reference for the implemented PoC v2 Stage 4.1.
+This is the authoritative architecture reference for the implemented PoC v2 Stage 4.2.
 It describes current behavior and the guarantees that changes must preserve.
 The source and tests establish what is implemented; consequential differences
 from this contract require explicit resolution. The archived design and plan
@@ -260,8 +260,8 @@ same dependency-only parser used by recovery. The validated dependency list
 supplies the objects to insert and their deduplicated size total. Unsupported
 fields such as `subject` and `artifactType`, invalid descriptor extensions,
 unsupported dependency roles, and conflicting declarations fail while content
-is still private, before publication intent or live CAS insertion. Import's
-acquiring record then authorizes safe cleanup of the abandoned stage.
+is still private, before publication intent or live CAS insertion. The acquiring
+record then authorizes safe cleanup of the abandoned stage.
 
 Transfers rely on Skopeo for data validation and retain small manifest/config
 inspection for metadata. The dependency pass does not open configuration or
@@ -281,41 +281,37 @@ public acquisition/export accepts manifests only. Existing CAS paths and
 same-size corruption are not rehashed. A published blob must never be modified
 through any remaining staging hard link.
 
-Destination conflicts require explicit replacement. Import replacement requires
-an existing entry to be a canonical confined pointer with a readable old wrapper
+Destination conflicts require explicit replacement. Import and pull replacement
+require an existing entry to be a canonical confined pointer with a readable old wrapper
 index and supported, readable dependency declarations. A regular-file ref,
 malformed or escaping pointer, missing wrapper, or unreadable dependency graph
 is rejected before publication, preserving the old entry and content.
 Explicit replacement is not a repair facility. Cached metadata does not
 authorize reclamation and metadata damage alone does not prevent it.
 
-Import records staging ownership before creating staging, then records live
-addition ownership and publication intent before CAS insertion. After durable
-publication, it uses the recorded recovery path below to reclaim unused retired
+Import and pull record staging ownership before creating staging, then record
+live addition ownership and publication intent before CAS insertion. After durable
+publication, each uses the recorded recovery path below to reclaim unused retired
 raw images and objects, remove private staging, and durably clear the record.
 Success means this entire lifecycle has finished; no grace period or prune is
-needed for the import's recorded candidates. Other refs' shared objects and
+needed for the operation's recorded candidates. Other refs' shared objects and
 required namespace prefixes survive. Unrecorded remnants remain untouched.
 
-Import failures after recording starts carry `Error::Recovery` context,
+Import and pull failures after recording starts carry `Error::Recovery` context,
 including transfer and stage-validation failures. The underlying typed cause is
 retained. Before publication, recovery abandons acquisition and preserves the
 old ref; after publication it finishes forward without restoring the old ref.
 There is no destructor cleanup. Cleanup, syncing, and record-clearing failures
-are errors, even when the imported ref is already visible. Source inspection
-and capability failures before recording retain their original error types.
+are errors, even when the acquired ref is already visible. Source inspection,
+registry resolution, and capability failures before recording retain their original error
+types. Recovery never retries acquisition or contacts the registry; a separate
+new pull request resolves its source normally.
 
-Pull still uses unrecorded publication: replacement accepts symlinks and regular
-files, rejects directories and special entries, and leaves retired raw images
-for prune. After durable publication it removes its own staging and syncs
-`tmp/`; cleanup failures are structured warnings on a successful report and CLI
-status 0. Failed pull and process termination leave unrecorded remnants for
-explicit maintenance. Removal still unlinks the terminal ref without following
-it and syncs its parent; content and empty namespace directories remain for
-prune. Missing refs are errors, including after removal initializes a store.
+Removal still unlinks the terminal ref without following it and syncs its
+parent; content and empty namespace directories remain for prune. Missing refs are errors, including after removal initializes a store.
 
 After a namespace change, `Error::Durability` identifies the potentially visible
-change and failed sync path; recorded import errors retain this as their cause.
+change and failed sync path; recorded acquisition errors retain this as their cause.
 The library never rolls back committed pointers to hide uncertainty. Staging
 must fit an entire acquisition even when final content deduplicates; duplicate
 staged copies and hard links disappear during successful cleanup.
@@ -323,10 +319,10 @@ staged copies and hard links disappear during successful cleanup.
 ## Recorded mutations and automatic recovery
 
 Stage 3 supplies recorded mutation primitives and automatic recovery in every
-operation's preparation. Stage 4.1 integrates public import with that protocol.
-Pull and remove still use the intermediate behavior above until their Stage 4
-substages. Legacy unrecorded remnants are not automatically recovered. There is
-no recovery command or public method, and initialization permissions and format
+operation's preparation. Stages 4.1 and 4.2 integrate public import and pull
+with that protocol. Remove retains its intermediate behavior until Stage 4.3.
+Legacy unrecorded remnants are not automatically recovered. There is no recovery
+command or public method, and initialization permissions and format
 2/schema 3 remain unchanged. Intermediate format-2 stores may be recreated as
 the protocol is completed; compatibility between incomplete stages is not promised.
 

@@ -9,7 +9,8 @@ This inventory introduces no independent requirements.
 For context, see the plan's [baseline](pocv2-implementation-plan.md#purpose-and-current-baseline),
 [stage execution guidance](pocv2-implementation-plan.md#stage-execution-and-validation),
 and [scope](pocv2-implementation-plan.md#scope-and-document-handoff).
-Stages 1 through 3 and Stage 4.1 supply the implemented evidence below. Unimplemented acceptance
+Stages 1 through 3 and Stages 4.1 and 4.2 supply the implemented evidence below.
+Unimplemented acceptance
 cases remain **Planned**, even where existing tests preserve part of their behavior.
 
 When requirements change, update the plan first, then update affected acceptance
@@ -136,7 +137,7 @@ Stage 3 evidence (library names below are relative to `recovery::tests`):
 Requirements: [complete mutations](pocv2-implementation-plan.md#authoritative-content-and-complete-mutations),
 [recovery](pocv2-implementation-plan.md#recovery-and-query-boundaries), and the
 [import](pocv2-implementation-plan.md#41-import-implemented),
-[pull](pocv2-implementation-plan.md#42-pull), and
+[pull](pocv2-implementation-plan.md#42-pull-implemented), and
 [remove](pocv2-implementation-plan.md#43-remove) substages of Stage 4.
 Removal's initialization policy follows the
 [coordination contract](pocv2-implementation-plan.md#coordination-and-initialization).
@@ -150,8 +151,8 @@ Removal's initialization policy follows the
 | CONTENT-02 | 4.1 | Nested, Shared | lib | Reachability follows authoritative roots and every manifest/index branch; shared objects survive. Unreadable or unsupported declarations preserve unsafe-to-delete content with errors. | Implemented |
 | CONTENT-03 | 4.1 | Mutation, fault instrumentation | lib | Caches, provenance, timestamps, previous checks, or reference counts never authorize deletion; mutation reclamation calls neither prune nor check and does not open/hash every layer, decompress, or check remote freshness. | Implemented |
 | CONTENT-04 | 4.1 | Interrupted | lib | Namespace syncing precedes retired-content deletion; partial deletion/sync failure remains visible and recorded; cleanup is persisted before clearing the record or returning success. | Implemented |
-| PULL-01 | 4.2 | Mutation, Registry | lib, registry, CLI | Pull/replacement finish the same lifecycle; shared objects survive; cleanup failures are errors. Pull warning fields/CLI handling and the now-unused shared warning type disappear. | Planned |
-| PULL-02 | 4.2 | Registry, Interrupted | lib, registry, CLI | Pinned manifest acquisition, digest preservation, platform selection, registry settings and provenance survive failure/recovery; missing capabilities and unsupported representations fail without weaker retry or conversion. | Planned |
+| PULL-01 | 4.2 | Mutation, Registry | lib, registry, CLI | Pull/replacement finish the same lifecycle; shared objects survive; cleanup failures are errors. Pull warning fields/CLI handling and the now-unused shared warning type disappear. | Implemented |
+| PULL-02 | 4.2 | Registry, Interrupted | lib, registry, CLI | Pinned manifest acquisition, digest preservation, platform selection, registry settings and provenance survive failure/recovery; missing capabilities and unsupported representations fail without weaker retry or conversion. | Implemented |
 | REMOVE-01 | 4.3 | Setup, Snapshot | lib, CLI | Missing roots/parents, empty directories, and interrupted setup remain unchanged, without lock bookkeeping; initialized stores support recovery and retain the missing-ref error. | Planned |
 | REMOVE-02 | 4.3 | Shared, Mutation | lib, CLI, real | Removing one ref preserves shared content; removing the last use durably reclaims blobs, raw images, staging, and unnecessary namespace directories before success, without grace or prune. | Planned |
 | REMOVE-03 | 4.3 | Prefix | lib, CLI | Removing the short name leaves its terminal ref absent and preserves longer names, their content, and necessary namespace parents. | Planned |
@@ -170,6 +171,15 @@ Stage 4.1 evidence (library names are relative to `transfer::tests` unless noted
 | CONTENT-02, CONTENT-03 | `import_lifecycle_tests::{public_import_preserves_nested_branches_and_blocks_unprovable_reclamation,replacement_uses_dependencies_despite_damaged_display_metadata,damaged_old_identity_or_dependencies_are_rejected_and_preserved}` cover nested reachability, conservative failure, damaged metadata, and the agreed rejection policy. Open-file tracking in the public replacement test excludes old/keeper terminal files and metadata from reclamation; Stage 3 dependency-only traversal tests retain the full graph boundary evidence. `ordinary_query_recovers_import_without_prune_or_tools` and `unknown_staging_contents_block_cleanup_without_following_symlinks` cover tool-free recovery and unknown-content preservation. |
 | REC-04, REC-07 | `recovery::tests::{recorded_skopeo_temporaries_recover_and_resume_after_deletion_or_sync_failure,unknown_or_redirected_producer_temporaries_block_recorded_cleanup}` cover empty/partial temporary files, saved cleanup-plan validation, retries after deletion/parent-sync failure, malformed names, incorrect locations, symlinks, directories, FIFOs, redirected parents, unrelated unknown siblings, and preservation of unrecorded trees. |
 | REC-05, REC-07, CONTENT-03 | `graph::tests::{cached_dependency_structural_and_json_failures_return_context_without_panicking,cached_dependency_io_failures_retain_the_original_typed_cause,dependency_validation_reads_declarations_without_opening_terminal_objects}` cover cached findings, original I/O causes, repeated calls, and dependency-only file access. `recovery::tests::already_published_unsupported_declarations_block_actions_without_panicking_or_deleting` preserves the complete store while repeated `list` and `remove` return typed recovery errors for an already published subject-bearing manifest. |
+
+Stage 4.2 evidence (library names are relative to `pull::tests` unless noted):
+
+| Cases | Passing evidence |
+| --- | --- |
+| PULL-01 | `lifecycle_tests::replacement_finishes_cleanup_and_preserves_shared_prefix_content` covers fresh, changed-content and identical-content pulls, retired wrapper and unique-blob reclamation, shared bytes/inodes, encoded prefixes, and absent staging/snapshots. `lifecycle_tests::{damaged_old_identities_or_dependencies_are_preserved,metadata_damage_does_not_block_reclamation_and_unknown_live_dependencies_do,pull_reclamation_preserves_every_nested_keeper_branch}` cover replacement safety, cache independence, nested keeper branches, and conservative failure when live reachability cannot be established. |
+| PULL-01, PULL-02 | `lifecycle_tests::{pull_failures_recover_without_harming_prior_or_shared_content,acquisition_errors_remain_typed_and_recover_without_registry_requests,terminated_pull_recovers_at_publication_and_cleanup_boundaries}` cover typed acquisition and filesystem errors, unsupported staged declarations, pre/post-publication state, termination, tool-free repeated recovery, and record-clearing uncertainty. `terminated_pull_keeps_prior_ref_and_orphan_copy_locks` verifies the recorded attempt excludes query recovery until the surviving child releases its inherited store descriptor; subsequent `list` finishes cleanup and retains the permanent lock inode. |
+| PULL-02 | Existing raw hashing, manifest/index selection, tag-movement pinning, digest-source naming/precedence, completed platform validation, capability rejection, registry-setting, provenance, and export-preservation tests remain passing. Registry: `pull_cli_reports_pinned_identity_notices_and_configuration`, `pull_cli_optional_destinations_and_digest_sources_match_library`, `pull_cli_operation_failure_preserves_ref_and_returns_status_one`, and `pulled_export_cli_preserves_identity_and_reports_failures_without_modification`. The controlled producer requires digest preservation and rejects conversion flags. |
+| PULL-01, PULL-02 | CLI: `cleanup_failure_is_an_error_and_recovery_keeps_json_clean` now also exercises public pull replacement with removal and sync permission failures, in human and JSON modes: status 1, empty stdout, visible publication, retained records, and repeated tool-free CLI `list` recovery after access is restored. Registry success tests verify pull's JSON omits the warning field; source review confirms removal of the shared warning type, export, and CLI handling. |
 
 ### Stage 5: lightweight existence
 

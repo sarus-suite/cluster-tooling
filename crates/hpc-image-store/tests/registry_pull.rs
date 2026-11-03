@@ -60,6 +60,7 @@ fn pull_cli_reports_pinned_identity_notices_and_configuration() {
     assert_eq!(report["resolved_digest"], report["stored_root"]);
     assert_eq!(report["ignored_destination_digest"], json!(fixture.layer));
     assert!(report.get("image_id").is_none());
+    assert!(report.get("cleanup_warnings").is_none());
     assert!(String::from_utf8_lossy(&output.stderr).contains("ignoring pull destination digest"));
     assert!(!String::from_utf8_lossy(&output.stdout).contains("tool progress"));
     assert_eq!(fixture.metadata().notes.as_deref(), Some("from CLI"));
@@ -338,7 +339,7 @@ fn dockerhub_alpine_smoke() {
                 .has_errors()
         );
     }
-    assert!(report["cleanup_warnings"].as_array().unwrap().is_empty());
+    assert!(report.get("cleanup_warnings").is_none());
 
     let stored_manifest = fs::read(
         store

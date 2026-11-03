@@ -230,10 +230,6 @@ fn shared_guards_reject_mutation_and_metadata_cannot_change_the_destination() {
         cas::insert(&guard, &blob),
         Err(Error::Coordination(_))
     ));
-    assert!(
-        crate::staging::cleanup_published(&guard, &handle.layout.staging().join("absent-stage"))
-            .is_some()
-    );
     assert_eq!(crate::test_snapshot::snapshot(temporary.path()), before);
     drop(guard);
     let guard = handle.prepare(Operation::Pull).unwrap();

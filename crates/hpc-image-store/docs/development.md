@@ -6,9 +6,9 @@ explicit ref removal, conservative pruning, and library-only availability.
 The CLI has seven commands. Store format 2 and ref metadata schema 3 are used.
 PoC v2 Stage 2 replaces per-ref locks with one permanent store lock; the content
 lifecycle was retained through Stage 3, which adds durable mutation records and
-automatic recovery during operation preparation. Stage 4.1 integrates import:
-success now includes durable cleanup and immediate unused-content reclamation.
-Pull and remove retain their intermediate behavior until Stages 4.2 and 4.3.
+automatic recovery during operation preparation. Stages 4.1 and 4.2 integrate
+import and pull: success includes durable cleanup and immediate unused-content
+reclamation. Remove retains its intermediate behavior until Stage 4.3.
 The crate remains private to this workspace; application integration is deferred.
 
 The [architecture](architecture.md) is authoritative. The [user guide](user-guide.md),
@@ -33,6 +33,58 @@ Rust examples remain doctests. The crate README is the short navigation entry
 point. Keep relative repository links out of the included library guide; use
 API references or self-contained explanations so generated rustdoc navigation
 also works.
+
+## PoC v2 Stage 4.2: complete pull mutations
+
+Pull now uses the same recorded lifecycle as import, through the existing
+`Kind::Pull` protocol. Success includes durable publication, unused-content
+reclamation, staging cleanup, and record removal. Store format 2, ref metadata
+schema 3, and mutation snapshot version 1 are unchanged. Pull's warning field,
+CLI warning handling, and shared warning type are removed. Remove retains its
+intermediate behavior until Stage 4.3; availability and prune remain public.
+
+Source resolution and capability checks still happen before recording begins.
+Later failures retain their typed cause inside `Error::Recovery`. Replacement
+requires the same canonical old pointer and authoritative dependencies as import;
+damaged cached metadata alone does not block reclamation. Recovery abandons
+unfinished acquisition or finishes visible publication forward, without registry
+requests, transfer retries, or rollback. The architecture is authoritative;
+PULL-01 and PULL-02 in the acceptance inventory identify the concrete evidence.
+
+The controlled registry fixture can select independent accurately hashed layouts
+with shared and unique content. Public pull tests cover fresh, changed-content,
+and identical-content acquisition, encoded prefixes, nested keepers, damaged
+old refs, cache independence, unprovable reachability, acquisition validation,
+filesystem faults, and process termination. Surviving copy children exclude
+query-triggered recovery until they release the operation's inherited lock.
+CLI cleanup tests exercise removal and sync permission failures after pull
+publication in both output modes, then recover through repeated `list` with the
+transfer executable removed. Successful JSON reports omit `cleanup_warnings`.
+
+On 3 November 2026, the complete Stage 4.2 crate suite passed 241 tests:
+203 library tests, 25 CLI tests, one real-transfer test, five controlled-registry
+tests, and seven doctests. Focused pull and CLI/registry targets also passed
+before the complete run. The six library subprocess helpers and one CLI helper
+remained ignored by top-level runners and were invoked only by their owning
+tests. The independently ignored Docker Hub smoke test was not selected; no
+live registry was contacted. Existing real-tool regressions used Podman 5.4.2
+and Skopeo 1.18.0 with the documented disposable-storage harness.
+
+Crate check, all-target Clippy with warnings denied, formatting verification,
+rustdoc with warnings denied, and `git diff --check` passed. Current local
+Markdown paths/anchors and generated API navigation were reviewed successfully.
+Cargo used its
+configured build cache outside the filesystem sandbox. The initial sandboxed
+focused invocation could not open that cache's lock and was rerun with cache
+access. The first compile exposed an obsolete helper assertion and a fixture
+lifetime annotation; both were corrected. An initial metadata-damage test
+incorrectly used the metadata-reading ref helper after corrupting that cache;
+it now reads the authoritative wrapper index directly. All corrected cases
+passed in the complete suite.
+
+These results establish local ordering and recovery behavior, not power-loss
+persistence or Lustre/VAST qualification. Automatic recovery still does not
+repair external damage or adopt unrecorded remnants.
 
 ## PoC v2 Stage 4.1: complete import mutations
 

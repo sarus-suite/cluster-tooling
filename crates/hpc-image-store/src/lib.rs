@@ -63,7 +63,6 @@ pub use prune::{
     PruneSkipped, PruneSummary,
 };
 pub use pull::{PullContext, PullOptions, PullReport};
-pub use staging::CleanupWarning;
 pub use store::{Store, StoreConfig};
 pub use transfer::{ExportReport, ImportOptions, ImportReport, TransferContext};
 

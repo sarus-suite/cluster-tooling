@@ -103,9 +103,9 @@ addressed by Skopeo's OCI transport for transfers.
 Budget temporary space for an entire acquisition even if the final content is
 already shared. Newly linked staged files share storage with CAS files, while
 duplicate transfers of existing CAS objects consume separate temporary space
-until cleanup. Successful import and replacement durably finish staging cleanup
-and reclaim unused superseded content. Pull and removal still leave retired
-content for prune, and unrecorded remnants also consume space. Cached per-image
+until cleanup. Successful import, pull, and their replacements durably finish
+staging cleanup and reclaim unused superseded content. Removal still leaves
+retired content for prune, and unrecorded remnants also consume space. Cached per-image
 sizes cannot be summed into total usage or predicted physical reclaim totals.
 
 Use `list` and `check` to inspect state, then explicitly remove intended refs and
@@ -128,9 +128,9 @@ preserved with contextual errors. See the
 [architecture](architecture.md#recorded-mutations-and-automatic-recovery) for
 snapshot presence and lifecycle details.
 
-Import creates records and finishes its lifecycle before success. Pull and
-remove remain unrecorded until their Stage 4 substages; unrecorded remnants are
-not automatically recovered. Import replacement rejects damaged old identities
+Import and pull create records and finish their lifecycle before success.
+Remove remains unrecorded until Stage 4.3; unrecorded remnants are not
+automatically recovered. Import and pull replacement reject damaged old identities
 or unreadable dependency declarations before publication, preserving evidence.
 This does not add general
 repair, migration, or a new operational recovery command. Incomplete format-2
@@ -138,10 +138,10 @@ development stores may be recreated between stages without a compatibility
 promise. Local interruption tests do not qualify power-loss or cross-node behavior.
 
 After a durability error, a namespace change may already be visible. Inspect
-state before retrying; the library does not roll back published refs. Successful
-pull may report staging-cleanup warnings, leaving committed content usable.
-Import cleanup failures are errors with pending-work context; fix environmental
-failures and retry an ordinary operation to finish recorded recovery.
+state before retrying; the library does not roll back published refs. Import
+and pull cleanup failures are errors with pending-work context; fix environmental
+failures and retry an ordinary operation to finish recorded recovery. Recovery
+never retries a pull or contacts its registry.
 Prune preserves unknown data and reports partial progress when removal or syncing
 fails. Keep that evidence rather than treating every failure as an uncommitted
 operation.

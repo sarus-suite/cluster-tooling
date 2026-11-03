@@ -3,10 +3,9 @@ use crate::{
     ContentMetadata, Error, ImageSelector, LocalRef, Platform, RefMetadata, Result, Sha256Digest,
     Store, graph,
     locks::Operation,
+    mutation::{Kind, Mutation},
     oci::Descriptor,
-    refs,
-    staging::{self, AcquisitionStage, CleanupWarning},
-    subprocess,
+    refs, subprocess,
     transfer::{acquired_content, acquisition_destination, oci_argument, require_capability},
 };
 use serde::{Deserialize, Serialize};
@@ -193,7 +192,6 @@ pub struct PullReport {
     pub resolved_digest: Sha256Digest,
     pub stored_root: Sha256Digest,
     pub content: ContentMetadata,
-    pub cleanup_warnings: Vec<CleanupWarning>,
     pub ignored_destination_digest: Option<Sha256Digest>,
 }
 
@@ -201,6 +199,10 @@ impl Store {
     /// Pull one OCI image manifest from a registry, preserving its digest.
     /// Tag sources may select one manifest through an index. Digest sources
     /// must name the manifest directly; indexes are never stored by pull.
+    /// Success includes durable staging cleanup and unused-content reclamation.
+    /// Failures after recording starts retain their typed cause inside
+    /// [`Error::Recovery`]; publication may already be visible. Preparation of a
+    /// later operation finishes recorded recovery without retrying acquisition.
     pub fn pull(
         &self,
         source: &ImageSelector,
@@ -215,48 +217,55 @@ impl Store {
         refs::check_destination(&store_guard, &reference, options.replace)?;
         context.check_capabilities()?;
         let resolved_digest = context.resolve(source)?;
-        let stage = AcquisitionStage::new(&store_guard, &reference)?;
+        let mut mutation = Mutation::begin(&store_guard, &reference, Kind::Pull)?;
+        let stage = mutation.stage()?;
         let mut command = context.command("copy");
         command
             .arg("--preserve-digests")
             .arg("--dest-shared-blob-dir")
             .arg(stage.shared_blob_path())
             .arg(format!("docker://{}@{resolved_digest}", source.name()))
-            .arg(oci_argument(&stage.layout_path())?);
+            .arg(oci_argument(&stage.layout_path()).map_err(|error| mutation.context(error))?);
         subprocess::run(
             &mut command,
             "pull image",
             &context.skopeo,
             Some(store_guard.transfer_fd()),
-        )?;
+        )
+        .map_err(|error| mutation.context(error))?;
 
         // The writer has exited. Only the small root/config objects and the
         // descriptors needed for metadata are read; Skopeo validates transfer.
-        let (root, content, objects) = acquired_content(&stage)?;
+        let (root, content, objects) =
+            acquired_content(&stage).map_err(|error| mutation.context(error))?;
         if root.digest != resolved_digest {
-            return Err(Error::InvalidObject {
+            return Err(mutation.context(Error::InvalidObject {
                 path: stage.layout_path(),
                 reason: format!(
                     "completed root {} differs from resolved registry manifest {resolved_digest}",
                     root.digest
                 ),
-            });
+            }));
         }
         if let Some(expected) = &context.platform
             && !platform_matches(&content.platform, expected)
         {
-            return Err(Error::InvalidObject {
+            return Err(mutation.context(Error::InvalidObject {
                 path: stage.layout_path(),
                 reason: format!(
                     "completed configuration platform {} does not match requested {}",
                     platform_name(&content.platform),
                     platform_name(expected)
                 ),
-            });
+            }));
         }
         let acquired_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|_| Error::InvalidTransfer("system clock is before the Unix epoch".into()))?
+            .map_err(|_| {
+                mutation.context(Error::InvalidTransfer(
+                    "system clock is before the Unix epoch".into(),
+                ))
+            })?
             .as_secs();
         let metadata = RefMetadata::new_pull(
             reference.clone(),
@@ -266,19 +275,17 @@ impl Store {
             source.to_string(),
             options.notes.clone(),
         );
-        let completed = stage.complete(&root.digest, metadata, objects)?;
-        let directory = completed.directory().to_owned();
-        refs::publish(completed, options.replace)?;
-        let cleanup_warnings = staging::cleanup_published(&store_guard, &directory)
-            .into_iter()
-            .collect();
+        let completed = stage
+            .complete(&root.digest, metadata, objects)
+            .map_err(|error| mutation.context(error))?;
+        mutation.publish(completed)?;
+        mutation.finish()?;
         Ok(PullReport {
             local_ref: reference,
             requested_reference: source.to_string(),
             resolved_digest,
             stored_root: root.digest,
             content,
-            cleanup_warnings,
             ignored_destination_digest: destination.and_then(ImageSelector::digest).cloned(),
         })
     }
