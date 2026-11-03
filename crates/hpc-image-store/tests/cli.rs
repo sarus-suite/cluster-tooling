@@ -22,10 +22,7 @@ elif a[-1].startswith('oci:'):
     (layout / 'oci-layout').write_text('{"imageLayoutVersion":"1.0.0"}')
     (layout / 'index.json').write_text(json.dumps({'schemaVersion':2, 'manifests':[manifest]}))
     if os.getenv('HPC_TEST_DENY_CLEANUP') == 'remove':
-        blocked = layout / 'cleanup-blocked'
-        blocked.mkdir()
-        (blocked / 'sentinel').write_text('leave for prune')
-        blocked.chmod(0o500)
+        layout.chmod(0o500)
     elif os.getenv('HPC_TEST_DENY_CLEANUP') == 'sync':
         layout.parent.parent.chmod(0o300)
     print('subprocess output must not leak into result JSON')
@@ -595,9 +592,36 @@ fn cli_round_trip_has_clean_json_and_preserves_callers_configuration() {
         );
         let report: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
         assert_eq!(report["local_ref"], reference);
-        assert_eq!(report["cleanup_warnings"], serde_json::json!([]));
+        assert!(report.get("cleanup_warnings").is_none());
         assert_eq!(fs::read_dir(root.join("tmp")).unwrap().count(), 0);
         assert!(imported.stderr.is_empty());
+        let replaced = cli()
+            .arg("--store")
+            .arg(&root)
+            .arg("--podman")
+            .arg(&podman)
+            .arg("--skopeo")
+            .arg(&skopeo)
+            .args([
+                "--json",
+                "import",
+                "localhost/source:tag",
+                reference,
+                "--replace",
+            ])
+            .env("CONTAINERS_STORAGE_CONF", &config)
+            .output()
+            .unwrap();
+        assert!(
+            replaced.status.success(),
+            "{}",
+            String::from_utf8_lossy(&replaced.stderr)
+        );
+        let replaced: serde_json::Value = serde_json::from_slice(&replaced.stdout).unwrap();
+        assert!(replaced.get("cleanup_warnings").is_none());
+        assert_eq!(fs::read_dir(root.join("raw_images")).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(root.join("tmp")).unwrap().count(), 0);
+        assert!(!root.join("pending-mutation.json").exists());
         let mut exported = cli();
         exported
             .arg("--store")
@@ -703,7 +727,7 @@ fn cli_transfers_accept_transport_named_and_unqualified_images() {
 }
 
 #[test]
-fn cleanup_warning_keeps_cli_success_and_json_separate_from_diagnostics() {
+fn cleanup_failure_is_an_error_and_recovery_keeps_json_clean() {
     // Permission failures must be exercised without root's DAC override. Match
     // the existing initialization permission tests' subprocess approach.
     if unsafe { libc::geteuid() } == 0 {
@@ -712,7 +736,7 @@ fn cleanup_warning_keeps_cli_success_and_json_separate_from_diagnostics() {
             .args([
                 "--ignored",
                 "--exact",
-                "cleanup_warning_worker",
+                "cleanup_failure_worker",
                 "--nocapture",
             ])
             .gid(65534)
@@ -726,17 +750,17 @@ fn cleanup_warning_keeps_cli_success_and_json_separate_from_diagnostics() {
             String::from_utf8_lossy(&output.stderr)
         );
     } else {
-        exercise_cleanup_warning();
+        exercise_cleanup_failure();
     }
 }
 
 #[test]
 #[ignore = "unprivileged subprocess helper"]
-fn cleanup_warning_worker() {
-    exercise_cleanup_warning();
+fn cleanup_failure_worker() {
+    exercise_cleanup_failure();
 }
 
-fn exercise_cleanup_warning() {
+fn exercise_cleanup_failure() {
     use std::{fs, os::unix::fs::PermissionsExt};
     assert_ne!(unsafe { libc::geteuid() }, 0);
     for (json, failure) in [
@@ -779,7 +803,7 @@ fn exercise_cleanup_warning() {
         }
         if let Ok(entries) = fs::read_dir(root.join("tmp")) {
             for entry in entries {
-                let blocked = entry.unwrap().path().join("layout/cleanup-blocked");
+                let blocked = entry.unwrap().path().join("layout");
                 if blocked.is_dir() {
                     fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
                 }
@@ -787,39 +811,17 @@ fn exercise_cleanup_warning() {
         }
         assert_eq!(
             imported.status.code(),
-            Some(0),
+            Some(1),
             "{}",
             String::from_utf8_lossy(&imported.stderr)
         );
+        assert!(imported.stdout.is_empty());
         let diagnostic = String::from_utf8(imported.stderr).unwrap();
         assert!(
-            diagnostic.contains("warning:")
-                && diagnostic.contains("image is published")
-                && diagnostic.contains(if failure == "remove" {
-                    "remove published staging"
-                } else {
-                    "sync staging parent after cleanup"
-                }),
+            diagnostic.contains("mutation recovery") && diagnostic.contains("RefPublished"),
             "{diagnostic}"
         );
-        if json {
-            let report: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
-            assert_eq!(report["local_ref"], "tool:tag");
-            assert_eq!(report["cleanup_warnings"].as_array().unwrap().len(), 1);
-            let path = std::path::Path::new(
-                report["cleanup_warnings"][0]["staging_path"]
-                    .as_str()
-                    .unwrap(),
-            );
-            assert_eq!(path.parent(), Some(root.join("tmp").as_path()));
-            assert_eq!(path.is_dir(), failure == "remove");
-        } else {
-            assert!(
-                String::from_utf8(imported.stdout)
-                    .unwrap()
-                    .starts_with("Imported tool:tag")
-            );
-        }
+        assert!(root.join("pending-mutation.json").is_file());
         let exported = cli()
             .arg("--store")
             .arg(&root)
@@ -843,6 +845,8 @@ fn exercise_cleanup_warning() {
         );
         let _: serde_json::Value = serde_json::from_slice(&exported.stdout).unwrap();
         assert!(exported.stderr.is_empty());
+        assert!(!root.join("pending-mutation.json").exists());
+        assert_eq!(fs::read_dir(root.join("tmp")).unwrap().count(), 0);
     }
 }
 

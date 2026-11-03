@@ -127,20 +127,26 @@ impl Finding {
             Ok(error) => error,
             Err(shared) => {
                 // Cached graph failures can be attributed to several refs.
-                // Keep the original typed cause in the I/O source chain.
-                let Error::Io {
+                // Operational errors retain their typed cause chain. Shared
+                // structural/JSON findings instead carry the original path and
+                // diagnostic, without requiring their causes to be cloneable.
+                if let Error::Io {
                     operation,
                     path,
                     source,
                 } = shared.as_ref()
-                else {
-                    unreachable!("only operational I/O errors need shared propagation");
-                };
-                io_error(
-                    operation,
-                    path,
-                    io::Error::new(source.kind(), shared.clone()),
-                )
+                {
+                    io_error(
+                        operation,
+                        path,
+                        io::Error::new(source.kind(), shared.clone()),
+                    )
+                } else {
+                    Error::InvalidObject {
+                        path: self.path,
+                        reason: self.message,
+                    }
+                }
             }
         }
     }

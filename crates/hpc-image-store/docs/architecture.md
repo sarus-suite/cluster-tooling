@@ -1,6 +1,6 @@
 # HPC image store architecture
 
-This is the authoritative architecture reference for the implemented PoC v2 Stage 3.
+This is the authoritative architecture reference for the implemented PoC v2 Stage 4.1.
 It describes current behavior and the guarantees that changes must preserve.
 The source and tests establish what is implemented; consequential differences
 from this contract require explicit resolution. The archived design and plan
@@ -254,9 +254,19 @@ Import and pull write only into private `tmp/operation-<id>/` staging, including
 Skopeo's destination shared-blob directory. Skopeo never writes into the live
 CAS. The producer stops writers and closes writable handles before completing
 the stage. Completion binds the selected descriptor, metadata, and object list
-to an explicit destination ref under the exclusive store guard. Transfers rely
-on Skopeo validation and small manifest/config inspection; they do not run availability or independently hash layers or check
-the full graph around every copy.
+to an explicit destination ref under the exclusive store guard. Before publication,
+import and pull validate the staged root and dependency declarations with the
+same dependency-only parser used by recovery. The validated dependency list
+supplies the objects to insert and their deduplicated size total. Unsupported
+fields such as `subject` and `artifactType`, invalid descriptor extensions,
+unsupported dependency roles, and conflicting declarations fail while content
+is still private, before publication intent or live CAS insertion. Import's
+acquiring record then authorizes safe cleanup of the abandoned stage.
+
+Transfers rely on Skopeo for data validation and retain small manifest/config
+inspection for metadata. The dependency pass does not open configuration or
+layer objects, hash blobs, decompress layers, invoke availability or check, or
+make remote requests. Public acquisition still accepts only single manifests.
 
 Publication follows this order while retaining the exclusive store lock:
 
@@ -271,38 +281,54 @@ public acquisition/export accepts manifests only. Existing CAS paths and
 same-size corruption are not rehashed. A published blob must never be modified
 through any remaining staging hard link.
 
-Destination conflicts, including damaged entries, require explicit replacement.
-Replacement accepts symlinks and regular files, rejects directories and special
-entries, and leaves retired raw images for prune. Removal unlinks the terminal
-ref without following it, then syncs its parent; content and empty namespace
-directories remain for explicit maintenance. Missing refs are errors, including after removal has
-initialized a previously absent store.
+Destination conflicts require explicit replacement. Import replacement requires
+an existing entry to be a canonical confined pointer with a readable old wrapper
+index and supported, readable dependency declarations. A regular-file ref,
+malformed or escaping pointer, missing wrapper, or unreadable dependency graph
+is rejected before publication, preserving the old entry and content.
+Explicit replacement is not a repair facility. Cached metadata does not
+authorize reclamation and metadata damage alone does not prevent it.
 
-Failures before ref publication preserve the prior ref, although unreferenced
-objects or raw images may remain. After a namespace change, `Error::Durability`
-identifies the potentially visible blob insertion, ref publication, or removal
-and the failed sync path. The library does not roll back committed pointers to
-hide uncertainty.
+Import records staging ownership before creating staging, then records live
+addition ownership and publication intent before CAS insertion. After durable
+publication, it uses the recorded recovery path below to reclaim unused retired
+raw images and objects, remove private staging, and durably clear the record.
+Success means this entire lifecycle has finished; no grace period or prune is
+needed for the import's recorded candidates. Other refs' shared objects and
+required namespace prefixes survive. Unrecorded remnants remain untouched.
 
-After durable publication, acquisition removes only its own staging and syncs
-`tmp/` while still locked. Cleanup failures become structured warnings on a
-successful report and CLI status 0. Failed acquisition, publication errors,
-and process termination do not initiate cleanup: surviving writers may still
-exist. Prune handles recognized abandoned remnants later. Staging must fit an
-entire acquisition even when final content deduplicates; duplicate staged copies
-and hard links disappear during successful cleanup.
+Import failures after recording starts carry `Error::Recovery` context,
+including transfer and stage-validation failures. The underlying typed cause is
+retained. Before publication, recovery abandons acquisition and preserves the
+old ref; after publication it finishes forward without restoring the old ref.
+There is no destructor cleanup. Cleanup, syncing, and record-clearing failures
+are errors, even when the imported ref is already visible. Source inspection
+and capability failures before recording retain their original error types.
+
+Pull still uses unrecorded publication: replacement accepts symlinks and regular
+files, rejects directories and special entries, and leaves retired raw images
+for prune. After durable publication it removes its own staging and syncs
+`tmp/`; cleanup failures are structured warnings on a successful report and CLI
+status 0. Failed pull and process termination leave unrecorded remnants for
+explicit maintenance. Removal still unlinks the terminal ref without following
+it and syncs its parent; content and empty namespace directories remain for
+prune. Missing refs are errors, including after removal initializes a store.
+
+After a namespace change, `Error::Durability` identifies the potentially visible
+change and failed sync path; recorded import errors retain this as their cause.
+The library never rolls back committed pointers to hide uncertainty. Staging
+must fit an entire acquisition even when final content deduplicates; duplicate
+staged copies and hard links disappear during successful cleanup.
 
 ## Recorded mutations and automatic recovery
 
-Stage 3 supplies internal recorded mutation primitives and automatic recovery
-in every operation's preparation. Public import, pull, and remove still use the
-publication and cleanup behavior above until their Stage 4 changes. No public
-operation currently creates mutation records, and legacy unrecorded remnants
-are not automatically recovered. The protocol is exercised by synthetic
-mutations and controlled subprocesses. It adds no recovery command or public
-method, changes no initialization permissions, and retains format 2/schema 3.
-Intermediate format-2 stores may be recreated as the protocol is completed;
-compatibility between incomplete stages is not promised.
+Stage 3 supplies recorded mutation primitives and automatic recovery in every
+operation's preparation. Stage 4.1 integrates public import with that protocol.
+Pull and remove still use the intermediate behavior above until their Stage 4
+substages. Legacy unrecorded remnants are not automatically recovered. There is
+no recovery command or public method, and initialization permissions and format
+2/schema 3 remain unchanged. Intermediate format-2 stores may be recreated as
+the protocol is completed; compatibility between incomplete stages is not promised.
 
 `pending-mutation.json` is the durable snapshot of a mutation whose lifecycle
 has not yet finished. It exists during normal execution of a recorded mutation;
@@ -320,7 +346,7 @@ while preparing a replacement snapshot of the same mutation.
 The versioned snapshot carries the operation and ref identities, expected old
 and intended new pointer identities, private staging, owned and reused objects, retired raw
 images and their dependency declarations, and namespace-directory ownership.
-Paths are derived from validated identities and fixed tree-member names. The
+Paths are derived from validated identities and recognized tree-member names. The
 record phases are `acquiring`, `intent`, `cleaning`, and `complete`.
 
 Snapshot publication creates `.pending-mutation-next.json` exclusively, writes
@@ -339,6 +365,16 @@ regular file and a root sync. Malformed active records, redirected reserved
 entries, unexpected tree members, and inconsistent namespace states are
 preserved with errors. Only recognized operation contents are eligible for
 cleanup; recovery performs no general repair or discovery of abandoned work.
+
+Recognized staging also includes Skopeo blob temporary files named
+`layout/oci-put-blob<digits>`, with one or more ASCII digits and no other suffix.
+They must be regular files directly inside the recorded operation's real
+`layout/` directory. They can be empty or incomplete and are removed as private
+producer artifacts without content or size validation. The same grammar applies
+to persisted cleanup plans and their retries. Matching symlinks, directories,
+other special entries, names in other locations, and unrelated unknown contents
+still block cleanup. This allowance does not adopt unrecorded operation trees
+or change conservative prune's treatment of tool temporaries.
 
 Recovery compares the actual terminal pointer with the recorded old and new
 states. If the old state remains, it abandons acquisition and cleans safe owned
@@ -384,8 +420,14 @@ recovery; dry-run suppresses the subsequent prune deletions.
 `Error::InvalidMutationRecord` identifies invalid bookkeeping;
 `Error::Recovery` includes record path, available ref identity, phase, potential
 namespace change, remaining work, and the contextual underlying error. Recovery
-failure blocks ordinary actions. Local fault and termination tests establish
-ordering and retry behavior, not power-loss persistence or Lustre/VAST qualification.
+failure blocks ordinary actions. Shared cached structural and JSON findings
+return `Error::InvalidObject` with the original finding's path and diagnostic;
+operational I/O failures retain their typed cause chain. A pending operation
+published by an earlier implementation can still refer to unsupported content.
+Recovery returns a contextual error and preserves the committed ref, record,
+and content rather than panicking, ignoring the unsupported declaration, or
+repairing the store. Local fault and termination tests establish ordering and
+retry behavior, not power-loss persistence or Lustre/VAST qualification.
 
 ## Inventory, checking, and availability
 

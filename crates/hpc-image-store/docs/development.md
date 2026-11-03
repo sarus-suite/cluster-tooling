@@ -5,8 +5,10 @@ manifest-preserving registry pull, inventory, structural graph checking,
 explicit ref removal, conservative pruning, and library-only availability.
 The CLI has seven commands. Store format 2 and ref metadata schema 3 are used.
 PoC v2 Stage 2 replaces per-ref locks with one permanent store lock; the content
-lifecycle of public mutators remains unchanged pending Stage 4. Stage 3 adds
-durable mutation records and automatic recovery during operation preparation.
+lifecycle was retained through Stage 3, which adds durable mutation records and
+automatic recovery during operation preparation. Stage 4.1 integrates import:
+success now includes durable cleanup and immediate unused-content reclamation.
+Pull and remove retain their intermediate behavior until Stages 4.2 and 4.3.
 The crate remains private to this workspace; application integration is deferred.
 
 The [architecture](architecture.md) is authoritative. The [user guide](user-guide.md),
@@ -32,6 +34,97 @@ point. Keep relative repository links out of the included library guide; use
 API references or self-contained explanations so generated rustdoc navigation
 also works.
 
+## PoC v2 Stage 4.1: complete import mutations
+
+Import now creates the existing version-1 mutation snapshots and finishes its
+recorded lifecycle before success. The authoritative behavior is in the
+architecture; IMPORT-01 through IMPORT-03 and CONTENT-01 through CONTENT-04 in
+the acceptance inventory identify the public-import and retained primitive
+coverage. Pull warning reports, legacy removal, availability, and prune remain
+until their later substages. Store format 2 and ref metadata schema 3 are unchanged.
+
+The agreed replacement policy rejects malformed old entries or unreadable old
+dependency declarations before publication. It does not extend recovery into
+repair; damaged display metadata alone does not authorize or prevent reclamation.
+Errors after recording starts retain their underlying typed cause through
+`Error::Recovery`. Callers must no longer match transfer errors only at the
+outer level. Import's report and JSON omit `cleanup_warnings`.
+
+Completed import and pull acquisitions also validate private staged declarations
+with recovery's dependency parser before publication intent or live insertion.
+The validated dependency list supplies object identities and deduplicated sizes;
+config inspection still supplies metadata. This prevents subject/artifact-bearing
+or otherwise unsupported declarations from being published and then blocking
+cleanup. Cached structural and JSON findings now return contextual
+`Error::InvalidObject` values instead of panicking; operational I/O errors retain
+their typed cause chain. Unsupported content already published by an earlier
+implementation remains preserved with a recovery error, without automatic repair.
+
+Interrupted Skopeo copies can leave a regular `layout/oci-put-blob<digits>` file.
+Recorded recovery recognizes this producer artifact only inside the recorded
+operation's real layout directory, using the same grammar for initial cleanup
+and saved cleanup plans. The architecture defines the allowance; unknown
+contents and redirected or special entries remain preserved with errors.
+Unrecorded staging and conservative prune retain their existing behavior.
+
+The controlled transfer harness consumes the shared/unique content fixtures.
+Tests cover public replacement and identical-content replacement, encoded
+prefixes, nested index keepers, unknown staging contents, immutable sharing,
+damaged-ref rejection, typed acquisition errors, filesystem fault boundaries,
+and termination during publication and cleanup. Synthetic recovery cases also
+cover empty and partial producer temporary files, durable cleanup-plan reload,
+deletion/sync retry, malformed names, unexpected locations/types, unknown
+siblings, and unrecorded-tree preservation. Surviving transfer children block
+reader recovery until their inherited store descriptor closes. CLI tests use
+permission failures on recognized staging entries and prove failure status,
+empty stdout, and successful later recovery after permissions are restored.
+
+The real-Skopeo interruption regression streams part of a layer through a FIFO,
+observes the actual destination temporary file before SIGKILL, and waits for
+the operation worker to reap the producer and exit. It then recovers through
+repeated `list` and compares committed refs, raw images, CAS bytes/inodes, and
+the permanent lock identity. Readiness and termination use bounded waits;
+teardown stops producer and worker processes on failure. This OCI-to-OCI test
+needs no Podman storage or registry. A second real-Skopeo regression copies an
+accurately hashed subject-bearing fixture, verifies that Skopeo retains its
+`subject` field, and proves rejection in private recorded staging followed by
+successful cleanup through repeated `list`. Controlled imports cover fresh and
+replacement rejection for unsupported objects, roles, descriptor extensions,
+media-type mismatches, and conflicting declarations. Cached structural/JSON and
+I/O error tests exercise repeated dependency calls; open-file tracking verifies
+that the declaration pass does not open terminal objects. An already published
+unsupported fixture proves repeated `list` and `remove` return recovery errors
+while preserving the complete store snapshot.
+
+On 3 November 2026, the complete Stage 4.1 crate suite passed 236 tests:
+198 library tests, 25 CLI tests, one real-transfer test, five controlled-registry
+tests, and seven doctests. Six focused declaration-validation and recovery
+regressions also passed before the complete run. Six library subprocess helpers
+and one CLI helper remained ignored by top-level runners and were invoked by
+their owning ordinary tests. The independently ignored Docker Hub smoke test
+was not selected; no live registry was contacted. The real-Skopeo OCI-to-OCI
+regressions used Skopeo 1.18.0. Real transfers used the existing disposable
+overlay-storage harness with Podman 5.4.2 and Skopeo 1.18.0. Cargo used its
+configured build cache outside the filesystem sandbox.
+
+Crate check, all-target Clippy with warnings denied, formatting verification,
+rustdoc with warnings denied, `git diff --check`, and current local Markdown
+links/anchors passed. The generated API navigation was reviewed. The first
+sandboxed focused-test invocations could not open Cargo's external build-cache
+lock; reruns with cache access and all subsequent checks passed.
+Existing staged changes were preserved.
+
+During the initial Stage 4.1 focused tests, an old fixture used a config
+descriptor as a layer, which the dependency traversal correctly rejected; the
+duplicate-layer fixture now uses supported layer descriptors. Another new
+assertion attempted to snapshot a deliberately missing wrapper and was corrected
+to compare its absence. Both regressions passed in the complete suite; no
+required check remains failed or skipped.
+
+These tests establish local ordering and recovery behavior, not power-loss
+persistence or Lustre/VAST cross-node qualification. General repair and
+reclamation of unrecorded remnants remain outside automatic recovery.
+
 ## Pending snapshot naming and lifecycle clarification
 
 The active snapshot is now `pending-mutation.json`, and its temporary replacement
@@ -42,7 +135,8 @@ fault-checkpoint identifiers retain their existing meanings. The architecture
 and guides explicitly distinguish normal execution, clean idle state, and
 interrupted work, including the single active record and absence of a persistent
 recovery queue. See the [architecture](architecture.md#recorded-mutations-and-automatic-recovery)
-for the authoritative lifecycle. Public mutators still begin recording in Stage 4.
+for the authoritative lifecycle. Public mutators were still unrecorded at that
+validation; Stage 4.1 above supersedes import behavior.
 
 On 3 November 2026, crate check, all 183 library tests, all 25 CLI tests,
 all-target Clippy with warnings denied, formatting, the rustdoc build with
@@ -265,7 +359,7 @@ Local failure injection demonstrates ordering, not actual crash persistence.
 
 The six ignored library tests (`lock_worker`, `wait_worker`, `publication_worker`,
 `transfer_worker`, `pull_worker`, and `recovery_worker`) and the CLI's
-`cleanup_warning_worker` are internal subprocess helpers invoked by their owning
+`cleanup_failure_worker` are internal subprocess helpers invoked by their owning
 ordinary tests. Never select them
 directly or use an unfiltered `--ignored` invocation. The independently ignored
 Docker Hub test requires explicit selection, as described below.
@@ -316,8 +410,11 @@ and unchanged configuration. During a real containers-storage export, it also
 terminates the CLI parent, proves that the surviving Skopeo retains the single
 store lock, and verifies that the exported image is complete after it exits.
 
-The independent real-Skopeo OCI-to-OCI lock test needs no Podman storage and
-also runs as part of the ordinary crate suite:
+The independent real-Skopeo OCI-to-OCI lock test and the
+`killed_real_skopeo_temporary_blob_recovers_on_list` and
+`real_skopeo_subject_output_is_rejected_in_private_recorded_staging` regressions
+need no Podman storage. All run as part of the ordinary library suite. The
+existing lock-lifetime test can also be selected separately:
 
 ```sh
 cargo test --locked -p hpc-image-store actual_skopeo_retains_lock_after_parent_termination -- --nocapture

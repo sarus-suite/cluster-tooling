@@ -3,8 +3,8 @@
 ## Purpose and current baseline
 
 PoC v2 simplifies coordination and makes each mutation finish its own content
-lifecycle. Stages 1 through 3 are implemented; later stages remain planned. The
-[architecture](architecture.md) is the authoritative reference for delivered
+lifecycle. Stages 1 through 3 and Stage 4.1 are implemented; later substages
+remain planned. The [architecture](architecture.md) is the authoritative reference for delivered
 behavior and is updated as each stage completes.
 The plans and results under `archive/` remain historical records.
 
@@ -295,7 +295,7 @@ clearing the record or returning success. Each substage includes its own
 failure, retry, and recovery cases. Do not implement this lifecycle by calling
 prune or check from a mutator.
 
-#### 4.1. Import
+#### 4.1. Import (Implemented)
 
 **Prerequisites:** Stage 3's recovery protocol and shared-content fixtures.
 
@@ -303,7 +303,12 @@ prune or check from a mutator.
 Reclaim superseded raw images and blobs no remaining ref uses, and finish
 staging cleanup before success. Remove import's cleanup-warning report field
 and corresponding CLI warning handling. Preserve source pinning, naming,
-platform behavior, immutable insertion, and provenance.
+platform behavior, immutable insertion, and provenance. Import replacement
+requires a canonical old pointer and readable authoritative dependency
+declarations. Reject and preserve damaged old entries or unknown dependencies
+before publication; cached metadata damage alone does not block reclamation.
+This is stricter than the earlier unrecorded replacement behavior and does not
+add a repair or override facility.
 
 **Acceptance:** import leaves no operation staging after success. Replacement
 leaves no retired operation content and preserves blobs used by other refs.
@@ -319,6 +324,12 @@ cargo test --locked -p hpc-image-store --test cli
 cargo test --locked -p hpc-image-store --test real_transfers -- --nocapture
 git diff --check
 ```
+
+**Outcome:** public import now uses the recorded mutation lifecycle, returns
+errors for incomplete cleanup, and reclaims unused superseded content before
+success. Replacement rejects unprovable old identities/dependencies before
+publication. The acceptance inventory records IMPORT-01 through IMPORT-03 and
+CONTENT-01 through CONTENT-04 evidence; the development guide records validation.
 
 **Intermediate limits:** pull still has cleanup warnings and deferred content
 reclamation; remove still has its original preparation and unlink behavior.

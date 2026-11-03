@@ -1,16 +1,17 @@
 use crate::{
     ContentMetadata, Error, ImageId, ImageSelector, LocalRef, Platform, RefMetadata, Result,
     Sha256Digest, Store, fsutil,
+    graph::GraphReader,
     initialization::require_directory,
     locks::Operation,
+    mutation::{Kind, Mutation},
     oci::{self, Descriptor},
     refs,
-    staging::{self, AcquisitionStage, BlobSpec, CleanupWarning},
+    staging::{AcquisitionStage, BlobSpec},
     subprocess,
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
     ffi::OsString,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
@@ -126,7 +127,6 @@ pub struct ImportReport {
     pub stored_root: Sha256Digest,
     pub image_id: ImageId,
     pub content: ContentMetadata,
-    pub cleanup_warnings: Vec<CleanupWarning>,
     /// An explicit destination digest is descriptive input only, never an
     /// assertion about transferred content or a source of a generated tag.
     pub ignored_destination_digest: Option<Sha256Digest>,
@@ -226,7 +226,8 @@ impl Store {
                 executable: context.podman.clone(),
                 reason: "expected one complete containers-storage image ID".into(),
             })?;
-        let stage = AcquisitionStage::new(&store_guard, &reference)?;
+        let mut mutation = Mutation::begin(&store_guard, &reference, Kind::Import)?;
+        let stage = mutation.stage()?;
         let mut command = context.copy_command();
         command
             .arg("--dest-shared-blob-dir")
@@ -236,20 +237,26 @@ impl Store {
             } else {
                 image_id.as_str()
             }))
-            .arg(oci_argument(&stage.layout_path())?);
+            .arg(oci_argument(&stage.layout_path()).map_err(|error| mutation.context(error))?);
         subprocess::run(
             &mut command,
             "import image",
             &context.skopeo,
             Some(store_guard.transfer_fd()),
-        )?;
+        )
+        .map_err(|error| mutation.context(error))?;
 
         // Skopeo has exited: no writable producer may remain when staged
         // objects become aliases of the immutable CAS.
-        let (root, content, objects) = acquired_content(&stage)?;
+        let (root, content, objects) =
+            acquired_content(&stage).map_err(|error| mutation.context(error))?;
         let acquired_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|_| Error::InvalidTransfer("system clock is before the Unix epoch".into()))?
+            .map_err(|_| {
+                mutation.context(Error::InvalidTransfer(
+                    "system clock is before the Unix epoch".into(),
+                ))
+            })?
             .as_secs();
         let metadata = RefMetadata::new_import(
             reference.clone(),
@@ -260,20 +267,18 @@ impl Store {
             image_id.clone(),
             options.notes.clone(),
         );
-        let completed = stage.complete(&root.digest, metadata, objects)?;
-        let staging_directory = completed.directory().to_owned();
-        refs::publish(completed, options.replace)?;
-        // Publication (including both rename-parent syncs) has succeeded. Keep
-        // the store lock while removing only this operation's private aliases.
-        let cleanup_warnings = staging::cleanup_published(&store_guard, &staging_directory)
-            .into_iter()
-            .collect();
+        let completed = stage
+            .complete(&root.digest, metadata, objects)
+            .map_err(|error| mutation.context(error))?;
+        mutation.publish(completed)?;
+        // Finish the durable lifecycle under the same exclusive guard. Errors
+        // leave recorded work for preparation to recover forward, never rollback.
+        mutation.finish()?;
         Ok(ImportReport {
             local_ref: reference.clone(),
             stored_root: root.digest,
             image_id,
             content,
-            cleanup_warnings,
             ignored_destination_digest,
         })
     }
@@ -335,7 +340,6 @@ struct Manifest {
     #[serde(rename = "schemaVersion")]
     schema_version: u64,
     config: Descriptor,
-    layers: Vec<Descriptor>,
 }
 #[derive(Deserialize)]
 struct Config {
@@ -360,6 +364,10 @@ pub(crate) fn acquired_content(
     require_directory(&blobs)?;
     let root = oci::single_root(&stage.layout_path())?;
     require_manifest(&root, &stage.layout_path())?;
+    // A successful transfer must also be a graph the store can reclaim later.
+    // Use recovery's declaration rules while everything is still private; this
+    // traversal does not open configuration or layer objects.
+    let objects = GraphReader::dependencies(&blobs).dependency_objects(&root)?;
     let manifest: Manifest = parse_object(&blobs.join(root.digest.hex()), root.size)?;
     if manifest.schema_version != 2 || manifest.config.media_type != OCI_CONFIG {
         return Err(Error::InvalidObject {
@@ -377,31 +385,13 @@ pub(crate) fn acquired_content(
             reason: "image config must specify OS and architecture".into(),
         });
     }
-    let mut sizes = BTreeMap::new();
-    for descriptor in std::iter::once(&root)
-        .chain(std::iter::once(&manifest.config))
-        .chain(manifest.layers.iter())
-    {
-        if let Some(previous) = sizes.insert(descriptor.digest.clone(), descriptor.size)
-            && previous != descriptor.size
-        {
-            return Err(Error::InvalidObject {
-                path: stage.layout_path(),
-                reason: "conflicting descriptor sizes for one digest".into(),
-            });
-        }
-    }
-    let size_bytes = sizes
-        .values()
-        .try_fold(0_u64, |total, size| total.checked_add(*size))
+    let size_bytes = objects
+        .iter()
+        .try_fold(0_u64, |total, object| total.checked_add(object.size))
         .ok_or_else(|| Error::InvalidObject {
             path: stage.layout_path(),
             reason: "stored-content size overflows u64".into(),
         })?;
-    let objects = sizes
-        .into_iter()
-        .map(|(digest, size)| BlobSpec { digest, size })
-        .collect();
     let content = ContentMetadata {
         config_digest: manifest.config.digest,
         platform: Platform {

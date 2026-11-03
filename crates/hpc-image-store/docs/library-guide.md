@@ -27,8 +27,8 @@ queries may temporarily require exclusive access for this prerequisite, then
 retry under their normal shared lock. A clean preparation performs no content
 graph traversal. Unrecorded remnants are not automatically recovered.
 
-Public import, pull, and remove do not yet create these records; their
-integration is planned for Stage 4.
+Import records its complete mutation lifecycle. Pull and remove do not yet
+create records; their integration remains planned for Stages 4.2 and 4.3.
 
 Checking returns collected damage as a report, while store and selection
 failures return typed errors:
@@ -87,13 +87,25 @@ returns `Error::InvalidImportDestination` before store preparation or tool
 invocation, and the CLI reports status 2.
 
 `ImportReport` identifies the local ref, stored root digest, source `ImageId`,
-and content metadata, and includes any `cleanup_warnings`. Its
-`ignored_destination_digest` field identifies a digest ignored in an explicit
-import destination; it is `None` when the destination was omitted. `ExportReport`
-identifies the local ref, stored manifest digest, and destination. `Store::export`
-requires digest preservation for both import and pull provenance and propagates
-capability and transfer errors without fallback. The CLI uses
-these reports for its JSON results.
+and content metadata. Its `ignored_destination_digest` field identifies a digest
+ignored in an explicit import destination; it is `None` when the destination
+was omitted. `ExportReport` identifies the local ref, stored manifest digest,
+and destination. `Store::export` requires digest preservation for both import
+and pull provenance and propagates capability and transfer errors without fallback.
+The CLI uses these reports for its JSON results.
+
+Import replacement requires explicit `ImportOptions::replace` and an old
+canonical pointer with readable authoritative root/dependency declarations.
+Malformed pointers, regular-file refs, missing old wrappers, or unsupported or
+unreadable declarations are preserved and rejected before publication. Damaged
+cached metadata alone does not prevent reclamation. Import does not repair
+external damage or reclaim unrelated unrecorded content.
+
+Completed import and pull acquisitions validate their staged dependency
+declarations with recovery's parser before publication. Unsupported objects,
+including subject/artifact-bearing manifests, are rejected while private.
+For import this returns acquiring-phase `Error::Recovery` context and allows
+later preparation to clean abandoned staging without changing a committed ref.
 
 Inventory and removal need no transfer context. Formatters only turn a collected
 report into a string; they do not open the store or print diagnostics:
@@ -278,8 +290,12 @@ error, and may carry several diagnostics.
 `Error::Recovery` reports the record path, available ref identity, phase,
 potential namespace change, remaining work, and underlying cause. Recovery
 failures block the requested action, including explicit check and prune dry-run,
-and preserve pending evidence for investigation. The library does not repair or
-adopt inconsistent contents. No public recovery
+and preserve pending evidence for investigation. Shared cached structural or
+JSON findings return `Error::InvalidObject` with the finding's path and diagnostic;
+shared operational I/O failures retain their typed cause chain. Previously
+published unsupported content still blocks recovery with a contextual error,
+without panicking or removing the ref, record, or content. The library does not
+repair or adopt inconsistent contents. No public recovery
 method or report type is added. Prune dry-run suppresses prune deletions after
 any required recorded recovery has finished.
 
@@ -287,6 +303,10 @@ any required recorded recovery has finished.
 publication, or removal through `NamespaceChange` and the failed sync path.
 `Error::InitializationDurability` similarly reports a potentially published
 marker. Do not assume `Err` means no change occurred or retry replacement
-blindly. Successful import/pull reports can contain `cleanup_warnings` after
-durable publication; cleanup warnings do not undo the committed ref. Prune
+blindly. Import errors after recording begins use `Error::Recovery`, retaining
+the underlying typed cause, including `Error::ToolFailed` or `Error::Durability`.
+Cleanup failures are errors even after publication; a later operation finishes
+recorded work during preparation. Import never cleans up in a destructor.
+Successful pull reports can still contain `cleanup_warnings` after durable
+publication; those warnings do not undo the committed ref. Prune
 reports expose partial removals and uncertain durability separately.

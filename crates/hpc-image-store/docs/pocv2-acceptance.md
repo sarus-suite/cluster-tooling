@@ -9,7 +9,7 @@ This inventory introduces no independent requirements.
 For context, see the plan's [baseline](pocv2-implementation-plan.md#purpose-and-current-baseline),
 [stage execution guidance](pocv2-implementation-plan.md#stage-execution-and-validation),
 and [scope](pocv2-implementation-plan.md#scope-and-document-handoff).
-Stages 1 through 3 supply the implemented evidence below. Unimplemented acceptance
+Stages 1 through 3 and Stage 4.1 supply the implemented evidence below. Unimplemented acceptance
 cases remain **Planned**, even where existing tests preserve part of their behavior.
 
 When requirements change, update the plan first, then update affected acceptance
@@ -135,7 +135,7 @@ Stage 3 evidence (library names below are relative to `recovery::tests`):
 
 Requirements: [complete mutations](pocv2-implementation-plan.md#authoritative-content-and-complete-mutations),
 [recovery](pocv2-implementation-plan.md#recovery-and-query-boundaries), and the
-[import](pocv2-implementation-plan.md#41-import),
+[import](pocv2-implementation-plan.md#41-import-implemented),
 [pull](pocv2-implementation-plan.md#42-pull), and
 [remove](pocv2-implementation-plan.md#43-remove) substages of Stage 4.
 Removal's initialization policy follows the
@@ -143,19 +143,33 @@ Removal's initialization policy follows the
 
 | ID | Stage | Fixture | Target | Expected observation | Status |
 | --- | --- | --- | --- | --- | --- |
-| IMPORT-01 | 4.1 | Mutation, Transfer | lib, CLI, real | Import and replacement finish durable staging cleanup and unused-content reclamation; keeper objects and needed parents survive; success has no cleanup-warning field or CLI warning path. | Planned |
-| IMPORT-02 | 4.1 | Interrupted, Transfer | lib, CLI | Acquisition, publication, cleanup, deletion, and sync failures remain recorded/recoverable, identify visible changes, and preserve previous refs/shared objects before commit. | Planned |
-| IMPORT-03 | 4.1 | Transfer | lib, real | Source-ID pinning, explicit replacement, naming, platform selection, provenance, and allowed import representation changes retain existing behavior. | Planned |
-| CONTENT-01 | 4.1 | Mutation, Snapshot | lib | CAS reuse preserves bytes/inodes; insertion never overwrites; unsupported hard links and other required primitives fail without weaker fallback. Complete wrappers and confined relative pointers remain enforced. | Planned |
-| CONTENT-02 | 4.1 | Nested, Shared | lib | Reachability follows authoritative roots and every manifest/index branch; shared objects survive. Unreadable or unsupported declarations preserve unsafe-to-delete content with errors. | Planned |
-| CONTENT-03 | 4.1 | Mutation, fault instrumentation | lib | Caches, provenance, timestamps, previous checks, or reference counts never authorize deletion; mutation reclamation calls neither prune nor check and does not open/hash every layer, decompress, or check remote freshness. | Planned |
-| CONTENT-04 | 4.1 | Interrupted | lib | Namespace syncing precedes retired-content deletion; partial deletion/sync failure remains visible and recorded; cleanup is persisted before clearing the record or returning success. | Planned |
+| IMPORT-01 | 4.1 | Mutation, Transfer | lib, CLI, real | Import and replacement finish durable staging cleanup and unused-content reclamation; keeper objects and needed parents survive; success has no cleanup-warning field or CLI warning path. | Implemented |
+| IMPORT-02 | 4.1 | Interrupted, Transfer | lib, CLI | Acquisition, publication, cleanup, deletion, and sync failures remain recorded/recoverable, identify visible changes, and preserve previous refs/shared objects before commit. | Implemented |
+| IMPORT-03 | 4.1 | Transfer | lib, real | Source-ID pinning, explicit replacement, naming, platform selection, provenance, and allowed import representation changes retain existing behavior. | Implemented |
+| CONTENT-01 | 4.1 | Mutation, Snapshot | lib | CAS reuse preserves bytes/inodes; insertion never overwrites; unsupported hard links and other required primitives fail without weaker fallback. Complete wrappers and confined relative pointers remain enforced. | Implemented |
+| CONTENT-02 | 4.1 | Nested, Shared | lib | Reachability follows authoritative roots and every manifest/index branch; shared objects survive. Unreadable or unsupported declarations preserve unsafe-to-delete content with errors. | Implemented |
+| CONTENT-03 | 4.1 | Mutation, fault instrumentation | lib | Caches, provenance, timestamps, previous checks, or reference counts never authorize deletion; mutation reclamation calls neither prune nor check and does not open/hash every layer, decompress, or check remote freshness. | Implemented |
+| CONTENT-04 | 4.1 | Interrupted | lib | Namespace syncing precedes retired-content deletion; partial deletion/sync failure remains visible and recorded; cleanup is persisted before clearing the record or returning success. | Implemented |
 | PULL-01 | 4.2 | Mutation, Registry | lib, registry, CLI | Pull/replacement finish the same lifecycle; shared objects survive; cleanup failures are errors. Pull warning fields/CLI handling and the now-unused shared warning type disappear. | Planned |
 | PULL-02 | 4.2 | Registry, Interrupted | lib, registry, CLI | Pinned manifest acquisition, digest preservation, platform selection, registry settings and provenance survive failure/recovery; missing capabilities and unsupported representations fail without weaker retry or conversion. | Planned |
 | REMOVE-01 | 4.3 | Setup, Snapshot | lib, CLI | Missing roots/parents, empty directories, and interrupted setup remain unchanged, without lock bookkeeping; initialized stores support recovery and retain the missing-ref error. | Planned |
 | REMOVE-02 | 4.3 | Shared, Mutation | lib, CLI, real | Removing one ref preserves shared content; removing the last use durably reclaims blobs, raw images, staging, and unnecessary namespace directories before success, without grace or prune. | Planned |
 | REMOVE-03 | 4.3 | Prefix | lib, CLI | Removing the short name leaves its terminal ref absent and preserves longer names, their content, and necessary namespace parents. | Planned |
 | REMOVE-04 | 4.3 | Interrupted | lib, CLI | Partial deletion and failed sync report visible changes, retain recovery information, and never report premature success or roll back. Removal still requires `LocalRef` and rejects digest selectors. | Planned |
+
+Stage 4.1 evidence (library names are relative to `transfer::tests` unless noted):
+
+| Cases | Passing evidence |
+| --- | --- |
+| IMPORT-01 | `import_lifecycle_tests::public_replacement_reclaims_unique_content_and_preserves_shared_prefixes` covers original/keeper/replacement imports, identical-content replacement, immutable sharing, encoded prefixes, and absent staging/snapshots. CLI: `cli_round_trip_has_clean_json_and_preserves_callers_configuration` and real: `real_rootless_round_trip` assert absence of import's warning field and complete cleanup. |
+| IMPORT-02, CONTENT-04 | `import_lifecycle_tests::{public_import_failures_recover_without_harming_prior_or_shared_content,terminated_public_import_recovers_at_publication_and_cleanup_boundaries}`, `failed_copy_and_invalid_id_preserve_previous_ref`, `publication_failure_preserves_ref_and_post_commit_failure_reports_visibility`, and `cleanup_failures_are_errors_and_preparation_finishes_recorded_work` cover typed causes, pre/post-publication state, durable cleanup and record clearing. CLI: `cleanup_failure_is_an_error_and_recovery_keeps_json_clean`. Stage 3's every-removal and snapshot-retry tests remain applicable. |
+| IMPORT-02, CONTENT-04, REC-04 | `skopeo_interruption_tests::killed_real_skopeo_temporary_blob_recovers_on_list` blocks a real Skopeo layer copy with a FIFO, observes its actual destination temporary file, verifies reader exclusion, kills the producer, and reaps it through the operation worker. Repeated `list` finishes recovery and preserves committed refs, raw wrappers, shared CAS objects, and the lock identity. |
+| IMPORT-02, CONTENT-02 | `import_lifecycle_tests::unsupported_staged_declarations_are_rejected_before_fresh_or_replacement_publication` rejects unsupported manifest/descriptor fields, roles, malformed descriptor JSON/extensions, media-type mismatches, and conflicting declarations while the record is acquiring, with no live additions and unchanged committed/shared content. Repeated `list` cleans the rejected stage without reparsing its declarations. `skopeo_interruption_tests::real_skopeo_subject_output_is_rejected_in_private_recorded_staging` verifies actual subject-bearing Skopeo output is rejected before publication and remains safely recoverable. |
+| IMPORT-03 | Existing naming, digest-source, source-ID, platform, capability, metadata, and representation tests, plus `real_rootless_round_trip`. `orphaned_transfer_retains_store_lock_and_inherits_environment` now verifies blocked readers and query-triggered recovery of public import after the surviving child exits. |
+| CONTENT-01 | Public import fault coverage injects EXDEV at CAS insertion, preserving prior/shared content with no copy fallback. Existing publication and CAS regressions retain no-overwrite, regular-file/size validation, complete wrappers, and pointer confinement. `destination_exists_is_checked_before_tools_and_reuse_preserves_blob_age` verifies reuse and one remaining wrapper. |
+| CONTENT-02, CONTENT-03 | `import_lifecycle_tests::{public_import_preserves_nested_branches_and_blocks_unprovable_reclamation,replacement_uses_dependencies_despite_damaged_display_metadata,damaged_old_identity_or_dependencies_are_rejected_and_preserved}` cover nested reachability, conservative failure, damaged metadata, and the agreed rejection policy. Open-file tracking in the public replacement test excludes old/keeper terminal files and metadata from reclamation; Stage 3 dependency-only traversal tests retain the full graph boundary evidence. `ordinary_query_recovers_import_without_prune_or_tools` and `unknown_staging_contents_block_cleanup_without_following_symlinks` cover tool-free recovery and unknown-content preservation. |
+| REC-04, REC-07 | `recovery::tests::{recorded_skopeo_temporaries_recover_and_resume_after_deletion_or_sync_failure,unknown_or_redirected_producer_temporaries_block_recorded_cleanup}` cover empty/partial temporary files, saved cleanup-plan validation, retries after deletion/parent-sync failure, malformed names, incorrect locations, symlinks, directories, FIFOs, redirected parents, unrelated unknown siblings, and preservation of unrecorded trees. |
+| REC-05, REC-07, CONTENT-03 | `graph::tests::{cached_dependency_structural_and_json_failures_return_context_without_panicking,cached_dependency_io_failures_retain_the_original_typed_cause,dependency_validation_reads_declarations_without_opening_terminal_objects}` cover cached findings, original I/O causes, repeated calls, and dependency-only file access. `recovery::tests::already_published_unsupported_declarations_block_actions_without_panicking_or_deleting` preserves the complete store while repeated `list` and `remove` return typed recovery errors for an already published subject-bearing manifest. |
 
 ### Stage 5: lightweight existence
 

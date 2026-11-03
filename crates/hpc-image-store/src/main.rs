@@ -218,13 +218,6 @@ fn execute(cli: Cli) -> hpc_image_store::Result<bool> {
                     report.local_ref, report.stored_root
                 );
             }
-            for warning in &report.cleanup_warnings {
-                eprintln!(
-                    "hpc-image-store: warning: {}: {}",
-                    warning.staging_path.display(),
-                    warning.message
-                );
-            }
             if cli.json {
                 println!(
                     "{}",

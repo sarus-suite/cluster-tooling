@@ -121,6 +121,80 @@ fn failures_are_cached_and_each_incoming_size_and_media_type_is_checked() {
 }
 
 #[test]
+fn cached_dependency_structural_and_json_failures_return_context_without_panicking() {
+    for (bytes, expected) in [
+        (
+            br#"{"schemaVersion":2,"subject":{},"layers":[]}"#.as_slice(),
+            "subject",
+        ),
+        (b"{broken".as_slice(), "line 1"),
+        (
+            br#"{"schemaVersion":2,"config":false,"layers":[]}"#.as_slice(),
+            "config",
+        ),
+    ] {
+        let mut fixture = Fixture::new();
+        let root = fixture.bytes(MANIFEST, bytes);
+        let path = fixture.path(&root);
+        let mut reader = GraphReader::dependencies(fixture.directory.path());
+        // Keep another report alive to exercise shared ownership as well as
+        // the cached finding held by the reader itself.
+        let report = reader.scan(&root);
+        assert!(!report.complete);
+        for _ in 0..3 {
+            let error = reader.dependency_objects(&root).err().unwrap();
+            assert!(
+                matches!(&error, crate::Error::InvalidObject { path: actual, reason }
+                if actual == &path && reason.contains(expected)),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cached_dependency_io_failures_retain_the_original_typed_cause() {
+    let mut fixture = Fixture::new();
+    let root = fixture.manifest(vec![]);
+    let mut reader = GraphReader::dependencies(fixture.directory.path());
+    fsutil::fail_once("dependencies.observe", libc::EACCES);
+    for _ in 0..3 {
+        let error = reader.dependency_objects(&root).err().unwrap();
+        let crate::Error::Io { path, source, .. } = error else {
+            panic!("expected operational I/O error: {error}");
+        };
+        assert_eq!(path, fixture.path(&root));
+        assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+        let original = source
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<std::sync::Arc<crate::Error>>()
+            .unwrap();
+        assert!(matches!(original.as_ref(), crate::Error::Io { source, .. }
+            if source.raw_os_error() == Some(libc::EACCES)));
+    }
+}
+
+#[test]
+fn dependency_validation_reads_declarations_without_opening_terminal_objects() {
+    let fixture = crate::test_support::SharedImages::new();
+    let directory = tempfile::tempdir().unwrap();
+    for (digest, bytes) in &fixture.original.objects {
+        fs::write(directory.path().join(digest.hex()), bytes).unwrap();
+    }
+    fsutil::track_opens();
+    let objects = GraphReader::dependencies(directory.path())
+        .dependency_objects(&fixture.original.root)
+        .unwrap();
+    let opened = fsutil::take_opens();
+    assert_eq!(
+        opened,
+        [directory.path().join(fixture.original.root.digest.hex())]
+    );
+    assert_eq!(objects.len(), fixture.original.objects.len());
+}
+
+#[test]
 fn missing_layers_require_local_content_even_with_urls_and_embedded_data() {
     let mut fixture = Fixture::new();
     let mut layer = fixture.bytes(LAYERS[0], b"original");

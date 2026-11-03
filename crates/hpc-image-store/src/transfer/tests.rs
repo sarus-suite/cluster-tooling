@@ -156,6 +156,18 @@ impl Fixture {
         let store_guard = self.store.prepare(Operation::Export).unwrap();
         refs::read(&store_guard, &self.reference).unwrap().metadata
     }
+    fn select_image(&mut self, image: &crate::test_support::SyntheticImage) {
+        let directory = self.temporary.path().join(image.root.digest.hex());
+        if !directory.exists() {
+            fs::create_dir_all(directory.join("blobs/sha256")).unwrap();
+            oci::write_layout(&directory, &image.root).unwrap();
+            for (digest, bytes) in &image.objects {
+                fs::write(directory.join("blobs/sha256").join(digest.hex()), bytes).unwrap();
+            }
+        }
+        self.config["fixture"] = json!(directory);
+        self.save();
+    }
     fn alter_manifest(&self, change: impl FnOnce(&mut Value)) {
         let directory = self.temporary.path().join("fixture");
         let mut value: Value = serde_json::from_slice(MANIFEST).unwrap();
@@ -263,7 +275,12 @@ fn import_pins_id_builds_metadata_and_exports_without_podman() {
         variant: Some("v1".into()),
     });
     let report = fixture.import(false).unwrap();
-    assert!(report.cleanup_warnings.is_empty());
+    assert!(
+        serde_json::to_value(&report)
+            .unwrap()
+            .get("cleanup_warnings")
+            .is_none()
+    );
     assert_eq!(
         fs::read_dir(fixture.store.layout.staging())
             .unwrap()
@@ -412,7 +429,7 @@ fn destination_exists_is_checked_before_tools_and_reuse_preserves_blob_age() {
         fs::read_dir(fixture.store.layout.raw_images())
             .unwrap()
             .count(),
-        2
+        1
     );
 }
 
@@ -464,7 +481,7 @@ fn failed_copy_and_invalid_id_preserve_previous_ref() {
     fixture.config["fail"] = json!(true);
     fixture.save();
     assert!(
-        matches!(fixture.import(true), Err(Error::ToolFailed { status, stderr, .. }) if status.code() == Some(17) && stderr.contains("controlled transfer failure"))
+        matches!(underlying(&fixture.import(true).unwrap_err()), Error::ToolFailed { status, stderr, .. } if status.code() == Some(17) && stderr.contains("controlled transfer failure"))
     );
     assert_eq!(
         fs::read_dir(fixture.store.layout.staging())
@@ -486,7 +503,7 @@ fn failed_copy_and_invalid_id_preserve_previous_ref() {
         fs::read_dir(fixture.store.layout.staging())
             .unwrap()
             .count(),
-        1
+        0
     );
 }
 
@@ -591,8 +608,8 @@ fn unexpected_index_and_missing_config_are_not_published() {
     )
     .unwrap();
     assert!(matches!(
-        fixture.import(false),
-        Err(Error::InvalidObject { .. })
+        underlying(&fixture.import(false).unwrap_err()),
+        Error::InvalidObject { .. }
     ));
     assert_eq!(
         fs::read_dir(fixture.store.layout.staging())
@@ -619,15 +636,37 @@ fn unexpected_index_and_missing_config_are_not_published() {
 
 #[test]
 fn duplicate_descriptors_count_once_and_conflicting_sizes_fail() {
-    let fixture = Fixture::new();
-    fixture.alter_manifest(|value| {
-        value["layers"] = json!([value["config"].clone(), value["config"].clone()]);
-    });
+    let mut fixture = Fixture::new();
+    let images = crate::test_support::SharedImages::new();
+    fixture.select_image(&images.original);
+    let path = fixture
+        .temporary
+        .path()
+        .join(images.original.root.digest.hex());
+    let manifest_path = path
+        .join("blobs/sha256")
+        .join(images.original.root.digest.hex());
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let unique_size = manifest["layers"][1]["size"].as_u64().unwrap();
+    manifest["layers"] = json!([manifest["layers"][0].clone(), manifest["layers"][0].clone()]);
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    fs::write(&manifest_path, &bytes).unwrap();
+    let mut index: Value =
+        serde_json::from_slice(&fs::read(path.join("index.json")).unwrap()).unwrap();
+    index["manifests"][0]["size"] = json!(bytes.len());
+    fs::write(path.join("index.json"), serde_json::to_vec(&index).unwrap()).unwrap();
     let report = fixture.import(false).unwrap();
-    let root_size = fs::metadata(fixture.store.layout.blobs().join(ROOT))
-        .unwrap()
-        .len();
-    assert_eq!(report.content.size_bytes, root_size + CONFIG.len() as u64);
+    let expected: u64 = images
+        .original
+        .objects
+        .values()
+        .map(|bytes| bytes.len() as u64)
+        .sum();
+    assert_eq!(
+        report.content.size_bytes,
+        expected - images.original.objects[&images.original.root.digest].len() as u64 - unique_size
+            + bytes.len() as u64
+    );
     let fixture = Fixture::new();
     fixture.alter_manifest(|value| {
         let mut layer = value["config"].clone();
@@ -635,8 +674,20 @@ fn duplicate_descriptors_count_once_and_conflicting_sizes_fail() {
         value["layers"] = json!([layer]);
     });
     assert!(
-        matches!(fixture.import(false), Err(Error::InvalidObject { reason, .. }) if reason.contains("conflicting"))
+        matches!(underlying(&fixture.import(false).unwrap_err()), Error::InvalidObject { reason, .. } if reason.contains("conflicting"))
     );
+}
+
+fn underlying(error: &Error) -> &Error {
+    match error {
+        Error::Recovery { source, .. } => underlying(source),
+        other => other,
+    }
+}
+
+fn assert_import_idle(store: &Store) {
+    assert!(!crate::recovery::pending(&store.layout).unwrap());
+    assert_eq!(fs::read_dir(store.layout.staging()).unwrap().count(), 0);
 }
 
 #[test]
@@ -645,115 +696,91 @@ fn publication_failure_preserves_ref_and_post_commit_failure_reports_visibility(
     fixture.import(false).unwrap();
     let pointer = fs::read_link(fixture.store.layout.ref_entry(&fixture.reference)).unwrap();
     fsutil::fail_once("ref.rename", libc::EIO);
-    assert!(fixture.import(true).is_err());
-    assert_eq!(
-        fs::read_dir(fixture.store.layout.staging())
-            .unwrap()
-            .count(),
-        1
-    );
+    let error = fixture.import(true).unwrap_err();
+    assert!(matches!(error, Error::Recovery { .. }));
     assert_eq!(
         fs::read_link(fixture.store.layout.ref_entry(&fixture.reference)).unwrap(),
         pointer
     );
+    assert!(crate::recovery::pending(&fixture.store.layout).unwrap());
+    // Preparation recovers the failed replacement before starting the next one.
     fsutil::fail_once("ref.destination-sync", libc::EIO);
+    let error = fixture.import(true).unwrap_err();
     assert!(matches!(
-        fixture.import(true),
-        Err(Error::Durability {
+        underlying(&error),
+        Error::Durability {
             change: NamespaceChange::RefPublished,
             ..
-        })
+        }
     ));
-    assert_eq!(
-        fs::read_dir(fixture.store.layout.staging())
-            .unwrap()
-            .count(),
-        2
-    );
     assert_ne!(
         fs::read_link(fixture.store.layout.ref_entry(&fixture.reference)).unwrap(),
         pointer
     );
     fixture.read();
+    assert_import_idle(&fixture.store);
+    assert_eq!(
+        fs::read_dir(fixture.store.layout.raw_images())
+            .unwrap()
+            .count(),
+        1
+    );
 }
 
 #[test]
-fn cleanup_failures_warn_after_commit_and_later_imports_leave_remnants_alone() {
-    for point in ["staging.cleanup-remove", "staging.cleanup-parent-sync"] {
+fn cleanup_failures_are_errors_and_preparation_finishes_recorded_work() {
+    use crate::test_snapshot::snapshot;
+    for point in [
+        "recovery.remove",
+        "recovery.cleanup-sync",
+        "recovery.record-remove-sync",
+    ] {
         let fixture = Fixture::new();
         fixture.import(false).unwrap();
-        let previous = fs::read_link(fixture.store.layout.ref_entry(&fixture.reference)).unwrap();
-        let blob_path = fixture.store.layout.blobs().join(ROOT);
-        let before = fs::metadata(&blob_path).unwrap();
+        let old = fs::read_link(fixture.store.layout.ref_entry(&fixture.reference)).unwrap();
+        let blob = fixture.store.layout.blobs().join(ROOT);
+        let before = snapshot(&blob);
         let untouched = fixture.store.layout.staging().join("unrelated-operation");
         fs::create_dir(&untouched).unwrap();
         fs::write(untouched.join("sentinel"), b"keep").unwrap();
-
         fsutil::fail_once(point, libc::EIO);
-        let report = fixture.import(true).unwrap();
-        assert_eq!(report.cleanup_warnings.len(), 1);
-        let warning = &report.cleanup_warnings[0];
-        assert_eq!(
-            warning.staging_path.parent(),
-            Some(fixture.store.layout.staging().as_path())
+        let error = fixture.import(true).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::Recovery {
+                    change: Some(NamespaceChange::RefPublished),
+                    ..
+                }
+            ),
+            "{error}"
         );
-        assert!(warning.message.contains("image is published"));
-        assert!(warning.message.contains(point));
-        if point == "staging.cleanup-remove" {
-            assert!(warning.staging_path.is_dir());
-            // Reused CAS blobs are separate from the duplicate staged copies.
-            assert_ne!(
-                fs::metadata(warning.staging_path.join("blobs/sha256").join(ROOT))
-                    .unwrap()
-                    .ino(),
-                before.ino()
-            );
-        } else {
-            assert!(!warning.staging_path.exists());
-            assert!(warning.message.contains("may not survive a crash"));
-        }
+        assert!(error.to_string().contains(point));
         assert_ne!(
             fs::read_link(fixture.store.layout.ref_entry(&fixture.reference)).unwrap(),
-            previous
+            old
         );
-        assert_eq!(fixture.read().stored_root, report.stored_root);
-        fixture
-            .store
-            .export(
-                &parse_selector(fixture.reference.as_str()),
-                Some(&parse_selector("localhost/output:tag")),
-                &fixture.context,
-            )
-            .unwrap();
-        assert_eq!(fs::metadata(&blob_path).unwrap().ino(), before.ino());
-        assert_eq!(
-            fs::metadata(&blob_path).unwrap().modified().unwrap(),
-            before.modified().unwrap()
-        );
-        assert_eq!(fs::read(&blob_path).unwrap(), MANIFEST);
-        let serialized = serde_json::to_value(&report).unwrap();
-        assert_eq!(
-            serialized["cleanup_warnings"][0]["staging_path"],
-            json!(warning.staging_path)
-        );
-
-        assert!(fixture.import(true).unwrap().cleanup_warnings.is_empty());
+        fixture.read();
+        assert!(!crate::recovery::pending(&fixture.store.layout).unwrap());
+        assert_eq!(snapshot(&blob), before);
         assert_eq!(fs::read(untouched.join("sentinel")).unwrap(), b"keep");
         assert_eq!(
-            warning.staging_path.exists(),
-            point == "staging.cleanup-remove"
+            fs::read_dir(fixture.store.layout.staging())
+                .unwrap()
+                .count(),
+            1
         );
         assert_eq!(
             fs::read_dir(fixture.store.layout.raw_images())
                 .unwrap()
                 .count(),
-            3
+            1
         );
     }
 }
 
 #[test]
-fn cleanup_does_not_follow_symlinks_or_accept_paths_outside_staging() {
+fn unknown_staging_contents_block_cleanup_without_following_symlinks() {
     use std::os::unix::fs::symlink;
     let mut fixture = Fixture::new();
     let outside = fixture.temporary.path().join("protected");
@@ -761,18 +788,18 @@ fn cleanup_does_not_follow_symlinks_or_accept_paths_outside_staging() {
     fs::write(outside.join("sentinel"), b"keep").unwrap();
     fixture.config["symlink"] = json!(outside);
     fixture.save();
-    assert!(fixture.import(false).unwrap().cleanup_warnings.is_empty());
+    assert!(fixture.import(false).is_err());
     assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"keep");
-    let guard = fixture.store.prepare(Operation::Import).unwrap();
-    let destination = fixture.reference.clone();
+    assert!(fixture.store.list().is_err());
+    assert!(crate::recovery::pending(&fixture.store.layout).unwrap());
     let replaced = fixture.store.layout.staging().join("operation-replaced");
     symlink(&outside, &replaced).unwrap();
-    assert!(staging::cleanup_published(&guard, &replaced).is_none());
-    assert!(fs::symlink_metadata(&replaced).is_err());
-    assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"keep");
-    let raw_image = refs::read(&guard, &destination).unwrap().raw_image;
-    assert!(staging::cleanup_published(&guard, &raw_image).is_some());
-    assert!(raw_image.join("metadata.json").is_file());
+    assert!(
+        fs::symlink_metadata(&replaced)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 }
 
 #[test]
@@ -1016,8 +1043,47 @@ fn transfer_worker() {
         skopeo: root.join("skopeo"),
         platform: None,
     };
+    if let Ok(point) = std::env::var("HPC_IMPORT_PAUSE") {
+        let point = [
+            "mutation.intent-durable",
+            "ref.destination-sync",
+            "recovery.cleaning-durable",
+            "recovery.removed",
+            "recovery.complete-durable",
+        ]
+        .into_iter()
+        .find(|candidate| *candidate == point)
+        .expect("known import checkpoint");
+        fsutil::pause_once(point);
+    }
     let operation = std::env::var("HPC_TRANSFER_TEST_OPERATION").unwrap();
-    if operation == "actual-skopeo" {
+    if operation == "interrupted-recorded-skopeo" {
+        let guard = store.prepare(Operation::Import).unwrap();
+        let mutation = Mutation::begin(&guard, &reference, Kind::Import).unwrap();
+        let stage = mutation.stage().unwrap();
+        let executable = PathBuf::from(std::env::var_os("HPC_TRANSFER_TEST_SKOPEO").unwrap());
+        let source = PathBuf::from(std::env::var_os("HPC_TRANSFER_TEST_OCI_SOURCE").unwrap());
+        let result = subprocess::run(
+            Command::new(&executable)
+                .args([
+                    "copy",
+                    "--quiet",
+                    "--preserve-digests",
+                    "--dest-shared-blob-dir",
+                ])
+                .arg(stage.shared_blob_path())
+                .arg(oci_argument(&source).unwrap())
+                .arg(oci_argument(&stage.layout_path()).unwrap()),
+            "interrupted real Skopeo acquisition",
+            &executable,
+            Some(guard.transfer_fd()),
+        );
+        use std::os::unix::process::ExitStatusExt;
+        assert!(
+            matches!(result, Err(Error::ToolFailed { status, .. }) if status.signal() == Some(libc::SIGKILL))
+        );
+        // No Drop cleanup: the following ordinary query must recover the stage.
+    } else if operation == "actual-skopeo" {
         let guard = store.prepare(Operation::Import).unwrap();
         let destination = reference.clone();
         let stage = AcquisitionStage::new(&guard, &destination).unwrap();
@@ -1228,6 +1294,17 @@ fn orphaned_transfer_retains_store_lock_and_inherits_environment() {
                 fixture.store.prune(&crate::PruneOptions::default()),
                 Err(Error::LockTimeout { .. })
             ));
+            if operation == "import" {
+                let before = crate::test_snapshot::snapshot(fixture.store.config().root());
+                assert!(matches!(
+                    fixture.store.list(),
+                    Err(Error::LockTimeout { .. })
+                ));
+                assert_eq!(
+                    crate::test_snapshot::snapshot(fixture.store.config().root()),
+                    before
+                );
+            }
         }
         assert!(!fixture.store.config().root().join("locks/refs").exists());
         assert!(
@@ -1259,11 +1336,8 @@ fn orphaned_transfer_retains_store_lock_and_inherits_environment() {
                 .count(),
             1
         );
-        let report = fixture
-            .store
-            .prune(&crate::PruneOptions::default())
-            .unwrap();
-        assert!(!report.has_errors(), "{report:?}");
+        assert!(!fixture.store.list().unwrap().has_errors());
+        assert_import_idle(&fixture.store);
         assert!(!fixture.store.config().root().join("locks/refs").exists());
         assert_eq!(
             fs::metadata(fixture.store.layout.store_lock())
@@ -1469,33 +1543,15 @@ fn export_forwards_combined_destination_and_propagates_tool_failure() {
 }
 
 #[test]
-fn prune_reclaims_abandoned_import_and_cleanup_warning_remnants_without_tools() {
-    for point in ["ref.rename", "staging.cleanup-remove"] {
+fn ordinary_query_recovers_import_without_prune_or_tools() {
+    for point in ["ref.rename", "recovery.remove"] {
         let fixture = Fixture::new();
         fixture.import(false).unwrap();
         fsutil::fail_once(point, libc::EIO);
-        let result = fixture.import(true);
-        if point == "ref.rename" {
-            assert!(result.is_err());
-        } else {
-            assert_eq!(result.unwrap().cleanup_warnings.len(), 1);
-        }
+        assert!(fixture.import(true).is_err());
         let calls = fixture.log().len();
-        let report = fixture
-            .store
-            .prune(&crate::PruneOptions {
-                dry_run: false,
-                grace_period: Duration::ZERO,
-            })
-            .unwrap();
-        assert!(!report.has_errors(), "{report:?}");
-        assert!(report.summaries[&crate::PruneKind::Staging].removed_count > 0);
-        assert_eq!(
-            fs::read_dir(fixture.store.layout.staging())
-                .unwrap()
-                .count(),
-            0
-        );
+        assert!(!fixture.store.list().unwrap().has_errors());
+        assert_import_idle(&fixture.store);
         assert_eq!(
             fs::read_dir(fixture.store.layout.raw_images())
                 .unwrap()
@@ -1503,12 +1559,11 @@ fn prune_reclaims_abandoned_import_and_cleanup_warning_remnants_without_tools() 
             1
         );
         assert_eq!(fixture.log().len(), calls);
-        assert!(
-            !fixture
-                .store
-                .check(&crate::CheckScope::All)
-                .unwrap()
-                .has_errors()
-        );
     }
 }
+
+#[path = "import_lifecycle_tests.rs"]
+mod import_lifecycle_tests;
+
+#[path = "skopeo_interruption_tests.rs"]
+mod skopeo_interruption_tests;

@@ -2,7 +2,7 @@
 //! mutate the store contents. If operations are interrupted and these snapshots
 //! are left behind, they are used by recovery operations to bring the store
 //! to a stable, usable state again.
-//! Public mutators adopt these in Stage 4.
+//! Import uses these primitives; pull and remove adopt them in later Stage 4 substages.
 //! No Drop implementation performs filesystem work: a surviving producer may
 //! still own the locked open-file description after its wrapper disappears.
 use crate::{
@@ -413,9 +413,17 @@ pub(crate) fn staging_member(member: &str) -> Option<EntryKind> {
         "layout/oci-layout" | "layout/index.json" => Some(EntryKind::File),
         "ref-pointer" => Some(EntryKind::Pointer),
         _ => {
-            let (parent, digest) = member.rsplit_once('/')?;
+            let (parent, name) = member.rsplit_once('/')?;
+            if parent == "layout" {
+                // Skopeo can leave an incomplete blob here when interrupted.
+                // Only its exact temporary-file spelling is operation-owned;
+                // recovery still requires a regular file under real parents.
+                let suffix = name.strip_prefix("oci-put-blob")?;
+                return (!suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()))
+                    .then_some(EntryKind::File);
+            }
             if matches!(parent, "blobs/sha256" | "layout/blobs/sha256")
-                && Sha256Digest::new(format!("sha256:{digest}")).is_ok()
+                && Sha256Digest::new(format!("sha256:{name}")).is_ok()
             {
                 Some(EntryKind::File)
             } else {
@@ -453,6 +461,11 @@ pub(crate) struct Mutation<'a> {
     record: Record,
 }
 impl<'a> Mutation<'a> {
+    /// Attach pending-work context without losing the acquisition failure.
+    pub fn context(&self, source: Error) -> Error {
+        self.record.context(self.guard.layout(), source)
+    }
+
     pub fn begin(guard: &'a StoreGuard<'a>, reference: &LocalRef, kind: Kind) -> Result<Self> {
         guard.require_exclusive()?;
         let layout = guard.layout();

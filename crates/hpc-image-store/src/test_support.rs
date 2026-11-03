@@ -28,6 +28,22 @@ impl SyntheticImage {
     pub fn digests(&self) -> BTreeSet<Sha256Digest> {
         self.objects.keys().cloned().collect()
     }
+
+    /// Change a manifest while keeping the fixture's root hash and size exact.
+    pub fn with_manifest_change(&self, change: impl FnOnce(&mut serde_json::Value)) -> Self {
+        assert_eq!(self.root.media_type, MANIFEST);
+        let mut manifest = serde_json::from_slice(&self.objects[&self.root.digest]).unwrap();
+        change(&mut manifest);
+        let mut image = self.clone();
+        image.objects.remove(&self.root.digest);
+        image.root = object(
+            &mut image.objects,
+            MANIFEST,
+            serde_json::to_vec(&manifest).unwrap(),
+        );
+        image.root.extra = self.root.extra.clone();
+        image
+    }
 }
 
 fn object(

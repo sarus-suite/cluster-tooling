@@ -56,6 +56,14 @@ is managed by containers-storage.
 Import/export use Skopeo defaults when it is omitted. A store path containing
 `:` cannot be used for transfers because Skopeo's OCI transport cannot address it.
 
+Successful import, including `--replace`, durably removes its staging and unused
+superseded content before reporting success. Replacement preserves shared blobs
+and does not require prune. It requires the old ref to have a canonical confined
+pointer and readable authoritative dependency declarations. A malformed pointer,
+regular-file ref, missing wrapper, or unreadable/unsupported declarations cause
+an error before publication, preserving the old entry and content. Damaged cached
+metadata alone does not prevent reclamation. `--replace` is not a repair command.
+
 ## Names and digests
 
 Import, pull, export, and single-image check use `name[:tag][@digest]`. Supply a
@@ -219,8 +227,12 @@ Status 0 means success, 1 means an operation or collected check/report failed,
 and 2 means invalid CLI usage. JSON results go to stdout, with diagnostics,
 skips, and warnings on stderr. Tools' output is captured so it cannot corrupt
 JSON. A store-preparation or selector-resolution failure may occur before any
-JSON report exists. Successful acquisition can return cleanup warnings and
-status 0 because the image was already durably published.
+JSON report exists. Successful import finishes durable cleanup and reclamation.
+Import cleanup failures return status 1
+and contextual stderr diagnostics, with no success text or JSON report. A ref
+can already be visible when an error occurs; subsequent operations first finish
+recorded recovery. Successful pull can still return cleanup warnings and status
+0 because the image was already durably published.
 
 | Symptom | Action |
 | --- | --- |
@@ -229,7 +241,7 @@ status 0 because the image was already durably published.
 | Export cannot preserve content | Check Skopeo capability and representation support; no conversion fallback is available. |
 | Digest cannot be resolved | Use a stored root under the same literal repository. Resolve damaged candidates before treating an incomplete search as absence. |
 | Lock wait or timeout | Check active transfers, including surviving copy children. Do not delete lock files to break contention. |
-| Prune reports a blocked scan | After successful preparation, inspect committed refs and diagnostics; explicitly remove or replace a damaged ref only when that is the intended recovery action. |
+| Prune reports a blocked scan | After successful preparation, inspect committed refs and diagnostics; investigate damage before attempting maintenance. Import replacement requires readable old identity and dependency declarations. |
 | Recorded recovery is blocked | Preserve the error and pending records; follow [recovery failures and manual resolution](#recovery-failures-and-manual-resolution). |
 | Durability error after mutation | Inspect current state before retrying: publication or removal may already be visible. No rollback hides that uncertainty. |
 
@@ -239,8 +251,8 @@ generally repair damaged shared immutable objects.
 ## Recovery failures and manual resolution
 
 Operation preparation automatically finishes safe recorded recovery or returns
-a contextual error; there is no recovery command. Public import, pull, and remove
-do not yet record their work, so unrecorded remnants still require explicit
+a contextual error; there is no recovery command. Import records its work;
+pull and remove do not yet do so, and unrecorded remnants still require explicit
 maintenance. Preserve pending records and the permanent lock when recovery is
 blocked. See the
 [architecture](architecture.md#recorded-mutations-and-automatic-recovery) for the

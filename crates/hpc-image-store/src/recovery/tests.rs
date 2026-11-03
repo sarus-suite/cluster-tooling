@@ -51,6 +51,37 @@ fn published_fixture(point: Option<&'static str>) -> MutationFixture {
 }
 
 #[test]
+fn already_published_unsupported_declarations_block_actions_without_panicking_or_deleting() {
+    let fixture = MutationFixture::new();
+    let unsupported = fixture.images.replacement.with_manifest_change(|manifest| {
+        manifest["subject"] = serde_json::to_value(&fixture.images.original.root).unwrap();
+    });
+    // Recreate an operation published by the old acquisition path. The
+    // internal fixture publication deliberately bypasses acquired_content.
+    let guard = fixture.store.prepare(Operation::Import).unwrap();
+    let mut mutation = Mutation::begin(&guard, &fixture.target, Kind::Import).unwrap();
+    let stage = complete_image(mutation.stage().unwrap(), &fixture.target, &unsupported);
+    mutation.publish(stage).unwrap();
+    drop(mutation);
+    drop(guard);
+    let before = snapshot(fixture.store.config().root());
+    for _ in 0..2 {
+        let list_error = fixture.store.list().unwrap_err();
+        let remove_error = fixture.store.remove(&fixture.target).unwrap_err();
+        for error in [list_error, remove_error] {
+            assert!(
+                matches!(&error, Error::Recovery {
+                phase: "intent", change: Some(crate::NamespaceChange::RefPublished), source, ..
+            } if matches!(source.as_ref(), Error::InvalidObject { path, reason }
+                if path == &fixture.store.layout.blob(&unsupported.root.digest) && reason.contains("subject"))),
+                "{error}"
+            );
+        }
+        assert_eq!(snapshot(fixture.store.config().root()), before);
+    }
+}
+
+#[test]
 fn ownership_is_recorded_before_staging_and_shared_objects_remain_immutable() {
     let fixture = MutationFixture::new();
     let shared = fixture.images.shared.first().unwrap();
@@ -85,6 +116,172 @@ fn ownership_is_recorded_before_staging_and_shared_objects_remain_immutable() {
     assert!(!staging.exists());
     assert_eq!(snapshot(&fixture.store.layout.blob(shared)), before);
     assert_clean(&fixture.store);
+}
+
+#[test]
+fn recorded_skopeo_temporaries_recover_and_resume_after_deletion_or_sync_failure() {
+    for point in [None, Some("plan"), Some("removed"), Some("sync")] {
+        let fixture = MutationFixture::new();
+        let original = snapshot(&fixture.original_raw);
+        let keeper = snapshot(&fixture.keeper_raw);
+        let blobs = snapshot(&fixture.store.layout.blobs());
+        let lock = snapshot(&fixture.store.layout.store_lock());
+        let guard = fixture.store.prepare(Operation::Import).unwrap();
+        let mutation = Mutation::begin(&guard, &fixture.target, Kind::Import).unwrap();
+        let stage = mutation.stage().unwrap();
+        let temporary = stage.layout_path().join("oci-put-blob123456789");
+        fs::write(stage.layout_path().join("oci-put-blob0"), b"").unwrap();
+        fs::write(&temporary, b"partial producer bytes").unwrap();
+        let directory = stage.layout_path().parent().unwrap().to_owned();
+        // Similar files outside this operation's recorded tree are not adopted.
+        let unrecorded = fixture.store.layout.staging().join("operation-unrecorded");
+        fs::create_dir_all(unrecorded.join("layout")).unwrap();
+        fs::write(unrecorded.join("layout/oci-put-blob123"), b"preserve").unwrap();
+        let unrecorded_before = snapshot(&unrecorded);
+        drop(stage);
+        drop(mutation);
+        drop(guard);
+
+        if let Some(point) = point {
+            fsutil::fail_once("recovery.cleaning-durable", libc::EIO);
+            assert!(fixture.store.list().is_err());
+            // Reloading also validates the temporary-file entries in a saved
+            // cleanup plan, not just the original staging tree.
+            let record = load(&fixture.store.layout).unwrap().unwrap();
+            assert_eq!(record.phase, Phase::Cleaning);
+            let position = record.cleanup.unwrap().entries.iter().position(|entry| {
+                matches!(&entry.target, Target::Staging { member } if member == "layout/oci-put-blob123456789")
+            }).unwrap();
+            if point != "plan" {
+                let checkpoint = if point == "removed" {
+                    "recovery.removed"
+                } else {
+                    "recovery.cleanup-sync"
+                };
+                fsutil::fail_after(checkpoint, position, libc::EIO);
+                let result = fixture.store.list();
+                fsutil::clear_failure();
+                assert!(result.is_err());
+                assert!(!temporary.exists());
+                assert!(pending(&fixture.store.layout).unwrap());
+            }
+        }
+        assert!(!fixture.store.list().unwrap().has_errors());
+        assert!(!fixture.store.list().unwrap().has_errors());
+        assert!(!directory.exists());
+        assert_clean(&fixture.store);
+        assert_eq!(snapshot(&fixture.original_raw), original);
+        assert_eq!(snapshot(&fixture.keeper_raw), keeper);
+        assert_eq!(snapshot(&fixture.store.layout.blobs()), blobs);
+        assert_eq!(snapshot(&fixture.store.layout.store_lock()), lock);
+        assert_eq!(snapshot(&unrecorded), unrecorded_before);
+    }
+}
+
+#[test]
+fn unknown_or_redirected_producer_temporaries_block_recorded_cleanup() {
+    for case in [
+        "empty-suffix",
+        "non-digit",
+        "unicode-digit",
+        "signed",
+        "extra-suffix",
+        "wrong-parent",
+        "nested",
+        "raw",
+        "symlink",
+        "directory",
+        "fifo",
+        "unrelated-sibling",
+        "redirected-layout",
+    ] {
+        let fixture = published_fixture(Some("ref.rename"));
+        let record = load(&fixture.store.layout).unwrap().unwrap();
+        let stage = fixture.store.layout.staging().join(record.staging.unwrap());
+        let layout = stage.join("layout");
+        let recognized = layout.join("oci-put-blob100");
+        fs::write(&recognized, b"known producer file").unwrap();
+        let outside = fixture.directory.path().join("protected");
+        fs::write(&outside, b"preserve outside contents").unwrap();
+        let path = match case {
+            "empty-suffix" => layout.join("oci-put-blob"),
+            "non-digit" => layout.join("oci-put-blobabc"),
+            "unicode-digit" => layout.join("oci-put-blob١"),
+            "signed" => layout.join("oci-put-blob+123"),
+            "extra-suffix" => layout.join("oci-put-blob123.tmp"),
+            "wrong-parent" => stage.join("oci-put-blob123"),
+            "nested" => layout.join("blobs/oci-put-blob123"),
+            "raw" => fixture
+                .store
+                .layout
+                .raw_image(record.new_raw.as_ref().unwrap())
+                .join("oci-put-blob123"),
+            "unrelated-sibling" => layout.join("unrelated"),
+            "redirected-layout" => layout.clone(),
+            _ => layout.join("oci-put-blob123"),
+        };
+        match case {
+            "symlink" => symlink(&outside, &path).unwrap(),
+            "directory" => {
+                fs::create_dir(&path).unwrap();
+                fs::write(path.join("sentinel"), b"preserve directory").unwrap();
+            }
+            "fifo" => {
+                use std::os::unix::ffi::OsStrExt;
+                let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+                // SAFETY: name is NUL-terminated and the mode is valid.
+                assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            }
+            "redirected-layout" => {
+                let saved = fixture.directory.path().join("saved-layout");
+                fs::rename(&layout, &saved).unwrap();
+                symlink(saved, &layout).unwrap();
+            }
+            _ => fs::write(&path, b"unknown contents").unwrap(),
+        }
+        let bad = fs::symlink_metadata(&path).unwrap();
+        // The snapshot helper intentionally cannot read FIFOs. Compare its
+        // identity/type separately, and snapshot every protected regular tree.
+        let entry_before = (case != "fifo").then(|| snapshot(&path));
+        let known_before = snapshot(&recognized);
+        let raw_before = snapshot(&fixture.store.layout.raw_images());
+        let blobs_before = snapshot(&fixture.store.layout.blobs());
+        let record_before = snapshot(&fixture.store.layout.pending_mutation());
+        assert!(fixture.store.list().is_err(), "{case}");
+        assert!(fixture.store.list().is_err(), "{case}");
+        assert_eq!(
+            fs::symlink_metadata(&path).unwrap().ino(),
+            bad.ino(),
+            "{case}"
+        );
+        assert_eq!(
+            fs::symlink_metadata(&path).unwrap().mode(),
+            bad.mode(),
+            "{case}"
+        );
+        assert_eq!(
+            (case != "fifo").then(|| snapshot(&path)),
+            entry_before,
+            "{case}"
+        );
+        assert_eq!(snapshot(&recognized), known_before, "{case}");
+        assert_eq!(
+            snapshot(&fixture.store.layout.raw_images()),
+            raw_before,
+            "{case}"
+        );
+        assert_eq!(
+            snapshot(&fixture.store.layout.blobs()),
+            blobs_before,
+            "{case}"
+        );
+        assert_eq!(
+            snapshot(&fixture.store.layout.pending_mutation()),
+            record_before,
+            "{case}"
+        );
+        assert_eq!(fs::read(&outside).unwrap(), b"preserve outside contents");
+    }
 }
 
 #[test]

@@ -103,9 +103,10 @@ addressed by Skopeo's OCI transport for transfers.
 Budget temporary space for an entire acquisition even if the final content is
 already shared. Newly linked staged files share storage with CAS files, while
 duplicate transfers of existing CAS objects consume separate temporary space
-until cleanup. Wrapper records, abandoned staging, and retired raw images also
-consume space. Cached per-image sizes cannot be summed into total usage or
-predicted physical reclaim totals.
+until cleanup. Successful import and replacement durably finish staging cleanup
+and reclaim unused superseded content. Pull and removal still leave retired
+content for prune, and unrecorded remnants also consume space. Cached per-image
+sizes cannot be summed into total usage or predicted physical reclaim totals.
 
 Use `list` and `check` to inspect state, then explicitly remove intended refs and
 review `prune --dry-run`. Default content grace is 24 hours of object age, while
@@ -127,15 +128,20 @@ preserved with contextual errors. See the
 [architecture](architecture.md#recorded-mutations-and-automatic-recovery) for
 snapshot presence and lifecycle details.
 
-Public mutators begin creating records in Stage 4. Their current unrecorded
-remnants are not automatically recovered. This foundation does not add general
+Import creates records and finishes its lifecycle before success. Pull and
+remove remain unrecorded until their Stage 4 substages; unrecorded remnants are
+not automatically recovered. Import replacement rejects damaged old identities
+or unreadable dependency declarations before publication, preserving evidence.
+This does not add general
 repair, migration, or a new operational recovery command. Incomplete format-2
 development stores may be recreated between stages without a compatibility
 promise. Local interruption tests do not qualify power-loss or cross-node behavior.
 
 After a durability error, a namespace change may already be visible. Inspect
 state before retrying; the library does not roll back published refs. Successful
-acquisition may report staging-cleanup warnings, leaving committed content usable.
+pull may report staging-cleanup warnings, leaving committed content usable.
+Import cleanup failures are errors with pending-work context; fix environmental
+failures and retry an ordinary operation to finish recorded recovery.
 Prune preserves unknown data and reports partial progress when removal or syncing
 fails. Keep that evidence rather than treating every failure as an uncommitted
 operation.

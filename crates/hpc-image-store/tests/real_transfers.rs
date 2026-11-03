@@ -93,7 +93,7 @@ fn poc_lifecycle(directory: &Path, source: &str, output: &str, context: &Transfe
             &ImportOptions::default(),
         )
         .unwrap();
-    assert!(kept.cleanup_warnings.is_empty());
+    assert!(!store.config().root().join("pending-mutation.json").exists());
     let store_lock = store.config().root().join("locks/store.lock");
     let lock_before = fs::metadata(&store_lock).unwrap();
     assert!(matches!(
@@ -108,7 +108,7 @@ fn poc_lifecycle(directory: &Path, source: &str, output: &str, context: &Transfe
             &ImportOptions::default(),
         )
         .unwrap();
-    assert!(acquired.cleanup_warnings.is_empty());
+    assert!(!store.config().root().join("pending-mutation.json").exists());
     assert_eq!(acquired.stored_root, kept.stored_root);
     assert!(matches!(
         store.availability(&target_selector).unwrap(),
@@ -322,7 +322,7 @@ fn real_rootless_round_trip() {
             &ImportOptions::default(),
         )
         .unwrap();
-    assert!(report.cleanup_warnings.is_empty());
+    assert!(!store.config().root().join("pending-mutation.json").exists());
     let checked = store
         .check(&hpc_image_store::CheckScope::Image(parse_selector(
             format!("test/one@{}", report.stored_root),
@@ -470,7 +470,7 @@ fn real_rootless_round_trip() {
             .args(["--json", "import", &source, "test/cli:tag"])))
         .unwrap();
     assert_eq!(imported["stored_root"], report.stored_root.as_str());
-    assert_eq!(imported["cleanup_warnings"], json!([]));
+    assert!(imported.get("cleanup_warnings").is_none());
     let exported: Value =
         serde_json::from_slice(&run(Command::new(env!("CARGO_BIN_EXE_hpc-image-store"))
             .arg("--store")
@@ -496,6 +496,16 @@ fn real_rootless_round_trip() {
         }),
         ..context.clone()
     };
+    let old_pointer = fs::read_link(
+        directory
+            .join("store/refs")
+            .join(reference.encoded_path())
+            .join("ref"),
+    )
+    .unwrap();
+    let retired = directory
+        .join("store/raw_images")
+        .join(old_pointer.file_name().unwrap());
     store
         .import(
             &parse_selector(&source),
@@ -507,6 +517,13 @@ fn real_rootless_round_trip() {
             },
         )
         .unwrap();
+    assert!(!retired.exists());
+    assert_eq!(fs::metadata(&shared_layer).unwrap().ino(), inode);
+    assert_eq!(
+        fs::metadata(&shared_layer).unwrap().modified().unwrap(),
+        age
+    );
+    assert!(!directory.join("store/pending-mutation.json").exists());
     // Retag the mutable source after inspection but before Skopeo starts. The
     // library must copy the old ID, while a name-based copy would select 'two'.
     let wrapper = directory.join("inspect-and-retag");
@@ -527,7 +544,7 @@ fn real_rootless_round_trip() {
         )
         .unwrap();
     assert_eq!(pinned.image_id, report.image_id);
-    assert!(pinned.cleanup_warnings.is_empty());
+    assert!(!store.config().root().join("pending-mutation.json").exists());
     assert_eq!(
         fs::read_dir(directory.join("store/tmp")).unwrap().count(),
         0
@@ -564,9 +581,8 @@ fn real_rootless_round_trip() {
                 notes: None
             }
         ),
-        Err(Error::ToolFailed {
-            operation: "import image",
-            ..
+        Err(Error::Recovery { source, .. }) if matches!(*source, Error::ToolFailed {
+            operation: "import image", ..
         })
     ));
     assert_eq!(
