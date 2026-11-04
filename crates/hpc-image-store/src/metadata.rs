@@ -83,6 +83,11 @@ pub struct ContentMetadata {
     /// OCI ImageID: the digest of the completed image's configuration JSON.
     pub config_digest: Sha256Digest,
     pub platform: Platform,
+    /// Cached creation time selected during import or pull: the first valid,
+    /// non-epoch RFC 3339 value from config `created`, the manifest's
+    /// `org.opencontainers.image.created` annotation, or the config's matching
+    /// label. If none qualifies, retains the original config value. Listing
+    /// does not refresh this cache; reacquire with replacement to refresh it.
     pub created: Option<String>,
     pub size_bytes: u64,
 }

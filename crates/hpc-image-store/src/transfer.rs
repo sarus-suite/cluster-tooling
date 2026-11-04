@@ -11,6 +11,7 @@ use crate::{
     subprocess,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     ffi::OsString,
     os::unix::ffi::OsStrExt,
@@ -18,6 +19,7 @@ use std::{
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const OCI_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 const OCI_CONFIG: &str = "application/vnd.oci.image.config.v1+json";
@@ -340,6 +342,8 @@ struct Manifest {
     #[serde(rename = "schemaVersion")]
     schema_version: u64,
     config: Descriptor,
+    #[serde(default)]
+    annotations: Value,
 }
 #[derive(Deserialize)]
 struct Config {
@@ -347,7 +351,29 @@ struct Config {
     architecture: String,
     variant: Option<String>,
     created: Option<String>,
+    #[serde(default, rename = "config")]
+    runtime: Value,
 }
+
+fn image_created(config: &Config, manifest: &Manifest) -> Option<String> {
+    const CREATED: &str = "org.opencontainers.image.created";
+    let annotation = manifest.annotations.get(CREATED).and_then(Value::as_str);
+    let label = config
+        .runtime
+        .get("Labels")
+        .and_then(|labels| labels.get(CREATED))
+        .and_then(Value::as_str);
+    [config.created.as_deref(), annotation, label]
+        .into_iter()
+        .flatten()
+        .find(|value| {
+            OffsetDateTime::parse(value, &Rfc3339)
+                .is_ok_and(|date| date.unix_timestamp_nanos() != 0)
+        })
+        .map(str::to_owned)
+        .or_else(|| config.created.clone())
+}
+
 fn parse_object<T: serde::de::DeserializeOwned>(path: &Path, size: u64) -> Result<T> {
     fsutil::sized_object(path, size)?;
     serde_json::from_slice(&fsutil::read_regular(path)?).map_err(|source| Error::ContentJson {
@@ -392,6 +418,7 @@ pub(crate) fn acquired_content(
             path: stage.layout_path(),
             reason: "stored-content size overflows u64".into(),
         })?;
+    let created = image_created(&config, &manifest);
     let content = ContentMetadata {
         config_digest: manifest.config.digest,
         platform: Platform {
@@ -399,7 +426,7 @@ pub(crate) fn acquired_content(
             architecture: config.architecture,
             variant: config.variant,
         },
-        created: config.created,
+        created,
         size_bytes,
     };
     Ok((root, content, objects))

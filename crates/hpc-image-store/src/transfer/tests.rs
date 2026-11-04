@@ -186,6 +186,280 @@ impl Fixture {
 }
 
 #[test]
+fn creation_time_uses_valid_non_epoch_candidates_in_order() {
+    const EPOCH: &str = "1970-01-01T00:00:00Z";
+    const CONFIG_TIME: &str = "2026-10-21T20:47:08.545668189Z";
+    const BUILD_TIME: &str = "2026-10-25T10:26:07.538865+00:00";
+    const LABEL_TIME: &str = "2026-10-26T12:00:00Z";
+    for (created, annotation, runtime, expected) in [
+        (
+            Some(CONFIG_TIME),
+            Some(BUILD_TIME),
+            json!({"Labels":{"org.opencontainers.image.created":LABEL_TIME}}),
+            Some(CONFIG_TIME),
+        ),
+        (
+            Some(EPOCH),
+            Some(BUILD_TIME),
+            json!({"Labels":{"org.opencontainers.image.created":LABEL_TIME}}),
+            Some(BUILD_TIME),
+        ),
+        (
+            Some("1970-01-01T01:00:00.000+01:00"),
+            Some(BUILD_TIME),
+            Value::Null,
+            Some(BUILD_TIME),
+        ),
+        (
+            Some("1970-01-01T00:00:00.000000001Z"),
+            Some(BUILD_TIME),
+            Value::Null,
+            Some("1970-01-01T00:00:00.000000001Z"),
+        ),
+        (
+            Some("1969-12-31T23:59:59Z"),
+            Some(BUILD_TIME),
+            Value::Null,
+            Some("1969-12-31T23:59:59Z"),
+        ),
+        (None, Some(BUILD_TIME), Value::Null, Some(BUILD_TIME)),
+        (
+            Some("invalid"),
+            Some(BUILD_TIME),
+            Value::Null,
+            Some(BUILD_TIME),
+        ),
+        (
+            None,
+            Some("invalid"),
+            json!({"Labels":{"org.opencontainers.image.created":LABEL_TIME}}),
+            Some(LABEL_TIME),
+        ),
+        (
+            Some(EPOCH),
+            Some(EPOCH),
+            json!({"Labels":{"org.opencontainers.image.created":LABEL_TIME}}),
+            Some(LABEL_TIME),
+        ),
+        (
+            Some(EPOCH),
+            None,
+            json!({"Labels":{"org.opencontainers.image.created":LABEL_TIME}}),
+            Some(LABEL_TIME),
+        ),
+        (Some(EPOCH), None, Value::Null, Some(EPOCH)),
+        (
+            Some("invalid"),
+            Some("invalid"),
+            json!({"Labels":{"org.opencontainers.image.created":EPOCH}}),
+            Some("invalid"),
+        ),
+        (None, None, Value::Null, None),
+        (
+            None,
+            Some("invalid"),
+            json!({"Labels":{"org.opencontainers.image.created":"invalid"}}),
+            None,
+        ),
+        (
+            None,
+            None,
+            json!({"Labels":{"org.opencontainers.image.created":EPOCH}}),
+            None,
+        ),
+    ] {
+        let config: Config = serde_json::from_value(json!({
+            "os":"linux", "architecture":"amd64", "created":created, "config":runtime,
+            "history":[{"created":LABEL_TIME}]
+        }))
+        .unwrap();
+        let mut manifest: Manifest = serde_json::from_slice(MANIFEST).unwrap();
+        manifest.annotations = annotation.map_or(
+            Value::Null,
+            |value| json!({"org.opencontainers.image.created":value}),
+        );
+        assert_eq!(
+            image_created(&config, &manifest).as_deref(),
+            expected,
+            "created={created:?}, annotation={annotation:?}, runtime={}",
+            config.runtime
+        );
+    }
+}
+
+fn creation_image(
+    created: Value,
+    annotations: Value,
+    runtime: Value,
+) -> crate::test_support::SyntheticImage {
+    use sha2::{Digest, Sha256};
+    let config = serde_json::to_vec(&json!({
+        "os":"linux", "architecture":"amd64", "created":created,
+        "config":runtime, "rootfs":{"type":"layers","diff_ids":[]}
+    }))
+    .unwrap();
+    let config_digest = Sha256Digest::new(format!("sha256:{:x}", Sha256::digest(&config))).unwrap();
+    let manifest = serde_json::to_vec(&json!({
+        "schemaVersion":2, "mediaType":OCI_MANIFEST,
+        "config":{"mediaType":OCI_CONFIG, "digest":config_digest,"size":config.len()},
+        "layers":[], "annotations":annotations
+    }))
+    .unwrap();
+    let root = Descriptor {
+        digest: Sha256Digest::new(format!("sha256:{:x}", Sha256::digest(&manifest))).unwrap(),
+        size: manifest.len() as u64,
+        media_type: OCI_MANIFEST.into(),
+        extra: Default::default(),
+    };
+    crate::test_support::SyntheticImage {
+        objects: [(config_digest, config), (root.digest.clone(), manifest)].into(),
+        root,
+    }
+}
+
+#[test]
+fn acquisitions_cache_creation_fallbacks_without_changing_content() {
+    for pulled in [false, true] {
+        for (created, annotations, runtime, expected) in [
+            (
+                json!("1970-01-01T00:00:00Z"),
+                json!({"org.opencontainers.image.created":"2026-10-25T10:26:07.538865+00:00"}),
+                Value::Null,
+                Some("2026-10-25T10:26:07.538865+00:00"),
+            ),
+            (
+                Value::Null,
+                json!({}),
+                json!({"Labels":{"org.opencontainers.image.created":"2026-10-25T10:26:07Z"}}),
+                Some("2026-10-25T10:26:07Z"),
+            ),
+            (
+                json!("2026-10-21T20:47:08.545668189Z"),
+                json!({"org.opencontainers.image.created":"2026-10-25T10:26:07Z"}),
+                json!({"Labels":[]}),
+                Some("2026-10-21T20:47:08.545668189Z"),
+            ),
+        ] {
+            let mut fixture = Fixture::new();
+            let image = creation_image(created, annotations, runtime);
+            fixture.select_image(&image);
+            fixture.acquire(pulled);
+            let metadata = fixture.read();
+            assert_eq!(metadata.content.created.as_deref(), expected);
+            assert_eq!(metadata.stored_root, image.root.digest);
+            assert_eq!(
+                metadata.content.size_bytes,
+                image
+                    .objects
+                    .values()
+                    .map(|bytes| bytes.len() as u64)
+                    .sum::<u64>()
+            );
+            for (digest, bytes) in &image.objects {
+                assert_eq!(fs::read(fixture.store.layout.blob(digest)).unwrap(), *bytes);
+            }
+            let report = fixture.store.list().unwrap();
+            assert!(report.complete && report.diagnostics.is_empty());
+            assert_eq!(
+                report.entries[0].metadata.as_ref().unwrap().content,
+                metadata.content
+            );
+            assert!(crate::presentation::format_list_full(&report).contains(expected.unwrap()));
+            let table = crate::format_list_podman(&report, false);
+            assert!(!table.contains("<none>") && !table.contains("56 years ago"));
+        }
+    }
+}
+
+#[test]
+fn unusable_optional_labels_do_not_fail_acquisition() {
+    for runtime in [
+        json!(false),
+        json!([]),
+        json!({"Labels":null}),
+        json!({"Labels":[]}),
+        json!({"Labels":42}),
+        json!({"Labels":{"org.opencontainers.image.created":42}}),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.select_image(&creation_image(Value::Null, json!({}), runtime));
+        fixture.acquire(false);
+        assert_eq!(fixture.read().content.created, None);
+    }
+}
+
+#[test]
+fn replacement_refreshes_cached_creation_time_and_list_order() {
+    const EPOCH: &str = "1970-01-01T00:00:00Z";
+    const BUILD_TIME: &str = "2026-10-25T10:26:07.538865+00:00";
+    for pulled in [false, true] {
+        let mut fixture = Fixture::new();
+        let image = creation_image(
+            json!(EPOCH),
+            json!({"org.opencontainers.image.created":BUILD_TIME}),
+            Value::Null,
+        );
+        fixture.select_image(&image);
+        fixture.acquire(pulled);
+        // Model a cache written by the older CLI while retaining identical OCI bytes.
+        {
+            let guard = fixture.store.prepare(Operation::Import).unwrap();
+            let metadata_path = refs::raw_image_path(&guard, &fixture.reference)
+                .unwrap()
+                .join("metadata.json");
+            let mut metadata = refs::read(&guard, &fixture.reference).unwrap().metadata;
+            metadata.content.created = Some(EPOCH.into());
+            fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        }
+        let report = fixture.store.list().unwrap();
+        assert_eq!(
+            report.entries[0]
+                .metadata
+                .as_ref()
+                .unwrap()
+                .content
+                .created
+                .as_deref(),
+            Some(EPOCH)
+        );
+        if pulled {
+            fixture
+                .store
+                .pull(
+                    &parse_selector("registry.example/image:tag"),
+                    Some(&parse_selector(fixture.reference.as_str())),
+                    &crate::PullContext {
+                        skopeo: fixture.context.skopeo.clone(),
+                        ..Default::default()
+                    },
+                    &crate::PullOptions {
+                        replace: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        } else {
+            fixture.import(true).unwrap();
+        }
+        assert_eq!(fixture.read().content.created.as_deref(), Some(BUILD_TIME));
+        assert_eq!(fixture.read().stored_root, image.root.digest);
+        fixture.reference = LocalRef::new("aaa/older:tag").unwrap();
+        fixture.select_image(&creation_image(
+            json!("2026-10-21T20:47:08Z"),
+            json!({}),
+            Value::Null,
+        ));
+        fixture.acquire(pulled);
+        let report = fixture.store.list().unwrap();
+        let table = crate::format_list_podman(&report, true);
+        let mut lines = table.lines().skip(1);
+        assert!(lines.next().unwrap().starts_with("example/tool"));
+        assert!(lines.next().unwrap().starts_with("aaa/older"));
+        assert!(crate::presentation::format_list_full(&report).contains(BUILD_TIME));
+    }
+}
+
+#[test]
 fn omitted_destinations_use_source_verbatim_and_obey_replacement_policy() {
     let mut fixture = Fixture::new();
     fixture.reference = LocalRef::new("example/tool:Release_1").unwrap();

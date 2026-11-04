@@ -165,6 +165,17 @@ config image ID, `podman images` may retain the existing display values; use
 `podman image inspect` to inspect added names in `RepoTags`, `RepoDigests`, and
 `NamesHistory`.
 
+The reported image creation time is cached by the operation that acquired it.
+For this purpose, import and pull prefer the image config's creation time.
+When it is missing, invalid, or exactly the Unix epoch, they try the manifest's
+`org.opencontainers.image.created` annotation, then the config's matching label.
+Fallback values must be valid RFC 3339 timestamps other than the Unix epoch.
+If neither qualifies, the original config value is retained. This handles
+images that declare an epoch config timestamp but supply a build date in OCI
+metadata. Existing cached dates are unchanged by listing; re-pull or re-import
+with `--replace` to refresh them. Replacement also updates acquisition metadata;
+pass `--notes` if you want to retain existing notes.
+
 Inventory inspects small wrapper files without traversing image content.
 Healthy entries are therefore `unverified`. Damaged entries remain visible,
 and collected results are printed even when damage or incomplete enumeration

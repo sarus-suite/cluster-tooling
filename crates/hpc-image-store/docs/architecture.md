@@ -83,6 +83,14 @@ counts unique manifest, configuration, and layer objects, excluding wrapper
 files. It is neither Podman's unpacked size nor an estimate of removal savings;
 shared content prevents summing ref sizes into total store use.
 
+Import and pull cache the first valid RFC 3339 creation time that is not exactly
+the Unix epoch, preferring the config's top-level `created`, then the manifest's
+`org.opencontainers.image.created` annotation, then the config's matching label.
+The selected text is preserved. If none qualifies, the original config value
+is retained, including an absent value. Unusable optional label metadata is
+ignored. Acquisition time and history entries are not creation-time fallbacks.
+Listing does not refresh existing caches; reacquiring with a replace does.
+
 Import provenance records the requested source and containers-storage image ID.
 Pull records the requested registry selector and resolved manifest digest, which
 must equal the stored root. An index used for selection supplies no retained
