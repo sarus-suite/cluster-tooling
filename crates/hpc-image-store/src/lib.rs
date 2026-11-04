@@ -1,6 +1,6 @@
 //! A Linux, user-owned filesystem OCI image store.
 //! Synchronous transfers, inventory, graph checking, local existence,
-//! digest selection, removal and conservative pruning.
+//! digest selection, and removal with immediate reclamation.
 
 #![doc = include_str!("../docs/library-guide.md")]
 
@@ -42,7 +42,6 @@ mod locks;
 mod metadata;
 #[allow(dead_code)]
 mod mutation;
-mod prune;
 mod pull;
 mod recovery;
 mod store;
@@ -57,10 +56,6 @@ pub use inventory::{
 };
 pub use metadata::{Acquisition, ContentMetadata, ImageId, Platform, RefMetadata, StoreMetadata};
 pub use presentation::format_list_podman;
-pub use prune::{
-    PruneCandidate, PruneDiagnostic, PruneKind, PruneOptions, PrunePhase, PruneReport,
-    PruneSkipped, PruneSummary,
-};
 pub use pull::{PullContext, PullOptions, PullReport};
 pub use store::{Store, StoreConfig};
 pub use transfer::{ExportReport, ImportOptions, ImportReport, TransferContext};

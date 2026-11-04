@@ -26,11 +26,6 @@ mod exists_tests;
 #[path = "check_regression_tests.rs"]
 mod check_regression_tests;
 
-#[path = "prune/bookkeeping_tests.rs"]
-mod bookkeeping_tests;
-#[path = "prune/tests.rs"]
-mod prune_tests;
-
 // Precomputed SHA-256 identities for complete, zero-layer OCI fixtures. Runtime
 // publication deliberately does not hash content; these bytes are fixture inputs.
 const CONFIG: &[u8] =
@@ -136,13 +131,6 @@ fn publish(handle: &Store, reference: &LocalRef, image: Image, replace: bool) ->
     let store_guard = handle.prepare(Operation::Import).unwrap();
     let destination = reference.clone();
     refs::publish(completed(&store_guard, &destination, image), replace).unwrap()
-}
-
-// Deliberately construct unrecorded remnants for the still-supported prune tests.
-// Public removal now reclaims its recorded content before success.
-fn legacy_unlink(handle: &Store, reference: &LocalRef) -> crate::Result<()> {
-    let guard = handle.prepare(Operation::Remove)?;
-    refs::remove(&guard, reference)
 }
 
 #[test]
@@ -983,23 +971,18 @@ fn publication_worker() {
         interruption_worker(&handle, &reference, &action);
         return;
     }
-    if action.starts_with("bookkeeping-") {
-        bookkeeping_tests::worker(&handle, &reference);
-        println!("PUBLICATION_READY");
-        return;
-    }
-    if action.starts_with("prune-") {
-        prune_tests::worker(&handle, &action);
-        println!("PUBLICATION_READY");
-        return;
-    }
     if action.starts_with("exists-") {
         exists_tests::worker(&handle, &reference, &action);
         println!("PUBLICATION_READY");
         return;
     }
+    if action == "removal-waiter" {
+        removal_tests::waiter(&handle);
+        println!("PUBLICATION_READY");
+        return;
+    }
     if action == "check-exclusive" {
-        let _guard = handle.prepare(Operation::Prune).unwrap();
+        let _guard = handle.prepare(Operation::Remove).unwrap();
         println!("PUBLICATION_READY");
         return;
     }

@@ -434,8 +434,6 @@ fn operation_matrix_is_explicit() {
     }
     assert_eq!(Operation::Remove.store_mode(), Mode::Exclusive);
     assert!(!Operation::Remove.initializes());
-    assert_eq!(Operation::Prune.store_mode(), Mode::Exclusive);
-    assert!(!Operation::Prune.initializes());
 }
 
 // Exercise the actual internal API in a fresh process, without exposing a
@@ -486,7 +484,6 @@ fn lock_worker() {
         "list" => Operation::List,
         "check" => Operation::Check,
         "exists" => Operation::Exists,
-        "prune" => Operation::Prune,
         _ => panic!("unknown worker operation"),
     };
     let guard = handle.prepare(operation).unwrap();
@@ -601,19 +598,14 @@ fn separate_processes_obey_the_lock_matrix() {
         ("pull", "remove", Some("a:t"), true),
         ("check", "import", Some("a:t"), true),
         ("import", "pull", Some("b:t"), true),
-        ("remove", "prune", None, true),
-        ("export", "prune", None, true),
-        ("prune", "check", Some("a:t"), true),
-        ("prune", "import", Some("a:t"), true),
+        ("remove", "remove", None, true),
+        ("export", "remove", None, true),
+        ("remove", "check", Some("a:t"), true),
     ];
     for (first, second, second_ref, blocked) in cases {
         let temporary = tempfile::tempdir().unwrap();
         initialize(temporary.path());
-        let mut holder = Worker::start(
-            temporary.path(),
-            first,
-            if first == "prune" { None } else { Some("a:t") },
-        );
+        let mut holder = Worker::start(temporary.path(), first, Some("a:t"));
         holder.wait_for("WORKER_READY");
         let mut contender = Worker::start(temporary.path(), second, second_ref);
         if blocked {
@@ -948,7 +940,6 @@ fn format_two_preserves_schema_three_and_rejects_old_stores_without_changes() {
             Operation::List,
             Operation::Check,
             Operation::Exists,
-            Operation::Prune,
         ] {
             assert!(
                 matches!(handle.prepare(operation), Err(Error::UnsupportedVersion { kind: "store", version: found }) if found == version)

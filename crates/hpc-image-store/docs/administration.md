@@ -30,7 +30,7 @@ is outside this PoC.
 | Import | Local Podman and Skopeo using the same containers-storage context |
 | Pull | Skopeo, registry connectivity, and any required authentication/trust configuration |
 | Export | Skopeo and the destination containers-storage context |
-| List, check, exists, remove, prune | No Podman or Skopeo invocation |
+| List, check, exists, remove | No Podman or Skopeo invocation |
 
 The library checks Skopeo capabilities rather than enforcing a numeric version
 floor: shared-blob support, platform flags when requested, and preservation for
@@ -54,7 +54,7 @@ internal structure, never missing ancestors. Do not put a store inside another
 store; initialization does not search ancestors to detect that setup error.
 
 Import and pull initialize missing or empty stores. Other operations, including
-exists, remove, list, and dry-run prune, require a completed store. Remove does not create a
+exists, remove, list, and check, require a completed store. Remove does not create a
 root or lock bookkeeping and does not resume interrupted setup. Import and pull
 can retry interrupted setup using recognized empty setup entries and
 `.store-init.json`. Unexpected contents, unsupported markers, and incompatible reserved entries are preserved
@@ -111,11 +111,9 @@ shared objects and longer names. Unrecorded remnants still consume space.
 Cached per-image sizes cannot be summed into total usage or predicted physical reclaim totals.
 
 Use `list` and `check` to inspect state, then explicitly remove intended refs.
-Prune remains available for unrecorded remnants; review `prune --dry-run` before
-that separate maintenance action. Default content grace is 24 hours of object
-age, while empty encoded ref directories are immediately eligible. Prune requires a complete
-fresh authoritative scan and waits for active operations, including surviving
-copy children. All mutations hold the exclusive store lock, even across different
+Unrecorded remnants remain preserved without a general reclamation interface.
+Recorded recovery waits for active operations, including surviving copy children.
+All mutations hold the exclusive store lock, even across different
 names; shared queries can coexist. Do not manually remove locks to bypass a timeout or delete CAS
 objects based on cached reports.
 
@@ -124,7 +122,7 @@ objects based on cached reports.
 Operation preparation attempts pending recorded recovery before using image
 content; unresolved recovery blocks the requested operation. Recovery waits for
 active operations, including surviving transfer children, and can change the
-store even before a query or prune dry-run. Preserve pending records and the
+store even before a query. Preserve pending records and the
 permanent lock when investigating errors; never remove them to bypass recovery.
 Malformed records, inconsistent ref states, and unexpected cleanup contents are
 preserved with contextual errors. See the
@@ -148,15 +146,11 @@ never retries a pull or contacts its registry.
 
 Removal checks remaining reachability after durably unlinking the name. Damage
 in another ref can block that cleanup, leaving the name absent and preventing
-all ordinary access to the store, including list, check, remove, and prune.
+all ordinary access to the store, including list, check, and remove.
 An unresolved structural failure may require coherent backup restoration or
 maintainer-reviewed repair; PoC v2 offers no built-in repair or recovery bypass.
 Preserve records and locks. Addressing this limitation is deferred to PoC v3
 or later.
-
-Prune preserves unknown data and reports partial progress when removal or syncing
-fails. Keep that evidence rather than treating every failure as an uncommitted
-operation.
 
 Back up or snapshot the store, including refs and operational metadata, using
 site procedures that preserve a coherent state. Blob content alone cannot

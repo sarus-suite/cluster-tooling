@@ -9,7 +9,7 @@ the [library guide](library-guide.md) covers Rust callers.
 ## Tools and storage context
 
 Import requires local Podman and Skopeo. Export and registry pull require Skopeo
-only; inventory, checking, removal, and pruning invoke neither tool. Import and
+only; inventory, checking, existence, and removal invoke neither tool. Import and
 export inherit your local containers-storage configuration, environment, driver,
 and user namespace. The library does not change that configuration or select
 another driver. Remote Podman contexts are unsupported.
@@ -58,7 +58,7 @@ Import/export use Skopeo defaults when it is omitted. A store path containing
 
 Successful import, including `--replace`, durably removes its staging and unused
 superseded content before reporting success. Replacement preserves shared blobs
-and does not require prune. It requires the old ref to have a canonical confined
+and requires the old ref to have a canonical confined
 pointer and readable authoritative dependency declarations. A malformed pointer,
 regular-file ref, missing wrapper, or unreadable/unsupported declarations cause
 an error before publication, preserving the old entry and content. Damaged cached
@@ -177,7 +177,7 @@ Same-size corruption can remain undetected. Passing internal index checks does
 not imply index acquisition or export support. Check never repairs or removes
 content and creates no coordination bookkeeping. All-store inventory and checks
 hold a shared store lock throughout inspection and observe a stable namespace.
-Import, pull, remove, and prune take the exclusive store lock and wait for
+Import, pull, and remove take the exclusive store lock and wait for
 readers; writers targeting different names also serialize.
 
 ## Test local existence
@@ -209,9 +209,6 @@ operation and does not establish image health; request `check` explicitly.
 
 ```sh
 hpc-image-store --store /scratch/me/images remove analysis/tool:release
-hpc-image-store --store /scratch/me/images prune --dry-run
-hpc-image-store --store /scratch/me/images --json prune --dry-run --grace-period 7d
-hpc-image-store --store /scratch/me/images prune
 ```
 
 Removal accepts only an explicit `name:tag`; digest-bearing selectors are
@@ -220,7 +217,7 @@ resumes setup, or creates missing ancestors. A missing ref is an error.
 
 Successful removal durably removes that name, its unused raw image and blobs,
 and unnecessary namespace directories before reporting success. Shared content
-and prefixes needed by longer names survive. No grace period or prune is needed.
+and prefixes needed by longer names survive. No later maintenance action is needed.
 The target must have a canonical confined pointer, a readable wrapper index,
 and supported readable dependency declarations. Damage to those inputs rejects
 removal before unlinking; damaged display metadata alone does not block it.
@@ -232,35 +229,9 @@ store operations. See [recovery failures and manual resolution](#recovery-failur
 before retrying; a retry may finish recovery and then report the original name
 missing rather than repeat a successful removal.
 
-Prune remains available for unrecorded remnants until its planned retirement.
-The commands above illustrate that separate maintenance interface.
-
-Prune requires an initialized store in both modes. It performs a fresh complete
-scan and preserves all content if unresolved committed-ref damage or an
-operational inspection failure prevents safe deletion. Unknown contents are
-preserved and reported as successful skips. Existing checks or existence
-observations never authorize later pruning.
-
-Content grace defaults to 24 hours of object age, not time since removal.
-`--grace-period` accepts integer seconds with an optional `s`, `m`, `h`, or `d`
-suffix, including `0`. Old content can become eligible immediately after its
-last ref is removed. Future timestamps remain ineligible.
-Empty encoded ref directories are eligible immediately regardless of grace.
-Namespace prefixes needed by other names and the permanent store lock remain.
-Prune neither scans nor reclaims unexpected contents beneath `locks/`.
-
-On a clean store, dry-run changes no persistent state. All commands first finish
-any pending recorded mutation recovery; that prerequisite can change the store
-even for dry-run. Dry-run then does not attempt the namespace sync
-barrier required before destructive pruning and cannot certify that a later
-deletion will succeed. Real prune saves the scanned ref namespace before
-reclaiming eligible content. It stops on the first removal or sync failure and
-reports partial progress without rollback.
-
-Reports show eligible candidates, visible removals, per-kind counts and logical
-bytes, unknown-content skips, scan completeness, and diagnostics. Logical bytes
-are not physical space savings. `durability_confirmed == false` means a removal
-is visible but its parent sync failed. Review diagnostics as well as totals.
+Unrecorded remnants remain preserved. There is no general reclamation command;
+normal operations clean only the content owned or retired by recorded mutations.
+Unexpected content is never adopted as part of that cleanup.
 
 ## Output and troubleshooting
 
@@ -283,7 +254,6 @@ separately requested pull resolves its source normally.
 | Export cannot preserve content | Check Skopeo capability and representation support; no conversion fallback is available. |
 | Digest cannot be resolved | Use a stored root under the same literal repository. Resolve damaged candidates before treating an incomplete search as absence. |
 | Lock wait or timeout | Check active transfers, including surviving copy children. Do not delete lock files to break contention. |
-| Prune reports a blocked scan | After successful preparation, inspect committed refs and diagnostics; investigate damage before attempting maintenance. Import and pull replacement require readable old identity and dependency declarations. |
 | Recorded recovery is blocked | Preserve the error and pending records; follow [recovery failures and manual resolution](#recovery-failures-and-manual-resolution). |
 | Durability error after mutation | Inspect current state before retrying: publication or removal may already be visible. No rollback hides that uncertainty. |
 
@@ -337,7 +307,7 @@ Removal validates its target, records intent, and durably unlinks the name befor
 checking remaining refs for safe reclamation. There is no additional early
 reachability preflight. A damaged remaining manifest can therefore leave the
 name absent but cleanup unfinished. The pending record blocks ordinary access
-to the entire store, including list, check, remove, and prune, even for healthy
+to the entire store, including list, check, and remove, even for healthy
 images. If that damage cannot be resolved, PoC v2 has no built-in way to restore
 ordinary access. Recovery never rolls back the visible removal. Addressing this
 limitation is future work for PoC v3 or later; do not delete the record or lock
@@ -356,7 +326,7 @@ For manual resolution:
 3. For structural problems, coordinate with the store owner or maintainer,
    ensure active operations and surviving transfers have stopped, and preserve
    a coherent backup or snapshot using site procedures before attempting repair.
-   Normal `check`, `remove`, and `prune` also require recovery to succeed; they
+   Normal `check` and `remove` also require recovery to succeed; they
    cannot bypass a blocked recovery to repair the store. Investigation may need
    read-only filesystem inspection of the preserved state.
 4. Agree on a targeted repair whose identities and content sources can be

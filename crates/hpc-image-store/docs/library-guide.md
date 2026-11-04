@@ -218,39 +218,9 @@ Existence reserves nothing afterward and certifies neither health nor execution.
 A later acquisition checks its destination under its own exclusive lock and can
 still fail with `RefExists`. Existing refs require explicit replacement; replacing
 a ref cannot generally repair damaged immutable shared CAS objects. Neither an
-existence result nor an earlier check authorizes subsequent pruning.
-
-## Library pruning
-
-```rust,no_run
-use hpc_image_store::{PruneOptions, Result, Store, StoreConfig};
-
-fn preview_prune() -> Result<()> {
-    let store = Store::new(StoreConfig::new("/scratch/me/images")?);
-    let report = store.prune(&PruneOptions {
-        dry_run: true,
-        ..PruneOptions::default()
-    })?;
-    if report.has_errors() {
-        for diagnostic in &report.diagnostics {
-            eprintln!("{}: {}", diagnostic.path.display(), diagnostic.message);
-        }
-    }
-    Ok(())
-}
-```
-
-`Store::prune(&PruneOptions)` returns `Result<PruneReport>`. Both dry-run and
-actual deletion use the same report types. Check `has_errors()` as well as the
-outer `Result`: scan and deletion failures are collected, while preparation and
-lock failures are returned as typed errors. The default grace is 24 hours of
-object age, rather than time since removal;
-empty encoded ref directories are eligible immediately. Unknown contents are preserved,
-and any incomplete authoritative scan blocks deletion. Candidate byte counts
-are logical file lengths, not physical space savings. Inspect diagnostics,
-partial removals, and `durability_confirmed` before interpreting a report.
-`PruneKind` contains `Staging`, `RawImage`, `Blob`, and `RefDirectory`;
-the former ref-lock variants and their JSON summary keys have been removed.
+existence result nor an earlier check authorizes later reclamation; mutations
+and recovery read authoritative dependency declarations when cleanup is needed.
+Unrecorded remnants remain preserved without a general reclamation API.
 
 ## Registry settings and metadata types
 
@@ -277,7 +247,7 @@ fallback. Acquisition provenance is descriptive and never a lookup alias.
 ## Errors and visible changes
 
 Store preparation, locking, selection, capability, and tool failures return
-typed `Error` values with context. List, check, and prune can instead return
+typed `Error` values with context. List and check can instead return
 collected reports containing failures; check their `has_errors()` methods.
 `exists` returns false only for definite absence in a valid initialized store.
 It returns typed errors when preparation or identity resolution cannot finish.
@@ -285,15 +255,14 @@ It returns typed errors when preparation or identity resolution cannot finish.
 `Error::InvalidMutationRecord` identifies invalid durable bookkeeping.
 `Error::Recovery` reports the record path, available ref identity, phase,
 potential namespace change, remaining work, and underlying cause. Recovery
-failures block the requested action, including explicit check and prune dry-run,
+failures block the requested action, including explicit check,
 and preserve pending evidence for investigation. Shared cached structural or
 JSON findings return `Error::InvalidObject` with the finding's path and diagnostic;
 shared operational I/O failures retain their typed cause chain. Previously
 published unsupported content still blocks recovery with a contextual error,
 without panicking or removing the ref, record, or content. The library does not
 repair or adopt inconsistent contents. No public recovery
-method or report type is added. Prune dry-run suppresses prune deletions after
-any required recorded recovery has finished.
+method or report type is added.
 
 `Error::Durability` identifies a potentially visible blob insertion, ref
 publication, or removal through `NamespaceChange` and the failed sync path.
@@ -307,12 +276,11 @@ attempts recorded work during preparation. No mutation cleans up in a destructor
 Removal checks remaining refs after unlinking, without an additional early
 preflight. Damage in another ref can therefore leave the name absent while
 cleanup remains pending. Until safe recovery is possible, all ordinary operations
-are blocked, including list, explicit check, remove, and prune. They provide no
+are blocked, including list, explicit check, and remove. They provide no
 recovery bypass. Preserve pending records and the permanent lock; structural
 damage may need coherent restoration or maintainer-reviewed repair. Addressing
 this access limitation is deferred to PoC v3 or later, outside PoC v2.
 
 Pull recovery does not retry the transfer or contact the registry. Capability
 and source-resolution failures before recording retain their original error
-types. Prune
-reports expose partial removals and uncertain durability separately.
+types.

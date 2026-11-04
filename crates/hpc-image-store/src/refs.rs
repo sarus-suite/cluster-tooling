@@ -194,7 +194,7 @@ pub(crate) fn pointer_identity(layout: &Layout, reference: &LocalRef) -> Result<
     Ok(Some(id.to_owned()))
 }
 
-/// The borrowed guard keeps the selected raw image protected from prune for
+/// The borrowed guard keeps the selected raw image protected from reclamation for
 /// the whole time the caller reads or uses it.
 pub(crate) struct ResolvedRef<'a> {
     _guard: &'a StoreGuard<'a>,

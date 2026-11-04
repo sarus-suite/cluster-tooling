@@ -998,7 +998,7 @@ fn readers_recheck_after_releasing_shared_and_after_recovery() {
         let shared = fixture.store.prepare(Operation::List).unwrap();
         let _short = locks::short_test_waits();
         assert!(matches!(
-            fixture.store.prepare(Operation::Prune),
+            fixture.store.prepare(Operation::Remove),
             Err(Error::LockTimeout { .. })
         ));
         drop(shared);

@@ -12,11 +12,11 @@ the next implementation phase. Current evidence belongs in the
 | --- | --- |
 | Disposable real registry | Direct manifests, index-based tag selection, index-digest rejection, tag movement, and authentication against an actual registry, beyond controlled tool fixtures and the historical opt-in Docker Hub smoke. |
 | Registry configuration and representations | Broader authentication, TLS, trust policy, tool-version, media-type, compression, and platform combinations; clear preservation failures without conversion or fallback. |
-| Integrated registry lifecycle | Availability before/after pull, export, removal, checking, and pruning together, including unusable content and operational failures. |
+| Integrated registry lifecycle | Existence before/after pull, export, removal, checking, and immediate reclamation together, including unusable content and operational failures. |
 | Two-node Lustre/VAST coordination | Concurrent initialization beneath a prepared parent, lock exclusion, shared content insertion, publication visibility, and coherent observations across replacement/removal. |
-| Interrupted initialization and transfers at deployment sites | Retry behavior, stable lock identities, surviving tool children, abandoned staging, and prune exclusion on the actual filesystems. |
+| Interrupted initialization and transfers at deployment sites | Retry behavior, stable lock identities, surviving tool children, recorded staging recovery, and cleanup exclusion on the actual filesystems. |
 | Crash persistence on deployed storage | Ref/metadata publication, failed-sync outcomes, namespace persistence before reclamation, and survival of acknowledged updates across actual crash/recovery. Local ordering and fault injection do not establish these guarantees. |
-| Availability and pruning across nodes | Observation races, active-reader exclusion, and fresh authoritative reclamation decisions independent of earlier availability results. |
+| Existence and reclamation across nodes | Observation races, active-reader exclusion, and fresh authoritative reclamation decisions independent of earlier existence results. |
 
 These topics require deployment-specific environments and separately agreed
 scope. Lustre and VAST support remains unqualified until suitable site evidence
@@ -27,5 +27,5 @@ Complete-index acquisition/storage, multi-platform stored images, nested-index
 source resolution, index-parent inventory, and platform-selecting index export
 are unsupported capabilities, not unfinished PoC acceptance checks. They require
 future implementation decisions before their own qualification. Existing internal
-index graph tests protect checking and pruning safety without claiming those
+index graph tests protect checking and reclamation safety without claiming those
 public workflows.

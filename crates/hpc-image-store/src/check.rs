@@ -1,5 +1,5 @@
-//! Ref checking owns coordination and report attribution; graph reading is
-//! independent so prune can reuse it under an exclusive store lock.
+//! Ref checking owns coordination and report attribution. Graph reading also
+//! supplies dependency-only traversal for recorded mutation and recovery cleanup.
 use crate::{
     DiagnosticCategory, Error, ImageSelector, ListDiagnostic, LocalRef, Result, Sha256Digest,
     Store, discovery, fsutil,
@@ -150,9 +150,6 @@ fn inspect(
     }
     if let Some(graph) = inspected.graph {
         report.complete &= graph.complete;
-        // Retain reachability in the internal graph report for prune. Checking
-        // exposes no partial live set that could accidentally authorize deletion.
-        let _ = graph.reachable;
         for diagnostic in graph.diagnostics {
             report.diagnostics.push(CheckDiagnostic {
                 category: DiagnosticCategory::Graph,

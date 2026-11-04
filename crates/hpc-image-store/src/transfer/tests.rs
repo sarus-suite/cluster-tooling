@@ -1279,7 +1279,7 @@ fn orphaned_transfer_retains_store_lock_and_inherits_environment() {
         {
             let _short = crate::locks::short_test_waits();
             assert!(matches!(
-                fixture.store.prune(&crate::PruneOptions::default()),
+                fixture.store.prepare(Operation::Remove),
                 Err(Error::LockTimeout { .. })
             ));
             if operation == "import" {
@@ -1531,7 +1531,7 @@ fn export_forwards_combined_destination_and_propagates_tool_failure() {
 }
 
 #[test]
-fn ordinary_query_recovers_import_without_prune_or_tools() {
+fn ordinary_query_recovers_import_without_tools() {
     for point in ["ref.rename", "recovery.remove"] {
         let fixture = Fixture::new();
         fixture.import(false).unwrap();

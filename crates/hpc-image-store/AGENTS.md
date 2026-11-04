@@ -47,7 +47,7 @@ requirement, report the conflict rather than silently choosing a new design.
   pointer confinement, lock coordination, and durable publication. Keep the
   store lock identity permanent. Every action retains its single store guard
   throughout persistent-content use; transfer children share that operation's
-  locked open-file description. Mutators and prune hold exclusive access;
+  locked open-file description. Mutators and recovery hold exclusive access;
   queries hold shared access. Do not create per-ref lock bookkeeping.
   Do not silently substitute copying, overwriting, or weaker filesystem behavior when
   a required primitive is unavailable.

@@ -1,8 +1,8 @@
 //! Real-tool acceptance with disposable containers-storage prepared by the test
 //! caller. The transfer library inherits that context without changing it.
 use hpc_image_store::{
-    CheckScope, Error, ImageSelector, ImportOptions, LocalRef, Platform, PruneKind, PruneOptions,
-    Store, StoreConfig, TransferContext, format_list_podman,
+    CheckScope, Error, ImageSelector, ImportOptions, LocalRef, Platform, Store, StoreConfig,
+    TransferContext, format_list_podman,
 };
 use serde_json::{Value, json};
 use std::{
@@ -138,23 +138,6 @@ fn poc_lifecycle(directory: &Path, source: &str, output: &str, context: &Transfe
     );
     assert!(!store.config().root().join("pending-mutation.json").exists());
     assert!(!store.exists(&target_selector).unwrap());
-    let options = PruneOptions {
-        dry_run: true,
-        grace_period: Duration::ZERO,
-    };
-    let before = snapshot::snapshot(store.config().root());
-    let preview = store.prune(&options).unwrap();
-    assert!(!preview.has_errors(), "{preview:?}");
-    assert!(preview.candidates.is_empty());
-    assert_eq!(snapshot::snapshot(store.config().root()), before);
-    let options = PruneOptions {
-        dry_run: false,
-        ..options
-    };
-    let pruned = store.prune(&options).unwrap();
-    assert!(!pruned.has_errors(), "{pruned:?}");
-    assert!(pruned.candidates.is_empty());
-    assert_eq!(pruned.summaries[&PruneKind::Blob].removed_count, 0);
     assert!(store.exists(&keeper_selector).unwrap());
     store.remove(&keeper).unwrap();
     // Assert completion immediately, without another maintenance action.

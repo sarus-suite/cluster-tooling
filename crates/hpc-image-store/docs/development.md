@@ -2,8 +2,8 @@
 
 The current PoC implements single-platform containers-storage import/export,
 manifest-preserving registry pull, inventory, structural graph checking,
-explicit ref removal, conservative pruning, and lightweight existence queries.
-The CLI has eight commands. Store format 2 and ref metadata schema 3 are used.
+explicit ref removal with immediate reclamation, and lightweight existence queries.
+The CLI has seven commands. Store format 2 and ref metadata schema 3 are used.
 PoC v2 Stage 2 replaces per-ref locks with one permanent store lock; the content
 lifecycle was retained through Stage 3, which adds durable mutation records and
 automatic recovery during operation preparation. Stages 4.1 through 4.3 integrate
@@ -25,7 +25,6 @@ results and design/planning context; they do not prescribe future work.
 | Transfers and publication | `transfer`, `pull`, `subprocess`, `staging`, `cas`, `refs`; publication fixtures and controlled tool tests |
 | Recorded mutations and recovery | `mutation`, `recovery`, and dependency-only traversal in `graph`; recorded synthetic fixtures, fault checkpoints, and a subprocess worker |
 | Inspection | `discovery`, `inventory`, `inspection`, `graph`, `check`, `exists`; complete graph and existence tests |
-| Maintenance | `prune` and its bookkeeping module; reachability, partial-removal, namespace-sync, and empty-ref-directory regressions |
 | CLI and presentation | `main`, `presentation`; CLI integration tests, human/JSON parity |
 | Real tools | `tests/real_transfers.rs`, `tests/registry_pull.rs`, shared disposable-storage and registry fixtures |
 
@@ -34,6 +33,56 @@ Rust examples remain doctests. The crate README is the short navigation entry
 point. Keep relative repository links out of the included library guide; use
 API references or self-contained explanations so generated rustdoc navigation
 also works.
+
+## PoC v2 Stage 6: prune retirement
+
+Stage 6 removes the prune library method, all eight public report/options types,
+its implementation and bookkeeping module, the CLI command, formatter, and
+grace-period parser. The CLI has seven commands and rejects the old command as
+invalid usage, including its former flags and global JSON mode, without store
+or tool access. Current examples and usage guides no longer prescribe prune.
+Format 2, metadata schema 3, and mutation snapshot version 1 are unchanged.
+Only import and pull initialize stores; list initialization remains Stage 7 work.
+
+Import, pull, replacement, and removal already finish their own recorded cleanup.
+The real-transfer lifecycle now verifies those results without a maintenance
+call. Unrecorded remnants remain preserved, and no general reclamation or repair
+interface replaces prune. The architecture remains authoritative for these
+boundaries.
+
+PRUNE-01 and PRUNE-02 in the acceptance inventory map the removed tests to
+surviving evidence. New public removal regressions fail each namespace ancestor
+sync for short and long encoded names, preserve unexpected lock contents, and
+retain the permanent lock's device/inode for an already opened waiter through
+actual cleanup. The termination regression now excludes both shared readers and
+exclusive writers through recovery and record clearing. Existing nested-graph,
+unknown-content, partial-deletion, durability, and repeated-recovery tests remain.
+Prune-only grace, dry-run, accounting, orphan-collection fixtures, and worker
+branches are removed.
+
+On 4 November 2026, the complete crate suite passed 230 tests: 191 library tests,
+27 CLI tests, one real-transfer test, five controlled-registry tests, and six
+doctests. The six library subprocess helpers and one CLI helper remained ignored
+by top-level runners and were invoked only by their owning tests. The separately
+ignored Docker Hub smoke test was not selected; no live registry was contacted.
+Real transfers used the default disposable overlay-storage harness with Podman
+5.4.2 and Skopeo 1.18.0.
+
+Crate check, all-target Clippy with warnings denied, formatting verification,
+rustdoc with warnings denied, and diff checks passed. All 88 current local
+Markdown links and their heading anchors passed review, including a corrected
+Stage 5 link in the acceptance inventory. Generated crate, Store, presentation,
+and sidebar navigation omit the retired prune API and retain all seven Store
+actions. Historical archive files are unchanged. Cargo initially could not
+write its configured cache outside the filesystem sandbox; validation then used
+approved access to that cache and the disposable test harness. No test failures
+were observed. Local tests establish ordering and failure handling, not actual
+crash persistence or Lustre/VAST cross-node qualification. Stage 8 remains the
+milestone integration and documentation closure.
+
+The earlier stage sections below preserve historical results and intermediate
+behavior, including interfaces subsequently retired. Use the current overview
+and architecture for supported behavior.
 
 ## PoC v2 Stage 5: lightweight existence
 
@@ -517,7 +566,7 @@ only affected checks when a failure or subsequent change justifies it.
 
 The suite covers initialization/retry and permissions, publication boundaries,
 immutable insertion races, complete nested-index graph traversal, existence
-semantics and acquisition races, prune reachability and grace, unknown-content
+semantics and acquisition races, mutation/recovery reachability, unknown-content
 preservation, partial removal/sync failures, CLI reports, and process-lock
 lifetimes. Synthetic OCI fixtures and narrow test-only fault injection cover
 failure paths; readiness handshakes and bounded waits coordinate processes.

@@ -1,7 +1,7 @@
 //! Public removal's preparation, reclamation, and recovery contract.
 use super::*;
 use crate::{
-    CheckScope, ImageSelector, PruneOptions,
+    CheckScope, ImageSelector,
     mutation::{Kind, Mutation, Record},
     test_snapshot::snapshot,
     test_support::{NestedImages, SharedImages, SyntheticImage, complete_image, prefix_names},
@@ -204,6 +204,149 @@ fn removal_preserves_every_nested_keeper_branch_and_unrecorded_remnants() {
 }
 
 #[test]
+fn removal_recovers_only_after_syncing_every_empty_namespace_ancestor() {
+    for target in [
+        reference(),
+        LocalRef::new(format!("{}:tag", "a".repeat(180))).unwrap(),
+    ] {
+        let depth = target.encoded_path().components().count();
+        for failed_sync in 0..=depth {
+            let directory = tempfile::tempdir().unwrap();
+            let handle = store(directory.path());
+            let image = SharedImages::new().original;
+            let raw = publish_complete(&handle, &target, &image);
+            let raw_before = snapshot(&handle.layout.raw_images());
+            let blobs_before = snapshot(&handle.layout.blobs());
+            let staging_before = snapshot(&handle.layout.staging());
+            let lock_before = snapshot(&handle.layout.store_lock());
+            let leaf = handle
+                .layout
+                .ref_entry(&target)
+                .parent()
+                .unwrap()
+                .to_owned();
+            let directories: Vec<_> = leaf
+                .ancestors()
+                .take(depth + 1)
+                .map(Path::to_owned)
+                .collect();
+            assert_eq!(
+                directories.last().unwrap(),
+                &handle.config().root().join("refs")
+            );
+
+            fsutil::fail_after("recovery.namespace-sync", failed_sync, libc::EIO);
+            let error = handle.remove(&target).unwrap_err();
+            fsutil::clear_failure();
+            assert!(
+                matches!(&error, Error::Recovery {
+                change: Some(NamespaceChange::RefRemoved), source, ..
+            } if matches!(source.as_ref(), Error::Io { path, .. } if path == &directories[failed_sync])),
+                "{error}"
+            );
+            assert!(
+                refs::pointer_identity(&handle.layout, &target)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(directories.iter().all(|path| path.is_dir()));
+            assert_eq!(snapshot(&handle.layout.raw_images()), raw_before);
+            assert_eq!(snapshot(&handle.layout.blobs()), blobs_before);
+            assert_eq!(snapshot(&handle.layout.staging()), staging_before);
+            let record: Record =
+                serde_json::from_slice(&fs::read(handle.layout.pending_mutation()).unwrap())
+                    .unwrap();
+            assert_eq!(record.phase, crate::mutation::Phase::Intent);
+            assert!(record.cleanup.is_none());
+
+            handle.list().unwrap();
+            handle.list().unwrap();
+            assert!(!raw.exists());
+            assert!(!crate::recovery::pending(&handle.layout).unwrap());
+            for path in [
+                handle.layout.raw_images(),
+                handle.layout.blobs(),
+                handle.config().root().join("refs"),
+            ] {
+                assert_eq!(fs::read_dir(path).unwrap().count(), 0);
+            }
+            assert_eq!(snapshot(&handle.layout.store_lock()), lock_before);
+        }
+    }
+}
+
+#[test]
+fn removal_preserves_unexpected_lock_contents_without_adoption() {
+    let fixture = RemovalFixture::new();
+    let locks = fixture.store.config().root().join("locks");
+    let foreign = locks.join("refs/foreign");
+    fs::create_dir_all(&foreign).unwrap();
+    fs::write(foreign.join("ref.lock"), b"preserve").unwrap();
+    symlink("/outside/never-follow", foreign.join("pointer")).unwrap();
+    let before = snapshot(&locks);
+    fixture.store.remove(&fixture.target).unwrap();
+    fixture.assert_recovered(true);
+    fixture.store.remove(&fixture.keeper).unwrap();
+    fixture.assert_idle();
+    assert_eq!(snapshot(&locks), before);
+}
+
+#[test]
+fn removal_preserves_the_permanent_lock_for_open_waiters() {
+    let directory = tempfile::tempdir().unwrap();
+    let handle = store(directory.path());
+    let target = reference();
+    let image = SharedImages::new();
+    for _ in 0..2 {
+        let raw = publish_complete(&handle, &target, &image.original);
+        let guard = handle.prepare(Operation::Import).unwrap();
+        let lock = handle.layout.store_lock();
+        let before = fs::metadata(&lock).unwrap();
+        let mut waiter = Worker::start(directory.path(), &target, "removal-waiter");
+        // The waiter has opened the lock and observed actual flock contention.
+        waiter.wait_for("PUBLICATION_PAUSED");
+        {
+            let _short = crate::locks::short_test_waits();
+            assert!(matches!(
+                handle.remove(&target),
+                Err(Error::LockTimeout { .. })
+            ));
+        }
+        drop(guard);
+        // The paused descriptor owns no lock yet. A full removal can finish
+        // before it retries, but must preserve the inode it already opened.
+        handle.remove(&target).unwrap();
+        assert!(!raw.exists());
+        assert!(!crate::recovery::pending(&handle.layout).unwrap());
+        let after = fs::metadata(&lock).unwrap();
+        assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+        waiter.proceed();
+        waiter.wait_for("REMOVAL_WAITER_ACQUIRED");
+        {
+            let _short = crate::locks::short_test_waits();
+            assert!(matches!(
+                handle.remove(&target),
+                Err(Error::LockTimeout { .. })
+            ));
+        }
+        waiter.proceed();
+        waiter.wait_for("PUBLICATION_READY");
+        waiter.finish();
+        let after = fs::metadata(&lock).unwrap();
+        assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+    }
+}
+
+pub(super) fn waiter(handle: &Store) {
+    fsutil::pause_once("lock.contended");
+    let _guard = handle.prepare(Operation::Export).unwrap();
+    println!("REMOVAL_WAITER_ACQUIRED");
+    std::io::stdout().flush().unwrap();
+    let mut instruction = String::new();
+    std::io::stdin().read_line(&mut instruction).unwrap();
+}
+
+#[test]
 fn damaged_target_declarations_are_preserved_before_removal_intent() {
     for damage in ["wrapper", "index", "manifest", "unsupported"] {
         let fixture = RemovalFixture::new();
@@ -272,7 +415,6 @@ fn unrelated_dependency_damage_blocks_all_operations_after_visible_removal() {
         Operation::List,
         Operation::Check,
         Operation::Remove,
-        Operation::Prune,
         Operation::Import,
         Operation::Pull,
         Operation::Export,
@@ -288,7 +430,6 @@ fn unrelated_dependency_damage_blocks_all_operations_after_visible_removal() {
         assert_eq!(snapshot(fixture.store.config().root()), pending);
     }
     assert!(fixture.store.check(&CheckScope::All).is_err());
-    assert!(fixture.store.prune(&PruneOptions::default()).is_err());
     assert!(
         fixture
             .store
@@ -457,10 +598,20 @@ fn terminated_public_remove_recovers_forward_or_abandons_without_unlinking() {
         // Removal retains its single exclusive guard through cleanup/clearing.
         {
             let _short = crate::locks::short_test_waits();
-            assert!(matches!(
-                fixture.store.prepare(Operation::List),
-                Err(Error::LockTimeout { .. })
-            ));
+            for operation in [
+                Operation::List,
+                Operation::Export,
+                Operation::Import,
+                Operation::Remove,
+            ] {
+                assert!(
+                    matches!(
+                        fixture.store.prepare(operation),
+                        Err(Error::LockTimeout { .. })
+                    ),
+                    "{point}: {operation:?}"
+                );
+            }
         }
         worker.child.kill().unwrap();
         worker.child.wait().unwrap();

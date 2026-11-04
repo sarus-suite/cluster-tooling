@@ -3,8 +3,8 @@
 ## Purpose and current baseline
 
 PoC v2 simplifies coordination and makes each mutation finish its own content
-lifecycle. Stages 1 through 5, including Stages 4.1 through 4.3, are implemented;
-Stages 6 through 8 remain planned. The [architecture](architecture.md) is the authoritative reference for delivered
+lifecycle. Stages 1 through 6, including Stages 4.1 through 4.3, are implemented;
+Stages 7 and 8 remain planned. The [architecture](architecture.md) is the authoritative reference for delivered
 behavior and is updated as each stage completes.
 The plans and results under `archive/` remain historical records.
 
@@ -21,7 +21,7 @@ format 2 and a single store lock, while retaining the baseline content lifecycle
 The implementation is primarily in `store`, `initialization`, and `locks` for
 preparation; `transfer`, `pull`, `staging`, `cas`, and `refs` for mutation;
 `discovery`, `inventory`, `inspection`, `graph`, `check`, and `exists` for
-queries; and `prune` for deferred reclamation. `main` and `presentation` own CLI
+queries; and `mutation` and `recovery` for recorded reclamation. `main` and `presentation` own CLI
 dispatch and output. Use the existing synthetic fixtures, fault checkpoints,
 subprocess workers, controlled registry, and disposable real-transfer harness
 described in the [development guide](development.md).
@@ -489,7 +489,7 @@ development guide records validation and its limits.
 health certificate. Pending recovery can do recorded cleanup before lookup.
 Prune remains exposed until Stage 6.
 
-### 6. Remove prune
+### 6. Remove prune (Implemented)
 
 **Prerequisites:** Stage 4's complete mutators and Stage 5's replacement of
 availability in callers and lifecycle tests.
@@ -518,6 +518,14 @@ git diff --check
 
 Also search source, tests, README, and non-archive guides for obsolete prune
 interfaces and instructions; historical comparisons in this plan may remain.
+
+**Outcome:** the prune method, public types, implementation, formatter, CLI
+command, and grace-period parser are removed. Useful regressions are retained
+under mutation, recovery, removal, and coordination tests. The CLI rejects the
+retired command as invalid usage without store or tool access. Current examples
+and guides describe immediate recorded cleanup and preserved unrecorded remnants.
+PRUNE-01 and PRUNE-02 in the acceptance inventory record the surviving evidence;
+the development guide records Stage 6 validation and its limits.
 
 **Intermediate limits:** removal of the old maintenance interface is complete,
 but list initialization remains for Stage 7. The milestone still requires the

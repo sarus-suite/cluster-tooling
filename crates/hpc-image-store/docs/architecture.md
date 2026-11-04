@@ -1,6 +1,6 @@
 # HPC image store architecture
 
-This is the authoritative architecture reference for the implemented PoC v2 Stage 5.
+This is the authoritative architecture reference for the implemented PoC v2 Stage 6.
 It describes current behavior and the guarantees that changes must preserve.
 The source and tests establish what is implemented; consequential differences
 from this contract require explicit resolution. The archived design and plan
@@ -16,8 +16,8 @@ repair, deep check, or migration of existing stores.
 
 The synchronous library owns storage behavior, preparation, locking, transfers,
 and typed diagnostics. The development CLI parses arguments and presents library
-reports. Its eight commands are `import`, `pull`, `export`, `list`, `check`,
-`exists`, `remove`, and `prune`. Presentation code formats collected reports
+reports. Its seven commands are `import`, `pull`, `export`, `list`, `check`,
+`exists`, and `remove`. Presentation code formats collected reports
 without opening the store.
 
 Each acquired ref contains one platform-specific OCI image manifest. A tag pull
@@ -25,7 +25,7 @@ may select a manifest through an OCI index or Docker manifest-list envelope,
 but retains neither that envelope nor other platforms. Complete-index storage,
 multi-platform stored images, index-parent inventory, nested-index source
 resolution, and platform-selecting index export are unsupported. Complete graph
-traversal of encountered indexes remains essential for checking and prune safety.
+traversal of encountered indexes remains essential for checking and safe reclamation.
 
 Stores coordinate cooperating processes owned by one user. Group-writable stores
 and application integration require future work. Cross-node visibility, locking,
@@ -131,7 +131,7 @@ explicit tagged ref and rejects every digest-bearing selector.
 Constructing `StoreConfig` anchors a relative path to the current working
 directory. Constructing `Store` performs no filesystem access. Import and pull
 can initialize a missing or empty store; there is no `init` command.
-Remove, export, inventory, checking, existence, and both prune modes require
+Remove, export, inventory, checking, and existence require
 an initialized store and never create a missing root or resume setup.
 
 The immediate parent must already be prepared, including persistence of the
@@ -177,7 +177,6 @@ of persistent content. There are no per-ref lock files or guards.
 | --- | --- |
 | Import, pull, remove | Exclusive |
 | Export, existence, list, check | Shared |
-| Prune, including dry-run | Exclusive |
 | Pending mutation recovery | Exclusive |
 
 Shared readers coexist. Writers serialize across all names and exclude readers.
@@ -293,7 +292,7 @@ Import and pull record staging ownership before creating staging, then record
 live addition ownership and publication intent before CAS insertion. After durable
 publication, each uses the recorded recovery path below to reclaim unused retired
 raw images and objects, remove private staging, and durably clear the record.
-Success means this entire lifecycle has finished; no grace period or prune is
+Success means this entire lifecycle has finished; no later maintenance action is
 needed for the operation's recorded candidates. Other refs' shared objects and
 required namespace prefixes survive. Unrecorded remnants remain untouched.
 
@@ -325,7 +324,7 @@ inside `Error::Recovery`, including potentially visible `RefRemoved` changes.
 There is no extra reachability preflight before unlinking. If another ref has
 unreadable declarations, removal may already be durable when cleanup fails.
 Unsafe-to-delete content and the pending record remain; ordinary operations,
-including list, check, remove, and prune, are blocked by preparation until safe
+including list, check, and remove, are blocked by preparation until safe
 recovery can finish. Recovery does not restore the removed name. Structural
 damage can therefore lock users out of ordinary store access without a built-in
 resolution. Preserve records and locks; general repair and ways to restore
@@ -390,8 +389,7 @@ They must be regular files directly inside the recorded operation's real
 producer artifacts without content or size validation. The same grammar applies
 to persisted cleanup plans and their retries. Matching symlinks, directories,
 other special entries, names in other locations, and unrelated unknown contents
-still block cleanup. This allowance does not adopt unrecorded operation trees
-or change conservative prune's treatment of tool temporaries.
+still block cleanup. This allowance does not adopt unrecorded operation trees.
 
 Recovery compares the actual terminal pointer with the recorded old and new
 states. If the old state remains, it abandons acquisition and cleans safe owned
@@ -403,7 +401,7 @@ ref. Other states block the requested operation.
 Reclamation reads authoritative roots and manifest/index declarations under
 the exclusive lock, following every supported branch, including nested indexes.
 It does not open configuration or layer files, consult display metadata, or run
-check, existence, prune, or external tools. Incomplete discovery, unreadable
+check, existence, or external tools. Incomplete discovery, unreadable
 declarations, conflicting descriptors, unsupported dependencies, and cycles
 block unsafe deletion. This traversal establishes reachability for deletion;
 it is not a content check or execution certificate.
@@ -431,8 +429,7 @@ exclusively, revalidates and rechecks pending work, and recovers. It then releas
 exclusive access and retries shared preparation, including another pending-work
 check. There is no lock upgrade and no second descriptor retained alongside a
 held operation lock. A surviving transfer continues to exclude recovery until
-its inherited locked descriptor closes. Prune dry-run also performs prerequisite
-recovery; dry-run suppresses the subsequent prune deletions.
+its inherited locked descriptor closes.
 
 `Error::InvalidMutationRecord` identifies invalid bookkeeping;
 `Error::Recovery` includes record path, available ref identity, phase, potential
@@ -505,58 +502,18 @@ Only operational errors and existing lock-wait warnings produce stderr during
 lookup; parser diagnostics and help retain normal behavior. Other commands keep
 their existing exit behavior.
 
-## Conservative pruning
+## Reclamation boundary
 
-Both modes require initialization and hold the exclusive store lock through a
-fresh authoritative ref/graph scan, candidate enumeration, and any mutation.
-This pruning work follows any prerequisite recorded recovery described above.
-Neither creates coordination files or invokes tools. Any unresolved committed-ref
-error, conflicting descriptor, unreadable namespace, or incomplete candidate inspection
-blocks all deletion, including staging cleanup. Previous check/existence
-results and cached sizes cannot authorize reclamation. Unknown contents instead
-preserve their whole cleanup directory and produce successful skips. Symlinks
-are never followed.
+Import, pull, replacement, and removal reclaim their unused recorded content
+before success. Recovery finishes interrupted recorded work under the same
+exclusive store lock. There is no public prune API, maintenance command, or
+age-based reclamation policy.
 
-Eligible content includes unreferenced regular SHA-256 CAS objects, recognized
-raw images, and abandoned acquisition directories. Directory names and contents
-must match current internal structures; partial known writes can be cleaned,
-but unknown entries, unexpected types, and tool temporaries are preserved.
-Broken committed refs are not silently removed.
-
-Content grace defaults to 24 hours, with an explicit override including zero.
-One time captured after locking is compared with blob modification times or
-staging/raw-image root modification times. This is object age, not time since
-removal. Exact boundaries are eligible; future timestamps remain ineligible.
-Reusing CAS objects preserves their age.
-
-Empty encoded ref directories are eligible immediately regardless of content
-grace. Parents needed by live refs or longer prefix-sharing names remain, as do
-the `refs/` root and permanent store lock. Prune does not scan, adopt, or reclaim
-unexpected contents beneath `locks/`. Operational namespace inspection failure
-blocks all cleanup.
-
-Before destructive cleanup with any eligible candidate, sync every scanned ref
-directory from children to parents through `refs/`, including empty and
-intermediate directories. A visible removal or replacement may have outlived a
-failed sync or interrupted publisher. This barrier prevents restoring an older
-ref after its retired content is reclaimed. It also applies to bookkeeping-only
-cleanup. Failure blocks every deletion, reports a sync diagnostic, and leaves
-eligible/removed totals zero with `scan_complete == false`. Dry-run skips this
-barrier and cannot certify its success; deletion with no eligible candidates
-also skips it.
-
-Delete in order: staging, retired raw images, CAS objects, and empty ref
-directories. Remove children before
-parents and sync affected parents after removal. Stop at the first removal or
-sync error and retain partial progress; do not roll back.
-
-Reports distinguish scan completeness, eligible candidates, visible removals,
-partial entry/byte totals, and confirmed durability. `removed` means the
-candidate's top-level name is absent; `durability_confirmed == false` records
-visible removals whose parent sync failed. A later retry cannot certify an
-earlier removal that is no longer discoverable. Logical byte counts use regular
-file lengths, counting hard links separately, without promising physical space
-savings. Empty ref-directory candidates have zero bytes.
+Unrecorded remnants remain preserved, including abandoned trees and objects
+that are not owned by an active mutation record. There is no general orphan
+collector or automatic repair. Unexpected contents beneath `locks/` are not
+adopted or reclaimed, and the permanent store-lock identity always survives
+cleanup. These limits also apply to disposable intermediate development stores.
 
 ## Source and evidence
 
@@ -564,16 +521,16 @@ savings. Empty ref-directory candidates have zero bytes.
 `transfer`, `pull`, and `subprocess` own tool interactions. `staging`, `cas`, and
 `refs` own publication. `mutation` and `recovery` own recorded operations and
 their preparation barrier. `discovery`, `inventory`, `inspection`, `graph`, `check`,
-and `exists` inspect committed identities and content. `prune` and its
-bookkeeping module perform maintenance; `main` and `presentation` handle the CLI.
+and `exists` inspect committed identities and content. `main` and `presentation`
+handle the CLI.
 
-Publication and graph fixtures, process-lock tests, existence tests, prune
-and bookkeeping tests, controlled registry fixtures, and local real-transfer
+Publication and graph fixtures, process-lock tests, existence tests, mutation
+and recovery regressions, controlled registry fixtures, and local real-transfer
 tests provide implementation evidence. The [development guide](development.md)
 records current checks and their limits. The [deferred-validation notes](deferred-validation.md)
 identify claims requiring further evidence. Upstream formats and transports are
 defined by the [OCI image layout](https://github.com/opencontainers/image-spec/blob/main/image-layout.md),
 [containers/image transports](https://github.com/containers/image/blob/main/docs/containers-transports.5.md),
 and [Skopeo copy](https://github.com/podman-container-tools/skopeo/blob/main/docs/skopeo-copy.1.md).
-The store's publication, locking, metadata, and pruning policies are local
+The store's publication, locking, metadata, and reclamation policies are local
 architectural decisions.
