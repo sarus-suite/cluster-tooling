@@ -122,6 +122,8 @@ pub struct RemoveReport {
 
 impl Store {
     /// Collect committed namespace entries and quick-check their wrapper files.
+    /// Initializes missing or empty stores beneath an already prepared parent,
+    /// and finishes recognized interrupted initialization before listing.
     /// Per-ref damage is returned in the report; no image content is read.
     pub fn list(&self) -> Result<ListReport> {
         let guard = self.prepare(Operation::List)?;

@@ -9,6 +9,7 @@ pub(crate) const DIRECTORIES: &[&str] = &[
     "tmp",
     "locks",
 ];
+pub(crate) const INIT_PENDING: &str = ".store-init-pending";
 pub(crate) const INIT_TEMP: &str = ".store-init.json";
 
 #[derive(Debug)]
@@ -21,6 +22,9 @@ impl Layout {
     }
     pub fn root(&self) -> &Path {
         &self.root
+    }
+    pub fn initialization_pending(&self) -> PathBuf {
+        self.root.join(INIT_PENDING)
     }
     pub fn marker(&self) -> PathBuf {
         self.root.join("store.json")

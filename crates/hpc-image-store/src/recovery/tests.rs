@@ -819,6 +819,16 @@ fn recovery_worker() {
                 handshake("READER_READY");
             }
         }
+        "reader-invalid-store" => {
+            assert!(matches!(
+                store.prepare(Operation::List),
+                Err(Error::UnsupportedVersion {
+                    kind: "store",
+                    version: 99
+                })
+            ));
+            handshake("READER_REJECTED");
+        }
         "orphan" => {
             let guard = store.prepare(Operation::Import).unwrap();
             let mutation = Mutation::begin(&guard, &reference, Kind::Import).unwrap();
@@ -981,29 +991,40 @@ fn recovery_itself_can_be_terminated_and_repeated() {
 #[test]
 fn readers_recheck_after_releasing_shared_and_after_recovery() {
     for point in ["recovery.reader-released", "recovery.reader-retry"] {
-        let fixture = published_fixture(None);
-        let mut reader = Worker::start(fixture.store.layout.root(), "reader", point, None);
-        reader.wait_for("PUBLICATION_PAUSED");
-        // The reader holds neither shared nor exclusive access at these points.
-        // Another action can recover first, and can leave a new record to find.
-        let guard = fixture.store.prepare(Operation::Import).unwrap();
-        let mutation = Mutation::begin(&guard, &fixture.target, Kind::Import).unwrap();
-        let stage = mutation.stage().unwrap();
-        drop(stage);
-        drop(mutation);
-        drop(guard);
-        reader.proceed();
-        reader.wait_for("READER_READY");
-        assert_clean(&fixture.store);
-        let shared = fixture.store.prepare(Operation::List).unwrap();
-        let _short = locks::short_test_waits();
-        assert!(matches!(
-            fixture.store.prepare(Operation::Remove),
-            Err(Error::LockTimeout { .. })
-        ));
-        drop(shared);
-        reader.proceed();
-        reader.finish();
+        for action in ["reader", "reader-invalid-store"] {
+            let fixture = published_fixture(None);
+            let mut reader = Worker::start(fixture.store.layout.root(), action, point, None);
+            reader.wait_for("PUBLICATION_PAUSED");
+            // The reader holds neither shared nor exclusive access at these points.
+            // Another action can recover first, and can leave a new record to find.
+            let guard = fixture.store.prepare(Operation::Import).unwrap();
+            let mutation = Mutation::begin(&guard, &fixture.target, Kind::Import).unwrap();
+            let stage = mutation.stage().unwrap();
+            drop(stage);
+            drop(mutation);
+            if action == "reader-invalid-store" {
+                fs::write(fixture.store.layout.marker(), br#"{"version":99}"#).unwrap();
+            }
+            drop(guard);
+            let before = snapshot(fixture.store.layout.root());
+            reader.proceed();
+            if action == "reader-invalid-store" {
+                reader.wait_for("READER_REJECTED");
+                assert_eq!(snapshot(fixture.store.layout.root()), before);
+            } else {
+                reader.wait_for("READER_READY");
+                assert_clean(&fixture.store);
+                let shared = fixture.store.prepare(Operation::List).unwrap();
+                let _short = locks::short_test_waits();
+                assert!(matches!(
+                    fixture.store.prepare(Operation::Remove),
+                    Err(Error::LockTimeout { .. })
+                ));
+                drop(shared);
+            }
+            reader.proceed();
+            reader.finish();
+        }
     }
 }
 

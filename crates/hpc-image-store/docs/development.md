@@ -8,8 +8,8 @@ PoC v2 Stage 2 replaces per-ref locks with one permanent store lock; the content
 lifecycle was retained through Stage 3, which adds durable mutation records and
 automatic recovery during operation preparation. Stages 4.1 through 4.3 integrate
 import, pull, and remove: success includes durable cleanup and immediate
-unused-content reclamation. Only import and pull may initialize stores; list
-initialization remains planned for Stage 7.
+unused-content reclamation. Import, pull, and list may initialize stores and
+recover recorded setup. Other operations require completed initialization.
 The crate remains private to this workspace; application integration is deferred.
 
 The [architecture](architecture.md) is authoritative. The [user guide](user-guide.md),
@@ -33,6 +33,53 @@ Rust examples remain doctests. The crate README is the short navigation entry
 point. Keep relative repository links out of the included library guide; use
 API references or self-contained explanations so generated rustdoc navigation
 also works.
+
+## PoC v2 Stage 7: list initialization and recorded setup recovery
+
+List now initializes missing or empty stores beneath a prepared immediate parent
+and resumes recognized interrupted setup. Import, pull, and list share recorded
+initialization recovery. The empty regular `.store-init-pending` file is durable
+before publication of `store.json`; it is removed only after marker durability,
+then its removal is synced. Failed attempts return errors without internal retry
+loops. Preparation finishes setup under exclusive access before mutation recovery,
+and list releases exclusive access and retries shared validation before inventory.
+Completed-store listing performs no initialization syncing and retains shared
+concurrency. Remove, exists, export, and check preserve pending setup and return
+`InitializationIncomplete`, even after marker publication.
+
+The architecture describes the protocol and compatibility boundary. Store format
+2, ref metadata schema 3, and mutation snapshot version 1 remain unchanged. Valid
+older marked format-2 stores without pending setup remain accepted; no migration
+or inference of historical unrecorded setup failures is added. Stage 8 remains
+the milestone integration and documentation closure.
+
+LIST-01 through LIST-04 in the acceptance inventory map the evidence. Tests cover
+all output formats with unavailable tools, recognized bootstrap states, setup
+and recovery termination, one-shot and persistent sync faults, pending-file
+cleanup, both setup lock handoffs, concurrent list/import initialization, shared
+reader lifetimes, unprivileged permission failures, and unchanged snapshots for
+operations that cannot initialize. Existing inventory and mutation-recovery
+coverage remains passing.
+
+On 4 November 2026, the complete crate suite passed 242 tests: 199 library tests,
+31 CLI tests, one real-transfer test, five controlled-registry tests, and six
+doctests. The six library subprocess helpers and one CLI helper remained ignored
+by top-level runners and were invoked only by their owning tests. The separately
+ignored Docker Hub smoke test was not selected; no live registry was contacted.
+Real transfers used the default disposable overlay-storage harness with Podman
+5.4.2 and Skopeo 1.18.0. Crate check, all-target Clippy with warnings denied,
+formatting verification, rustdoc with warnings denied, and diff checks passed.
+All 88 current local Markdown links and their heading anchors passed review;
+generated Store, Error, and crate documentation includes the updated interfaces.
+
+The first Cargo invocation could not write its configured cache outside the
+filesystem sandbox; checks then ran with approved cache access. During focused
+validation, an overly strict concurrency harness waited for every initializer
+while retaining shared guards, and CLI compilation caught incompatible byte-array
+lengths in a new fixture. Both were corrected before the successful final suite.
+Local tests establish ordering and failure handling, not actual crash persistence
+or Lustre/VAST cross-node qualification. Historical stage records below remain
+unchanged and describe their respective intermediate states.
 
 ## PoC v2 Stage 6: prune retirement
 
@@ -710,3 +757,14 @@ repair facility cannot reconstruct information that has been lost without a
 trustworthy source; it must not silently drop damaged refs or metadata to report
 a healthy store. No general repair is currently implemented.
 
+
+
+## Future work: initialization policy for all operations
+
+Recorded during Stage 7 as a deferred design question, outside PoC v2. Consider
+whether every operation should be capable of initializing a store and therefore
+recovering failed initialization. Assess filesystem side effects of queries,
+prepared-parent permissions, errors, and shared-reader concurrency before
+changing that policy. Stage 7 deliberately allows only import, pull, and list;
+remove, exists, export, and check preserve pending setup and return an error,
+including after marker publication. This note authorizes no implementation.

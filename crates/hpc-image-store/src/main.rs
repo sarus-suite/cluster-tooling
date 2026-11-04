@@ -71,7 +71,7 @@ enum Action {
         /// Destination containers-storage image; defaults to the source selector. Digests are enforced by Skopeo.
         destination: Option<ImageSelector>,
     },
-    /// List committed refs without checking their image content.
+    /// List committed refs, initializing missing/empty stores beneath a prepared parent.
     List {
         /// Output format (default: podman). JSON includes diagnostics and status.
         #[arg(long, value_enum)]

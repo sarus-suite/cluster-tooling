@@ -123,6 +123,8 @@ pub enum Error {
     InvalidEncoding(&'static str),
     #[error("store does not exist or is not initialized: {0}")]
     MissingStore(PathBuf),
+    #[error("store initialization is incomplete at {path}; retry with list, import, or pull")]
+    InitializationIncomplete { path: PathBuf },
     #[error("timed out acquiring lock {path} after {timeout:?}")]
     LockTimeout { path: PathBuf, timeout: Duration },
     #[error("invalid store entry {path}: {reason}")]

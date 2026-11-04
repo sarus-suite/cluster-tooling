@@ -2,7 +2,7 @@ use crate::{
     Error, Result, StoreMetadata,
     error::io_error,
     fsutil,
-    layout::{DIRECTORIES, INIT_TEMP, Layout},
+    layout::{DIRECTORIES, INIT_PENDING, INIT_TEMP, Layout},
     locks::{Operation, StoreGuard, initialization_lock},
 };
 use std::{
@@ -107,7 +107,7 @@ pub(crate) fn validate_read_prerequisites(layout: &Layout) -> Result<()> {
 }
 
 // No image data is permitted without a marker. Only our empty bootstrap tree
-// and the reserved temporary marker are safe to resume.
+// and the reserved initialization files are safe to resume.
 fn validate_scaffolding(layout: &Layout) -> Result<()> {
     fn visit(root: &Path, relative: &Path) -> Result<()> {
         let directory = root.join(relative);
@@ -121,6 +121,8 @@ fn validate_scaffolding(layout: &Layout) -> Result<()> {
             let path = root.join(&child);
             if DIRECTORIES.iter().any(|known| child == Path::new(known)) {
                 visit(root, &child)?;
+            } else if child == Path::new(INIT_PENDING) {
+                validate_pending(&path)?;
             } else if child == Path::new("locks/store.lock")
                 || child == Path::new(INIT_TEMP)
                 || child == Path::new("store.json")
@@ -144,7 +146,7 @@ pub(crate) fn initialize(layout: &Layout) -> Result<()> {
         Ok(_) => {
             require_directory(layout.root())?;
             if marker_exists(layout)? {
-                return sync_initialized(layout);
+                return recover_initialized(layout);
             }
         }
         Err(source) if source.kind() == io::ErrorKind::NotFound => {
@@ -157,20 +159,19 @@ pub(crate) fn initialize(layout: &Layout) -> Result<()> {
     }
     // A completed concurrent initializer may already have published image data.
     if marker_exists(layout)? {
-        return sync_initialized(layout);
+        return recover_initialized(layout);
     }
     if let Err(error) = validate_scaffolding(layout) {
         if marker_exists(layout)? {
-            return sync_initialized(layout);
+            return recover_initialized(layout);
         }
         return Err(error);
     }
     create_directory(&layout.root().join("locks"))?;
     let _guard = initialization_lock(layout)?;
     if marker_exists(layout)? {
-        // Release exclusive initialization locking before the initialized-store path.
-        drop(_guard);
-        return sync_initialized(layout);
+        validate_initialized(layout)?;
+        return finish_recorded_setup(layout);
     }
     validate_scaffolding(layout)?;
     fsutil::checkpoint("initialization.lock-created", layout.root())?;
@@ -208,10 +209,29 @@ pub(crate) fn initialize(layout: &Layout) -> Result<()> {
     open_regular(&layout.store_lock())?
         .sync_all()
         .map_err(|source| io_error("sync store lock", &layout.store_lock(), source))?;
+    let pending = layout.initialization_pending();
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&pending)
+    {
+        Ok(_) => (),
+        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => (),
+        Err(source) => return Err(io_error("create pending initialization", &pending, source)),
+    }
+    let record = validate_pending(&pending)?;
+    trace("pending-file-sync", &pending);
+    fsutil::checkpoint("initialization.pending-file-sync", &pending)?;
+    record
+        .sync_all()
+        .map_err(|source| io_error("sync pending initialization", &pending, source))?;
     for directory in DIRECTORIES.iter().rev() {
         sync_directory(&layout.root().join(directory), false)?;
     }
     sync_directory(layout.root(), false)?;
+    fsutil::checkpoint("initialization.pending-durable", &pending)?;
     let parent = layout
         .root()
         .parent()
@@ -229,7 +249,8 @@ pub(crate) fn initialize(layout: &Layout) -> Result<()> {
         }
     })?;
     sync_directory(layout.root(), true)?;
-    Ok(())
+    fsutil::checkpoint("initialization.marker-durable", &layout.marker())?;
+    clear_pending(layout)
 }
 
 pub(crate) fn sync_directory(path: &Path, published: bool) -> Result<()> {
@@ -252,11 +273,50 @@ pub(crate) fn sync_directory(path: &Path, published: bool) -> Result<()> {
     })
 }
 
+// Inspect without following a pending entry. Its fixed empty representation has
+// no partially written payload to repair after process termination.
+fn validate_pending(path: &Path) -> Result<File> {
+    let file = open_regular(path)?;
+    if file
+        .metadata()
+        .map_err(|source| io_error("inspect pending initialization", path, source))?
+        .len()
+        != 0
+    {
+        return Err(invalid(
+            path,
+            "pending initialization must be an empty regular file",
+        ));
+    }
+    Ok(file)
+}
+
+pub(crate) fn pending(layout: &Layout) -> Result<bool> {
+    let path = layout.initialization_pending();
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {
+            validate_pending(&path)?;
+            Ok(true)
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(io_error("inspect pending initialization", &path, source)),
+    }
+}
+
 // Marked stores need no ancestry access: that work precedes marker publication.
-fn sync_initialized(layout: &Layout) -> Result<()> {
+fn recover_initialized(layout: &Layout) -> Result<()> {
     validate_initialized(layout)?;
-    let _guard = StoreGuard::acquire(layout, Operation::Import)?;
+    let _guard = StoreGuard::acquire(layout, Operation::Recovery)?;
     validate_initialized(layout)?;
+    finish_recorded_setup(layout)
+}
+
+// Called only with exclusive access. Mutation recovery is deliberately separate:
+// it assumes initialization has already finished.
+fn finish_recorded_setup(layout: &Layout) -> Result<()> {
+    if !pending(layout)? {
+        return Ok(());
+    }
     trace("marker-sync", &layout.marker());
     let marker = open_regular(&layout.marker())?;
     fsutil::fault("initialization.marker-sync")
@@ -265,7 +325,25 @@ fn sync_initialized(layout: &Layout) -> Result<()> {
             path: layout.marker(),
             source,
         })?;
-    sync_directory(layout.root(), true)
+    sync_directory(layout.root(), true)?;
+    fsutil::checkpoint("initialization.marker-durable", &layout.marker())?;
+    clear_pending(layout)
+}
+
+fn clear_pending(layout: &Layout) -> Result<()> {
+    let path = layout.initialization_pending();
+    fsutil::fault("initialization.pending-remove")
+        .and_then(|()| fs::remove_file(&path))
+        .map_err(|source| io_error("remove pending initialization", &path, source))?;
+    trace("pending-removed", &path);
+    fsutil::checkpoint("initialization.pending-removed", &path)?;
+    trace("directory-sync", layout.root());
+    fsutil::fault("initialization.pending-remove-sync")
+        .and_then(|()| fsutil::sync_directory(layout.root()))
+        .map_err(|source| Error::InitializationDurability {
+            path: layout.root().to_owned(),
+            source,
+        })
 }
 
 // Only tests record events; production has no tracing configuration.

@@ -34,8 +34,10 @@ hpc-image-store --store /scratch/me/images export analysis/tool:release localhos
 hpc-image-store --store /scratch/me/images remove analysis/tool:release
 ```
 
-Import and pull initialize a missing or empty store beneath its prepared parent.
-There is no separate `init` command. Remove requires an initialized store and
+Import, pull, and list initialize a missing or empty store beneath its prepared parent.
+There is no separate `init` command. Failed setup is recorded; retry with list,
+import, or pull to finish initialization. Other operations preserve pending setup
+and return an error. Remove requires an initialized store and
 finishes unused-content reclamation before success, preserving shared objects
 and namespace prefixes needed by other names. Import, pull, and their replacements
 also complete their own durable staging cleanup and reclamation. Unrecorded
@@ -59,7 +61,7 @@ PoC v2 provides no repair command or recovery bypass.
 - [Administration](docs/administration.md): installation, storage preparation, and maintenance.
 - [Development and PoC handoff](docs/development.md): source orientation, tests, and current validation results.
 - [Deferred validation](docs/deferred-validation.md): qualification still needed beyond this first pass.
-- [PoC v2 implementation plan](docs/pocv2-implementation-plan.md): staged next-milestone work; current status: Stage 6.
+- [PoC v2 implementation plan](docs/pocv2-implementation-plan.md): staged next-milestone work; current status: Stage 7.
 - [Deferred PoC v3 assessment](docs/pocv3-reference-resolution-assessment.md): reference resolution, inherited Skopeo behavior, and future Sarus integration; outside PoC v2.
 
 The PoC stores one platform-specific OCI manifest per ref. A registry tag may

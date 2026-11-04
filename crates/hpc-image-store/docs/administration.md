@@ -53,14 +53,20 @@ permission in that parent. The crate creates only the store root and its
 internal structure, never missing ancestors. Do not put a store inside another
 store; initialization does not search ancestors to detect that setup error.
 
-Import and pull initialize missing or empty stores. Other operations, including
-exists, remove, list, and check, require a completed store. Remove does not create a
-root or lock bookkeeping and does not resume interrupted setup. Import and pull
-can retry interrupted setup using recognized empty setup entries and
-`.store-init.json`. Unexpected contents, unsupported markers, and incompatible reserved entries are preserved
-with errors, rather than adopted or deleted. Do not manually replace the store
-lock to force a retry. Initialization durability errors may leave a visible
-marker and are resolved only by successful subsequent syncing.
+Import, pull, and list initialize missing or empty stores and recover recognized
+interrupted setup. Exists, remove, export, and check require completed setup;
+they create no root or lock bookkeeping and do not recover pending initialization.
+List therefore creates persistent structure even when it returns an empty inventory.
+
+Setup uses recognized empty directories, `.store-init.json`, and the empty regular
+`.store-init-pending` file. The pending file is persisted before publication of
+`store.json` and removed only after that marker is durable. Failed initialization
+returns an error without internal retries. Retry with list, import, or pull to
+finish setup, including when the marker is already visible. Completed stores
+need no initialization syncing or parent access. Unexpected contents, unsupported
+markers, and incompatible reserved entries are preserved with errors, rather
+than adopted or deleted. Do not manually remove pending evidence or replace
+the permanent store lock to force a retry.
 
 Library-created directories use 0700 and files 0600, subject to umask. Existing
 permissions are preserved; Skopeo creates blob files inside private directories.

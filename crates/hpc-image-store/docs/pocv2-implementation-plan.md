@@ -3,8 +3,8 @@
 ## Purpose and current baseline
 
 PoC v2 simplifies coordination and makes each mutation finish its own content
-lifecycle. Stages 1 through 6, including Stages 4.1 through 4.3, are implemented;
-Stages 7 and 8 remain planned. The [architecture](architecture.md) is the authoritative reference for delivered
+lifecycle. Stages 1 through 7, including Stages 4.1 through 4.3, are implemented;
+Stage 8 remains planned. The [architecture](architecture.md) is the authoritative reference for delivered
 behavior and is updated as each stage completes.
 The plans and results under `archive/` remain historical records.
 
@@ -531,7 +531,7 @@ the development guide records Stage 6 validation and its limits.
 but list initialization remains for Stage 7. The milestone still requires the
 integration validation and documentation closure in Stage 8.
 
-### 7. Enable list to initialize a store
+### 7. Enable list to initialize a store (Implemented)
 
 **Prerequisites:** Stages 1 through 6, including single-lock coordination,
 format-2 initialization, and mutation recovery.
@@ -547,6 +547,18 @@ acquire the normal shared operation lock and revalidate before collecting
 inventory. Follow the existing mutation-recovery preparation rules. Listing an
 already initialized store must retain shared-reader concurrency; do not require
 exclusive access unless initialization or recovery needs it.
+
+Record interrupted setup separately from image mutations using an empty regular
+`.store-init-pending` file. Persist this file before marker publication; remove
+it only after the published marker is durable, then sync its removal. A later
+import, pull, or list finishes recorded setup under exclusive access before
+normal preparation. Initialization makes one attempt and returns failures;
+there is no internal retry loop. Completed stores without pending setup require
+no initialization syncing, so list retains shared-reader concurrency.
+Remove, exists, export, and check reject pending setup without recovering it,
+even if the store marker is already visible. Invalid pending files are preserved
+with errors. Existing valid format-2 stores without pending setup remain accepted;
+there is no migration or inference of historical unrecorded failures.
 
 Preserve existing inventory formats and reports. Listing a newly initialized
 store returns a complete empty inventory without invoking transfer tools or
@@ -576,6 +588,15 @@ cargo test --locked -p hpc-image-store --lib
 cargo test --locked -p hpc-image-store --test cli
 git diff --check
 ```
+
+**Outcome:** list initializes missing and empty stores and recovers recognized
+interrupted setup before returning a complete inventory. The durable
+`.store-init-pending` file separates unfinished setup from completed stores;
+import, pull, and list share its exclusive recovery path without internal retries.
+Completed-store listing retains shared concurrency and performs no setup syncing.
+Other operations return `InitializationIncomplete` for pending setup without
+changing it. LIST-01 through LIST-04 record passing evidence in the acceptance
+inventory, and the development guide records Stage 7 validation and limits.
 
 **Intermediate limits:** list can now create persistent store structure; its
 inventory remains a lightweight observation rather than graph validation.

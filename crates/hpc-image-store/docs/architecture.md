@@ -1,6 +1,6 @@
 # HPC image store architecture
 
-This is the authoritative architecture reference for the implemented PoC v2 Stage 6.
+This is the authoritative architecture reference for the implemented PoC v2 Stage 7.
 It describes current behavior and the guarantees that changes must preserve.
 The source and tests establish what is implemented; consequential differences
 from this contract require explicit resolution. The archived design and plan
@@ -39,6 +39,8 @@ required primitive is unavailable.
 ```text
 store/
 ├── store.json                     # Store format 2
+├── .store-init.json               # Temporary store marker during setup
+├── .store-init-pending            # Empty record while setup remains unfinished
 ├── pending-mutation.json          # Active snapshot during a recorded mutation
 ├── .pending-mutation-next.json    # Temporary replacement snapshot, when present
 ├── blobs/sha256/<digest>           # Shared immutable manifests, configs, layers
@@ -129,9 +131,9 @@ explicit tagged ref and rejects every digest-bearing selector.
 ## Initialization and preparation
 
 Constructing `StoreConfig` anchors a relative path to the current working
-directory. Constructing `Store` performs no filesystem access. Import and pull
-can initialize a missing or empty store; there is no `init` command.
-Remove, export, inventory, checking, and existence require
+directory. Constructing `Store` performs no filesystem access. Import, pull, and
+list can initialize a missing or empty store; there is no `init` command.
+Remove, export, checking, and existence require
 an initialized store and never create a missing root or resume setup.
 
 The immediate parent must already be prepared, including persistence of the
@@ -146,27 +148,50 @@ For an unmarked store, initialization proceeds as follows:
 2. Create only the root and minimum lock structure if needed, converging with concurrent creators on the same stable store lock.
 3. Take the exclusive store lock and recheck contents and any marker published by another process.
 4. Reuse recognized empty setup directories and the regular temporary marker `.store-init.json`; create missing structure and write the marker.
-5. Sync the temporary marker, lock file, internal directories from children to parents, store root, and immediate parent, in that order.
-6. Rename the temporary marker to `store.json` and sync the root before returning success.
+5. Sync the temporary marker and lock file.
+6. Create the empty regular `.store-init-pending` file and sync it.
+7. Sync internal directories from children to parents, then the store root,
+   then the immediate parent. Pending setup is now durable before marker publication.
+8. Rename the temporary marker to `store.json` and sync the root.
+9. Remove `.store-init-pending` and sync the root again before returning success.
 
-The parent sync is required on retries and when the root already exists. No
-directory above it is opened for syncing. Interruption leaves only recognized
-setup entries eligible for retry; unexpected contents are preserved with an
-error. Completed initialization needs no private recovery record.
+The parent sync is required on unmarked retries and when the root already
+exists. No directory above it is opened for syncing. Interruption leaves only
+recognized setup entries eligible for retry; unexpected contents are preserved
+with an error. Pending files must be empty regular files, never symlinks.
 
-For a marked store, import/pull preparation validates under an exclusive
-store lock and syncs the marker and root again, without opening the parent.
-Seeing a marker alone does not prove its final sync succeeded. A post-publication
-initialization failure returns `Error::InitializationDurability`, reports
-potentially visible state, and leaves the marker in place. Normal operation
-locking and validation follow either preparation path.
+Initialization attempts each step once and returns failures without an internal
+retry loop. A later import, pull, or list finishes recorded setup under exclusive
+access. Before marker publication, it validates and resumes the recognized
+scaffolding. After publication, it validates the initialized structure, syncs the
+marker and root without opening the parent, then removes the pending file and
+syncs its removal. The published marker is durable before pending evidence is
+removed, so a record restored by a crash can safely be recovered again.
+Post-publication sync failures return `Error::InitializationDurability` and leave
+the marker visible; cleanup failures are errors too. Pending evidence is kept
+until its removal is safe and is separate from image-mutation records.
+
+Preparation checks pending setup under the store lock before mutation recovery
+or content access. Remove, export, checking, and existence reject it with
+`Error::InitializationIncomplete`, even when `store.json` is visible. They do
+not finish setup. Retry using import, pull, or list. Invalid pending entries are
+preserved with contextual errors.
+
+Completed marked stores without pending setup need no initialization syncing.
+List holds shared access normally. If setup is needed, it releases any shared
+guard, initializes or recovers under exclusive access, then releases that guard
+and retries shared preparation and validation before collecting inventory.
+There is no in-place lock upgrade. Existing valid format-2 stores without the
+new pending file remain accepted as complete; historical unrecorded setup
+failures are not inferred or repaired. There is no migration.
 
 Created directories use mode 0700 and files 0600, subject to umask; existing
 permissions are preserved. Skopeo chooses blob permissions inside private
 directories. Reserved setup directories must be real directories; markers and
 lock files must be regular files. Committed ref pointers are intentionally
-symlinks. Read operations create no coordination bookkeeping. Their preparation
-can first finish recorded recovery under exclusive access, as described below.
+symlinks. List can create store structure during setup. Other queries create no
+coordination bookkeeping. Query preparation can first finish recorded mutation
+recovery under exclusive access, as described below.
 
 ## Coordination and process lifetime
 
@@ -176,7 +201,7 @@ of persistent content. There are no per-ref lock files or guards.
 | Operation | Store lock |
 | --- | --- |
 | Import, pull, remove | Exclusive |
-| Export, existence, list, check | Shared |
+| Export, existence, list, check | Shared (list uses exclusive access for required setup) |
 | Pending mutation recovery | Exclusive |
 
 Shared readers coexist. Writers serialize across all names and exclude readers.
@@ -341,8 +366,8 @@ staged copies and hard links disappear during successful cleanup.
 Stage 3 supplies recorded mutation primitives and automatic recovery in every
 operation's preparation. Stages 4.1 through 4.3 integrate public import, pull,
 and remove with that protocol. Legacy unrecorded remnants are not automatically
-recovered. There is no recovery command or public method. Only import and pull
-may initialize stores at this stage; format 2/schema 3 remain unchanged.
+recovered. There is no recovery command or public method. Import, pull, and list
+may initialize stores and recover pending setup; format 2/schema 3 remain unchanged.
 Intermediate format-2 stores may be recreated as the protocol is completed;
 compatibility between incomplete stages is not promised.
 
@@ -468,9 +493,9 @@ every descriptor declaration is checked. Conflicting declarations and cycles
 are errors. No blob hashing, decompression, unpacking, or comparison of cached
 display fields against graph-derived values is performed. Same-size corruption
 and invalid tar/compressed data can pass. Passing a check does not certify
-execution or validate public index workflows. Read operations create no
-coordination bookkeeping. Pending recorded recovery may change persistent
-content before the requested query starts.
+execution or validate public index workflows. List may initialize a store as
+specified above; other queries create no coordination bookkeeping. Pending
+recorded mutation recovery may change persistent content before a query starts.
 
 `Store::exists(&ImageSelector) -> Result<bool>` observes identity under the shared
 store lock, after any prerequisite recorded recovery. It replaces availability

@@ -318,6 +318,11 @@ fn malformed_non_utf8_namespace_paths_remain_visible_in_json() {
 }
 impl InventoryFixture {
     fn new() -> Self {
+        let fixture = Self::uninitialized();
+        fixture.import("tool:t");
+        fixture
+    }
+    fn uninitialized() -> Self {
         use std::{fs, os::unix::fs::PermissionsExt};
         let directory = tempfile::tempdir().unwrap();
         fs::write(
@@ -330,9 +335,7 @@ impl InventoryFixture {
             fs::write(&path, PRODUCER).unwrap();
             fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let fixture = Self { directory };
-        fixture.import("tool:t");
-        fixture
+        Self { directory }
     }
     fn root(&self) -> std::path::PathBuf {
         self.directory.path().join("store")
@@ -472,7 +475,7 @@ fn inventory_formats_and_digest_export_use_the_collected_identities() {
 }
 
 #[test]
-fn inventory_usage_errors_and_missing_store_are_distinct() {
+fn inventory_usage_errors_do_not_initialize_but_valid_list_does() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("missing");
     let digest = format!("sha256:{}", "a".repeat(64));
@@ -508,8 +511,9 @@ fn inventory_usage_errors_and_missing_store_are_distinct() {
         .arg("list")
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    assert!(!root.exists());
+    assert_eq!(output.status.code(), Some(0));
+    assert!(root.join("store.json").exists());
+    assert!(output.stderr.is_empty());
 }
 
 #[test]
@@ -793,6 +797,7 @@ fn cleanup_failure_worker() {
 fn exercise_cleanup_failure() {
     assert_ne!(unsafe { libc::geteuid() }, 0);
     exercise_exists_permissions();
+    exercise_list_initialization_permissions();
     for (json, failure) in [
         (false, "remove"),
         (true, "remove"),
@@ -1672,5 +1677,286 @@ fn exercise_exists_permissions() {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
             assert_exists_output(&output, 125);
         }
+    }
+}
+
+#[test]
+fn list_initializes_and_recovers_setup_in_every_output_format_without_tools() {
+    use std::fs;
+    for scenario in ["missing", "empty", "bootstrap", "published-pending"] {
+        for args in [
+            vec!["list"],
+            vec!["list", "--digests"],
+            vec!["list", "--format", "full"],
+            vec!["list", "--format", "json"],
+            vec!["--json", "list"],
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join("store");
+            match scenario {
+                "empty" => fs::create_dir(&root).unwrap(),
+                "bootstrap" => {
+                    fs::create_dir_all(root.join("locks")).unwrap();
+                    fs::write(root.join("locks/store.lock"), b"").unwrap();
+                    fs::write(root.join(".store-init.json"), b"unfinished JSON").unwrap();
+                    fs::write(root.join(".store-init-pending"), b"").unwrap();
+                }
+                "published-pending" => {
+                    initialize_fixture_store(&root);
+                    fs::write(root.join(".store-init-pending"), b"").unwrap();
+                }
+                _ => (),
+            }
+            let output = cli()
+                .arg("--store")
+                .arg(&root)
+                .args([
+                    "--podman",
+                    "/unavailable/podman",
+                    "--skopeo",
+                    "/unavailable/skopeo",
+                ])
+                .args(&args)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{scenario} {args:?}: {output:?}"
+            );
+            assert!(output.stderr.is_empty());
+            if args.contains(&"json") || args.contains(&"--json") {
+                let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(report["complete"], true);
+                assert_eq!(report["entries"], serde_json::json!([]));
+                assert_eq!(report["diagnostics"], serde_json::json!([]));
+            } else {
+                assert!(!output.stdout.is_empty());
+            }
+            let metadata: serde_json::Value =
+                serde_json::from_slice(&fs::read(root.join("store.json")).unwrap()).unwrap();
+            assert_eq!(metadata["version"], 2);
+            assert!(!root.join(".store-init-pending").exists());
+            assert!(!root.join(".store-init.json").exists());
+        }
+    }
+}
+
+#[test]
+fn list_setup_errors_preserve_existing_data_and_do_not_create_ancestors() {
+    use std::fs;
+    for scenario in [
+        "ancestors",
+        "foreign",
+        "populated",
+        "bad-pending",
+        "pending-symlink",
+        "old-format",
+        "unsupported",
+        "damaged",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = if scenario == "ancestors" {
+            directory.path().join("missing/parent/store")
+        } else {
+            directory.path().join("store")
+        };
+        match scenario {
+            "ancestors" => (),
+            "foreign" => {
+                fs::create_dir(&root).unwrap();
+                fs::write(root.join("keep"), b"sentinel").unwrap();
+            }
+            "populated" => {
+                fs::create_dir_all(root.join("refs")).unwrap();
+                fs::write(root.join("refs/keep"), b"sentinel").unwrap();
+            }
+            "bad-pending" => {
+                fs::create_dir(&root).unwrap();
+                fs::write(root.join(".store-init-pending"), b"sentinel").unwrap();
+            }
+            "pending-symlink" => {
+                fs::create_dir(&root).unwrap();
+                std::os::unix::fs::symlink("outside", root.join(".store-init-pending")).unwrap();
+            }
+            _ => {
+                initialize_fixture_store(&root);
+                if scenario == "damaged" {
+                    fs::remove_dir(root.join("raw_images")).unwrap();
+                } else {
+                    fs::write(
+                        root.join("store.json"),
+                        if scenario == "old-format" {
+                            &br#"{"version":1}"#[..]
+                        } else {
+                            &br#"{"version":99}"#[..]
+                        },
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        let before = snapshots::snapshot(directory.path());
+        for args in [vec!["list"], vec!["--json", "list"]] {
+            let output = cli().arg("--store").arg(&root).args(args).output().unwrap();
+            assert_eq!(output.status.code(), Some(1), "{scenario}: {output:?}");
+            assert!(output.stdout.is_empty());
+            assert!(!output.stderr.is_empty());
+            assert_eq!(snapshots::snapshot(directory.path()), before, "{scenario}");
+        }
+    }
+}
+
+#[test]
+fn noninitializing_commands_preserve_pending_setup_before_and_after_publication() {
+    use std::fs;
+    for published in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("store");
+        initialize_fixture_store(&root);
+        fs::write(root.join(".store-init-pending"), b"").unwrap();
+        if !published {
+            fs::rename(root.join("store.json"), root.join(".store-init.json")).unwrap();
+        }
+        let before = snapshots::snapshot(&root);
+        for json in [false, true] {
+            for args in [
+                vec!["remove", "missing:t"],
+                vec!["exists", "missing:t"],
+                vec!["export", "missing:t"],
+                vec!["check", "--all"],
+            ] {
+                let mut command = cli();
+                command.arg("--store").arg(&root).args([
+                    "--podman",
+                    "/unavailable/podman",
+                    "--skopeo",
+                    "/unavailable/skopeo",
+                ]);
+                if json {
+                    command.arg("--json");
+                }
+                let output = command.args(&args).output().unwrap();
+                assert_eq!(
+                    output.status.code(),
+                    Some(if args[0] == "exists" { 125 } else { 1 })
+                );
+                assert!(output.stdout.is_empty());
+                let error = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    error.contains("initialization is incomplete")
+                        && error.contains("list, import, or pull"),
+                    "{error}"
+                );
+                assert_eq!(snapshots::snapshot(&root), before);
+            }
+        }
+    }
+}
+
+fn exercise_list_initialization_permissions() {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    assert_ne!(unsafe { libc::geteuid() }, 0);
+    let directory = tempfile::tempdir().unwrap();
+    let parent = directory.path().join("prepared");
+    fs::create_dir(&parent).unwrap();
+    let root = parent.join("store");
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o500)).unwrap();
+    let output = cli()
+        .arg("--store")
+        .arg(&root)
+        .arg("list")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Permission denied"));
+    assert!(!root.exists());
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        cli()
+            .arg("--store")
+            .arg(&root)
+            .arg("list")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::write(root.join(".store-init-pending"), b"").unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o500)).unwrap();
+    let before = snapshots::snapshot(&root);
+    let output = cli()
+        .arg("--store")
+        .arg(&root)
+        .args(["--json", "list"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(!output.stderr.is_empty());
+    assert_eq!(snapshots::snapshot(&root), before);
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        cli()
+            .arg("--store")
+            .arg(&root)
+            .arg("list")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn concurrent_cli_lists_and_import_initialization_return_complete_inventories() {
+    use std::{
+        process::Stdio,
+        time::{Duration, Instant},
+    };
+    for import in [false, true] {
+        let fixture = InventoryFixture::uninitialized();
+        let mut children: Vec<_> = (0..4)
+            .map(|index| {
+                let mut command = fixture.command();
+                if import && index == 0 {
+                    command.args(["--json", "import", "source:tag", "tool:t"]);
+                } else {
+                    command.args(["--json", "list"]);
+                }
+                command
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        for child in &mut children {
+            while child.try_wait().unwrap().is_none() {
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    panic!("concurrent CLI initialization did not complete");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        for (index, child) in children.into_iter().enumerate() {
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(output.stderr.is_empty());
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            if !(import && index == 0) {
+                assert_eq!(report["complete"], true);
+                assert_eq!(report["diagnostics"], serde_json::json!([]));
+                assert!(report["entries"].as_array().unwrap().len() <= usize::from(import));
+            }
+        }
+        assert_eq!(
+            fixture.report()["entries"].as_array().unwrap().len(),
+            usize::from(import)
+        );
+        assert!(!fixture.root().join(".store-init-pending").exists());
     }
 }

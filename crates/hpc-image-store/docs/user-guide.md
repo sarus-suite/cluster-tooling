@@ -147,6 +147,7 @@ hpc-image-store --store /scratch/me/images check analysis/tool:release
 hpc-image-store --store /scratch/me/images --json check --all
 ```
 
+
 The default inventory follows `podman images`: repository, tag, shortened OCI
 config image ID, creation age, and stored content size. `--digests` adds the
 full stored root. `--format full` exposes metadata, paths, status, and full
@@ -168,6 +169,14 @@ Inventory inspects small wrapper files without traversing image content.
 Healthy entries are therefore `unverified`. Damaged entries remain visible,
 and collected results are printed even when damage or incomplete enumeration
 causes status 1. Non-UTF-8 paths have quoted byte-escaped representations.
+
+List initializes missing or empty stores beneath an already prepared immediate
+parent, and resumes recognized interrupted initialization. It can therefore
+create persistent store structure and return a complete empty inventory, without
+Podman or Skopeo. Failed setup returns an error without internal retries;
+retry list, import, or pull to finish it.
+Remove, exists, export, and check do not initialize or recover pending setup,
+even when a store marker is already visible.
 
 Check accepts one selector or `--all` and traverses the supported local graph,
 including encountered nested indexes and all their dependencies. It verifies
@@ -249,7 +258,7 @@ separately requested pull resolves its source normally.
 
 | Symptom | Action |
 | --- | --- |
-| Store cannot initialize | Check the prepared immediate parent and its open/sync permissions; missing ancestors are not created. |
+| Store cannot initialize | Check the prepared immediate parent and its open/sync permissions; missing ancestors are not created. Retry with list, import, or pull after resolving the cause. Preserve pending setup files. |
 | Destination already exists | Inspect it and choose an unused name or request explicit replacement. Existence is an observation, not a reservation. |
 | Export cannot preserve content | Check Skopeo capability and representation support; no conversion fallback is available. |
 | Digest cannot be resolved | Use a stored root under the same literal repository. Resolve damaged candidates before treating an incomplete search as absence. |

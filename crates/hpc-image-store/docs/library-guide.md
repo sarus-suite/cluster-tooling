@@ -27,9 +27,17 @@ queries may temporarily require exclusive access for this prerequisite, then
 retry under their normal shared lock. A clean preparation performs no content
 graph traversal. Unrecorded remnants are not automatically recovered.
 
-Import, pull, and remove record their complete mutation lifecycle. Only import
-and pull may initialize a missing or empty store at this stage. Remove requires
-an initialized store and never creates a missing root or resumes setup.
+Import, pull, and remove record their complete mutation lifecycle. Import, pull,
+and list may initialize a missing or empty store beneath an already prepared
+parent and recover recorded interrupted setup. List returns a complete empty
+inventory for a newly initialized store. Remove, exists, export, and check require
+completed initialization and never create a missing root or resume setup.
+
+Initialization records pending setup separately from image mutations. A failed
+attempt returns without an internal retry loop; retry through import, pull, or
+list to finish it under exclusive access. List then reacquires shared access
+and revalidates before collecting inventory. Completed-store listing retains
+shared-reader concurrency and performs no initialization syncing.
 
 Checking returns collected damage as a report, while store and selection
 failures return typed errors:
@@ -251,6 +259,10 @@ typed `Error` values with context. List and check can instead return
 collected reports containing failures; check their `has_errors()` methods.
 `exists` returns false only for definite absence in a valid initialized store.
 It returns typed errors when preparation or identity resolution cannot finish.
+
+`Error::InitializationIncomplete` identifies pending setup that the requested
+operation cannot recover. Retry with list, import, or pull; other operations
+preserve pending setup even when the store marker is visible.
 
 `Error::InvalidMutationRecord` identifies invalid durable bookkeeping.
 `Error::Recovery` reports the record path, available ref identity, phase,
