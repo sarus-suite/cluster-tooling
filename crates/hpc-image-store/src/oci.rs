@@ -71,6 +71,10 @@ fn inspect_roots(layout: &Path) -> std::result::Result<Vec<Descriptor>, Finding>
             },
         ));
     }
+    inspect_index_roots(layout)
+}
+
+fn inspect_index_roots(layout: &Path) -> std::result::Result<Vec<Descriptor>, Finding> {
     let index_path = layout.join("index.json");
     let index: LayoutIndex = parse(&index_path)?;
     if index.version != 2
@@ -113,7 +117,20 @@ pub(crate) fn single_root(layout: &Path) -> Result<Descriptor> {
 }
 
 pub(crate) fn inspect_single_root(layout: &Path) -> std::result::Result<Descriptor, Finding> {
-    let mut roots = inspect_roots(layout)?;
+    single_root_descriptor(layout, inspect_roots(layout)?)
+}
+
+/// Read only the authoritative identity, without inspecting unrelated wrappers.
+pub(crate) fn index_root(layout: &Path) -> Result<Descriptor> {
+    inspect_index_roots(layout)
+        .and_then(|roots| single_root_descriptor(layout, roots))
+        .map_err(Finding::into_error)
+}
+
+fn single_root_descriptor(
+    layout: &Path,
+    mut roots: Vec<Descriptor>,
+) -> std::result::Result<Descriptor, Finding> {
     let index_path = layout.join("index.json");
     if roots.len() != 1 {
         return Err(Finding::wrapper(

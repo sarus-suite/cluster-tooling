@@ -20,8 +20,11 @@ use std::{
 #[path = "removal_tests.rs"]
 mod removal_tests;
 
-#[path = "availability/tests.rs"]
-mod availability_tests;
+#[path = "exists_tests.rs"]
+mod exists_tests;
+
+#[path = "check_regression_tests.rs"]
+mod check_regression_tests;
 
 #[path = "prune/bookkeeping_tests.rs"]
 mod bookkeeping_tests;
@@ -990,8 +993,8 @@ fn publication_worker() {
         println!("PUBLICATION_READY");
         return;
     }
-    if action.starts_with("availability-") {
-        availability_tests::worker(&handle, &reference, &action);
+    if action.starts_with("exists-") {
+        exists_tests::worker(&handle, &reference, &action);
         println!("PUBLICATION_READY");
         return;
     }

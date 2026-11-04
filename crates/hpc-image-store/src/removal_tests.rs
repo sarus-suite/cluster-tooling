@@ -276,7 +276,7 @@ fn unrelated_dependency_damage_blocks_all_operations_after_visible_removal() {
         Operation::Import,
         Operation::Pull,
         Operation::Export,
-        Operation::Availability,
+        Operation::Exists,
     ] {
         assert!(
             matches!(
@@ -292,7 +292,7 @@ fn unrelated_dependency_damage_blocks_all_operations_after_visible_removal() {
     assert!(
         fixture
             .store
-            .availability(&ImageSelector::new(fixture.keeper.as_str()).unwrap())
+            .exists(&ImageSelector::new(fixture.keeper.as_str()).unwrap())
             .is_err()
     );
     // Restore known fixture bytes only: production has no automatic repair.

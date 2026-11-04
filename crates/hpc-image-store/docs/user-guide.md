@@ -66,8 +66,8 @@ metadata alone does not prevent reclamation. `--replace` is not a repair command
 
 ## Names and digests
 
-Import, pull, export, and single-image check use `name[:tag][@digest]`. Supply a
-repository name and at least a tag or digest. Registry ports work. Names retain
+Import, pull, export, exists, and single-image check use `name[:tag][@digest]`.
+Supply a repository name and at least a tag or digest. Registry ports work. Names retain
 their spelling: `alpine` and `docker.io/library/alpine` are different repositories.
 No `latest` tag or registry prefix is inferred. Bare digests, image IDs,
 transport URLs, and embedded storage settings are rejected. Digests require
@@ -180,6 +180,31 @@ hold a shared store lock throughout inspection and observe a stable namespace.
 Import, pull, remove, and prune take the exclusive store lock and wait for
 readers; writers targeting different names also serialize.
 
+## Test local existence
+
+```sh
+hpc-image-store --store /scratch/me/images exists analysis/tool:release
+hpc-image-store --store /scratch/me/images exists 'analysis/tool@sha256:<stored-root>'
+```
+
+`exists` emits no result text or JSON, even with global `--json`. Its exit status
+is 0 for present, 1 for definitely absent, 125 for an operational error, and 2
+for invalid usage. Operational errors print contextual diagnostics to stderr;
+lock-wait warnings may also appear. Help retains normal parser behavior.
+
+A tagged name counts when its terminal entry exists, even if the pointer is
+dangling or malformed. An encoded directory used only by a longer name does not
+count. A repository-qualified digest compares authoritative stored roots and
+ignores any supplied tag. Lookup retains literal repository spelling and does
+not use config IDs, cached metadata, provenance aliases, or remote freshness.
+Incomplete relevant discovery or unreadable candidate indexes are errors when
+no definite match can be established.
+
+The store must already be initialized. Pending recorded recovery runs first and
+can perform cleanup or block the query. Clean lookup reads no blobs and performs
+no graph validation or tool invocation. Presence reserves nothing for a later
+operation and does not establish image health; request `check` explicitly.
+
 ## Remove refs and reclaim content
 
 ```sh
@@ -213,7 +238,7 @@ The commands above illustrate that separate maintenance interface.
 Prune requires an initialized store in both modes. It performs a fresh complete
 scan and preserves all content if unresolved committed-ref damage or an
 operational inspection failure prevents safe deletion. Unknown contents are
-preserved and reported as successful skips. Existing checks or availability
+preserved and reported as successful skips. Existing checks or existence
 observations never authorize later pruning.
 
 Content grace defaults to 24 hours of object age, not time since removal.
@@ -239,9 +264,10 @@ is visible but its parent sync failed. Review diagnostics as well as totals.
 
 ## Output and troubleshooting
 
-Status 0 means success, 1 means an operation or collected check/report failed,
-and 2 means invalid CLI usage. JSON results go to stdout, with diagnostics,
-skips, and warnings on stderr. Tools' output is captured so it cannot corrupt
+For commands other than `exists`, status 0 means success, 1 means an operation
+or collected check/report failed, and 2 means invalid CLI usage. The silent
+`exists` command uses the presence/error statuses described above. JSON results
+go to stdout, with diagnostics, skips, and warnings on stderr. Tools' output is captured so it cannot corrupt
 JSON. A store-preparation or selector-resolution failure may occur before any
 JSON report exists. Successful import and pull finish durable cleanup and
 reclamation. Their cleanup failures return status 1
@@ -253,7 +279,7 @@ separately requested pull resolves its source normally.
 | Symptom | Action |
 | --- | --- |
 | Store cannot initialize | Check the prepared immediate parent and its open/sync permissions; missing ancestors are not created. |
-| Destination already exists | Inspect it and choose an unused name or request explicit replacement. Availability is an observation, not a reservation. |
+| Destination already exists | Inspect it and choose an unused name or request explicit replacement. Existence is an observation, not a reservation. |
 | Export cannot preserve content | Check Skopeo capability and representation support; no conversion fallback is available. |
 | Digest cannot be resolved | Use a stored root under the same literal repository. Resolve damaged candidates before treating an incomplete search as absence. |
 | Lock wait or timeout | Check active transfers, including surviving copy children. Do not delete lock files to break contention. |

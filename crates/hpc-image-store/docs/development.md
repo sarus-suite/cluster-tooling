@@ -1,9 +1,9 @@
 # Development and PoC handoff
 
-The first PoC implements single-platform containers-storage import/export,
+The current PoC implements single-platform containers-storage import/export,
 manifest-preserving registry pull, inventory, structural graph checking,
-explicit ref removal, conservative pruning, and library-only availability.
-The CLI has seven commands. Store format 2 and ref metadata schema 3 are used.
+explicit ref removal, conservative pruning, and lightweight existence queries.
+The CLI has eight commands. Store format 2 and ref metadata schema 3 are used.
 PoC v2 Stage 2 replaces per-ref locks with one permanent store lock; the content
 lifecycle was retained through Stage 3, which adds durable mutation records and
 automatic recovery during operation preparation. Stages 4.1 through 4.3 integrate
@@ -24,7 +24,7 @@ results and design/planning context; they do not prescribe future work.
 | Preparation and coordination | `store`, `initialization`, `layout`, `locks`; initialization and subprocess tests |
 | Transfers and publication | `transfer`, `pull`, `subprocess`, `staging`, `cas`, `refs`; publication fixtures and controlled tool tests |
 | Recorded mutations and recovery | `mutation`, `recovery`, and dependency-only traversal in `graph`; recorded synthetic fixtures, fault checkpoints, and a subprocess worker |
-| Inspection | `discovery`, `inventory`, `inspection`, `graph`, `check`, `availability`; complete graph and availability tests |
+| Inspection | `discovery`, `inventory`, `inspection`, `graph`, `check`, `exists`; complete graph and existence tests |
 | Maintenance | `prune` and its bookkeeping module; reachability, partial-removal, namespace-sync, and empty-ref-directory regressions |
 | CLI and presentation | `main`, `presentation`; CLI integration tests, human/JSON parity |
 | Real tools | `tests/real_transfers.rs`, `tests/registry_pull.rs`, shared disposable-storage and registry fixtures |
@@ -34,6 +34,58 @@ Rust examples remain doctests. The crate README is the short navigation entry
 point. Keep relative repository links out of the included library guide; use
 API references or self-contained explanations so generated rustdoc navigation
 also works.
+
+## PoC v2 Stage 5: lightweight existence
+
+Stage 5 replaces the former availability method and diagnostic types with
+`Store::exists(&ImageSelector) -> Result<bool>`, and adds the silent `exists`
+CLI command. Preparation still requires a completed store, retains shared
+access for lookup, and finishes pending recorded recovery under exclusive
+access before retrying. Only import and pull initialize stores; list
+initialization remains Stage 7 work. Prune remains until Stage 6.
+
+Name existence inspects the terminal entry without following it. Digest
+existence reads authoritative root indexes through confined pointers, without
+requiring cached metadata, other raw-image wrappers, or CAS content. It accepts
+a readable match despite other damage, but returns incomplete resolution when
+absence cannot be established. Explicit check retains structural validation.
+The architecture and user/library guides describe these boundaries and the
+CLI's 0/1/125/2 status contract, including silent `--json` behavior.
+
+EXISTS-01 through EXISTS-07 in the acceptance inventory identify the evidence.
+Tests reuse encoded-prefix and synthetic-index fixtures, recorded mutations,
+regular-file-open tracking, snapshots, short lock thresholds, unprivileged
+permission workers, and bounded subprocess handshakes. Existing acquisition
+race and prune-safety tests now use existence. Unique former availability
+health regressions run through explicit check, and the real-transfer lifecycle
+uses the new boolean API.
+
+On 4 November 2026, the complete crate suite passed 256 tests: 213 library
+tests, 30 CLI tests, one real-transfer test, five controlled-registry tests,
+and seven doctests. The six library subprocess helpers and one CLI helper
+remained ignored by the top-level runners and were invoked only by their
+owning tests. The separately ignored Docker Hub smoke test was not selected;
+no live registry was contacted. Real transfers used the documented disposable
+storage harness with Podman 5.4.2 and Skopeo 1.18.0.
+
+Crate check, all-target Clippy with warnings denied, formatting verification,
+rustdoc with warnings denied, and diff checks passed. All 88 current local
+Markdown links were checked, and generated crate/Store navigation exposes
+`exists` without links to removed availability types. Historical archive
+records remain unchanged.
+
+Cargo needed access to its configured build cache outside the filesystem
+sandbox. Initial validation found an incorrect fixture blob-directory path,
+remaining availability calls in the real-transfer target, migrated health tests
+that assumed availability's diagnostic paths rather than check's established
+reporting, and redundant boolean pattern assertions caught by Clippy. These
+were corrected before the passing complete run and final static checks.
+
+Local tests establish ordering, confinement, coordination, and failure handling;
+they do not qualify power-loss persistence or Lustre/VAST cross-node behavior.
+Existence reserves nothing and provides no structural-health or execution
+certificate. Recovery remains a prerequisite and can block ordinary access;
+this stage adds no repair or bypass. Stages 6 through 8 remain planned.
 
 ## PoC v2 Stage 4.3: complete recorded removal
 
@@ -464,8 +516,8 @@ selected by ordinary Cargo tests. Run checks once after changes settle; repeat
 only affected checks when a failure or subsequent change justifies it.
 
 The suite covers initialization/retry and permissions, publication boundaries,
-immutable insertion races, complete nested-index graph traversal, availability
-outcomes and acquisition races, prune reachability and grace, unknown-content
+immutable insertion races, complete nested-index graph traversal, existence
+semantics and acquisition races, prune reachability and grace, unknown-content
 preservation, partial removal/sync failures, CLI reports, and process-lock
 lifetimes. Synthetic OCI fixtures and narrow test-only fault injection cover
 failure paths; readiness handshakes and bounded waits coordinate processes.

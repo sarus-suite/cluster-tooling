@@ -1,8 +1,7 @@
 //! Empty namespace reclamation and permanent store-lock coordination.
 use super::*;
 use crate::{
-    ImageAvailability, ImageSelector, PruneKind, PruneOptions, PrunePhase, PruneReport, locks,
-    test_snapshot::snapshot,
+    ImageSelector, PruneKind, PruneOptions, PrunePhase, PruneReport, locks, test_snapshot::snapshot,
 };
 
 fn prune(handle: &Store) -> PruneReport {
@@ -75,10 +74,7 @@ fn missing_lookups_create_no_bookkeeping_and_namespace_cleanup_requires_the_barr
     drop(handle.prepare(Operation::Import).unwrap());
     let selected = ImageSelector::new("missing:tag").unwrap();
     let before = snapshot(temporary.path());
-    assert!(matches!(
-        handle.availability(&selected),
-        Ok(ImageAvailability::Missing)
-    ));
+    assert!(matches!(handle.exists(&selected), Ok(false)));
     prune(&handle);
     assert_eq!(snapshot(temporary.path()), before);
     assert!(!temporary.path().join("locks/refs").exists());

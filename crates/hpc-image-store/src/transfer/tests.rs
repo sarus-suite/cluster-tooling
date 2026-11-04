@@ -434,23 +434,17 @@ fn destination_exists_is_checked_before_tools_and_reuse_preserves_blob_age() {
 }
 
 #[test]
-fn availability_observations_do_not_reserve_import_destinations_or_invoke_tools() {
-    use crate::{ImageAvailability, locks::Operation, test_snapshot::snapshot};
+fn exists_observations_do_not_reserve_import_destinations_or_invoke_tools() {
+    use crate::{locks::Operation, test_snapshot::snapshot};
     let fixture = Fixture::new();
     drop(fixture.store.prepare(Operation::Import).unwrap());
     let selected = parse_selector(fixture.reference.as_str());
-    assert!(matches!(
-        fixture.store.availability(&selected),
-        Ok(ImageAvailability::Missing)
-    ));
+    assert!(matches!(fixture.store.exists(&selected), Ok(false)));
     // Another acquisition wins after the observation and before our next call.
     fixture.import(false).unwrap();
     let before = snapshot(fixture.store.config().root());
     let calls = fixture.log().len();
-    assert!(matches!(
-        fixture.store.availability(&selected),
-        Ok(ImageAvailability::Ready)
-    ));
+    assert!(matches!(fixture.store.exists(&selected), Ok(true)));
     assert!(matches!(fixture.import(false), Err(Error::RefExists(_))));
     assert_eq!(fixture.log().len(), calls);
     assert_eq!(snapshot(fixture.store.config().root()), before);
@@ -460,16 +454,10 @@ fn availability_observations_do_not_reserve_import_destinations_or_invoke_tools(
         fs::remove_file(executable).unwrap();
     }
     let before = snapshot(fixture.store.config().root());
-    assert!(matches!(
-        fixture.store.availability(&selected),
-        Ok(ImageAvailability::Ready)
-    ));
+    assert!(matches!(fixture.store.exists(&selected), Ok(true)));
     assert_eq!(snapshot(fixture.store.config().root()), before);
     fs::remove_file(fixture.store.layout.blobs().join(CONFIG_DIGEST)).unwrap();
-    assert!(matches!(
-        fixture.store.availability(&selected),
-        Ok(ImageAvailability::Unusable { .. })
-    ));
+    assert!(matches!(fixture.store.exists(&selected), Ok(true)));
     assert_eq!(fixture.log().len(), calls);
 }
 
@@ -1251,7 +1239,7 @@ fn orphaned_transfer_retains_store_lock_and_inherits_environment() {
         let unused_ref = LocalRef::new("unused:tag").unwrap();
         fixture
             .store
-            .availability(&parse_selector(unused_ref.as_str()))
+            .exists(&parse_selector(unused_ref.as_str()))
             .unwrap();
 
         let store_inode = fs::metadata(fixture.store.layout.store_lock())

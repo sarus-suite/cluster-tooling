@@ -1,6 +1,6 @@
 # HPC image store architecture
 
-This is the authoritative architecture reference for the implemented PoC v2 Stage 4.3.
+This is the authoritative architecture reference for the implemented PoC v2 Stage 5.
 It describes current behavior and the guarantees that changes must preserve.
 The source and tests establish what is implemented; consequential differences
 from this contract require explicit resolution. The archived design and plan
@@ -16,9 +16,9 @@ repair, deep check, or migration of existing stores.
 
 The synchronous library owns storage behavior, preparation, locking, transfers,
 and typed diagnostics. The development CLI parses arguments and presents library
-reports. Its seven commands are `import`, `pull`, `export`, `list`, `check`,
-`remove`, and `prune`. Availability is a library-only query. Presentation code
-formats collected reports without opening the store.
+reports. Its eight commands are `import`, `pull`, `export`, `list`, `check`,
+`exists`, `remove`, and `prune`. Presentation code formats collected reports
+without opening the store.
 
 Each acquired ref contains one platform-specific OCI image manifest. A tag pull
 may select a manifest through an OCI index or Docker manifest-list envelope,
@@ -93,7 +93,7 @@ Unsupported versions are rejected without migration or automatic deletion.
 
 ## Selectors and local lookup
 
-Import, pull, export, single-image check, and availability accept
+Import, pull, export, single-image check, and existence accept
 `name[:tag][@digest]`, requiring a repository and at least one of tag or digest.
 Names follow the upstream named-reference grammar with path-safety restrictions.
 Repository paths are lowercase; domains may retain uppercase letters and numeric
@@ -131,7 +131,7 @@ explicit tagged ref and rejects every digest-bearing selector.
 Constructing `StoreConfig` anchors a relative path to the current working
 directory. Constructing `Store` performs no filesystem access. Import and pull
 can initialize a missing or empty store; there is no `init` command.
-Remove, export, inventory, checking, availability, and both prune modes require
+Remove, export, inventory, checking, existence, and both prune modes require
 an initialized store and never create a missing root or resume setup.
 
 The immediate parent must already be prepared, including persistence of the
@@ -176,7 +176,7 @@ of persistent content. There are no per-ref lock files or guards.
 | Operation | Store lock |
 | --- | --- |
 | Import, pull, remove | Exclusive |
-| Export, availability, list, check | Shared |
+| Export, existence, list, check | Shared |
 | Prune, including dry-run | Exclusive |
 | Pending mutation recovery | Exclusive |
 
@@ -265,7 +265,7 @@ record then authorizes safe cleanup of the abandoned stage.
 
 Transfers rely on Skopeo for data validation and retain small manifest/config
 inspection for metadata. The dependency pass does not open configuration or
-layer objects, hash blobs, decompress layers, invoke availability or check, or
+layer objects, hash blobs, decompress layers, invoke existence or check, or
 make remote requests. Public acquisition still accepts only single manifests.
 
 Publication follows this order while retaining the exclusive store lock:
@@ -403,7 +403,7 @@ ref. Other states block the requested operation.
 Reclamation reads authoritative roots and manifest/index declarations under
 the exclusive lock, following every supported branch, including nested indexes.
 It does not open configuration or layer files, consult display metadata, or run
-check, availability, prune, or external tools. Incomplete discovery, unreadable
+check, existence, prune, or external tools. Incomplete discovery, unreadable
 declarations, conflicting descriptors, unsupported dependencies, and cycles
 block unsafe deletion. This traversal establishes reachability for deletion;
 it is not a content check or execution certificate.
@@ -446,7 +446,7 @@ and content rather than panicking, ignoring the unsupported declaration, or
 repairing the store. Local fault and termination tests establish ordering and
 retry behavior, not power-loss persistence or Lustre/VAST qualification.
 
-## Inventory, checking, and availability
+## Inventory, checking, and existence
 
 Discovery enumerates the committed namespace rather than hiding malformed refs.
 Inventory inspects pointers and small wrapper files under the shared store lock,
@@ -471,21 +471,39 @@ every descriptor declaration is checked. Conflicting declarations and cycles
 are errors. No blob hashing, decompression, unpacking, or comparison of cached
 display fields against graph-derived values is performed. Same-size corruption
 and invalid tar/compressed data can pass. Passing a check does not certify
-execution or validate public index workflows. Read operations preserve image
-data but may create coordination files.
+execution or validate public index workflows. Read operations create no
+coordination bookkeeping. Pending recorded recovery may change persistent
+content before the requested query starts.
 
-Availability shares wrapper and graph inspection and holds its selected locks
-throughout. `Ready` means structural validation passed; `Missing` means definite
-absence in a valid initialized store; `Unusable` carries typed damage or
-unsupported-content diagnostics. Missing stores, permission failures, lock
-timeouts, and incomplete digest resolution are errors. Operational failure takes
-precedence even when damage has also been observed.
+`Store::exists(&ImageSelector) -> Result<bool>` observes identity under the shared
+store lock, after any prerequisite recorded recovery. It replaces availability
+and its diagnostic types. It does not initialize a store.
 
-Availability invokes no tools, checks no remote freshness, and reserves nothing
-for later use. A later acquisition validates its own destination and can still
-fail with a conflict after `Missing`. Existing refs require explicit replacement;
-reacquiring unsupported content can reproduce the problem, and replacing a ref
-cannot generally repair immutable shared CAS damage.
+For a tagged name, only the canonical terminal `ref` entry establishes presence.
+Encoded directories used only by longer names do not count. Inspection does not
+follow the terminal entry, so dangling or malformed pointers still count;
+namespace parents must remain real directories. Explicit check diagnoses damage.
+
+Digest existence ignores a supplied tag and reads authoritative root indexes
+through canonical confined pointers in the same literal repository. It validates
+the index schema, root descriptor, and single-root structure, without reading
+metadata caches, `oci-layout`, raw-image `blobs/` wrappers, or CAS content.
+A readable match establishes presence despite other damage. Without a match,
+incomplete discovery or unreadable relevant candidate indexes return incomplete
+resolution, not absence. Known refs from another repository are irrelevant;
+namespace failures whose repository is unknown prevent proving a miss.
+
+Clean lookup changes no persistent content, traverses no graph, invokes no tools,
+and makes no remote request. Missing stores, permission failures, lock timeouts,
+and unresolved recovery are errors. Results reserve nothing and do not certify
+health or execution. Later acquisitions independently enforce destination policy;
+existing entries require explicit replacement.
+
+The `exists` CLI produces no result payload, in any output format.
+Presence exits 0, definite absence 1, operational errors 125, and invalid usage 2.
+Only operational errors and existing lock-wait warnings produce stderr during
+lookup; parser diagnostics and help retain normal behavior. Other commands keep
+their existing exit behavior.
 
 ## Conservative pruning
 
@@ -494,7 +512,7 @@ fresh authoritative ref/graph scan, candidate enumeration, and any mutation.
 This pruning work follows any prerequisite recorded recovery described above.
 Neither creates coordination files or invokes tools. Any unresolved committed-ref
 error, conflicting descriptor, unreadable namespace, or incomplete candidate inspection
-blocks all deletion, including staging cleanup. Previous check/availability
+blocks all deletion, including staging cleanup. Previous check/existence
 results and cached sizes cannot authorize reclamation. Unknown contents instead
 preserve their whole cleanup directory and produce successful skips. Symlinks
 are never followed.
@@ -546,10 +564,10 @@ savings. Empty ref-directory candidates have zero bytes.
 `transfer`, `pull`, and `subprocess` own tool interactions. `staging`, `cas`, and
 `refs` own publication. `mutation` and `recovery` own recorded operations and
 their preparation barrier. `discovery`, `inventory`, `inspection`, `graph`, `check`,
-and `availability` inspect committed content. `prune` and its bookkeeping module
-perform maintenance; `main` and `presentation` handle the CLI.
+and `exists` inspect committed identities and content. `prune` and its
+bookkeeping module perform maintenance; `main` and `presentation` handle the CLI.
 
-Publication and graph fixtures, process-lock tests, availability tests, prune
+Publication and graph fixtures, process-lock tests, existence tests, prune
 and bookkeeping tests, controlled registry fixtures, and local real-transfer
 tests provide implementation evidence. The [development guide](development.md)
 records current checks and their limits. The [deferred-validation notes](deferred-validation.md)

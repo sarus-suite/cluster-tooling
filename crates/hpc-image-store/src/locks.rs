@@ -73,7 +73,7 @@ pub(crate) enum Operation {
     List,
     Remove,
     Check,
-    Availability,
+    Exists,
     Prune,
     Recovery,
 }
@@ -86,7 +86,7 @@ impl Operation {
             Self::Import | Self::Pull | Self::Remove | Self::Prune | Self::Recovery => {
                 Mode::Exclusive
             }
-            Self::Export | Self::List | Self::Check | Self::Availability => Mode::Shared,
+            Self::Export | Self::List | Self::Check | Self::Exists => Mode::Shared,
         }
     }
 }

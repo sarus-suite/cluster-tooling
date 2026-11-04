@@ -8,8 +8,8 @@ The workspace-private crate provides a synchronous Rust library and the
 Import images from local Podman containers-storage, pull one OCI image manifest
 directly from a registry, and export stored images back to containers-storage.
 The store shares immutable image objects between refs. It also supports inventory,
-structural checking, explicit ref removal, conservative pruning, and a library-only
-availability query.
+structural checking, lightweight existence queries, explicit ref removal, and
+conservative pruning.
 
 ## Quick start
 
@@ -28,6 +28,7 @@ an already prepared parent directory. See the
 ```sh
 hpc-image-store --store /scratch/me/images import localhost/tool:latest analysis/tool:release
 hpc-image-store --store /scratch/me/images list
+hpc-image-store --store /scratch/me/images exists analysis/tool:release
 hpc-image-store --store /scratch/me/images check analysis/tool:release
 hpc-image-store --store /scratch/me/images export analysis/tool:release localhost/restored:latest
 hpc-image-store --store /scratch/me/images remove analysis/tool:release
@@ -40,6 +41,10 @@ finishes unused-content reclamation before success, preserving shared objects
 and namespace prefixes needed by other names. Import, pull, and their replacements
 also complete their own durable staging cleanup and reclamation. Prune remains
 available for unrecorded remnants until its planned retirement.
+
+`exists` is silent: status 0 means present, 1 absent, 125 an operational error,
+and 2 invalid usage. It requires an initialized store and does not establish image health;
+use explicit `check` for that.
 
 Cleanup failures are errors recovered during later operation preparation. A
 removed name can already be absent when damage elsewhere blocks cleanup and
@@ -55,7 +60,7 @@ PoC v2 provides no repair command or recovery bypass.
 - [Administration](docs/administration.md): installation, storage preparation, and maintenance.
 - [Development and PoC handoff](docs/development.md): source orientation, tests, and current validation results.
 - [Deferred validation](docs/deferred-validation.md): qualification still needed beyond this first pass.
-- [PoC v2 implementation plan](docs/pocv2-implementation-plan.md): staged next-milestone work; current status: Stage 4.3.
+- [PoC v2 implementation plan](docs/pocv2-implementation-plan.md): staged next-milestone work; current status: Stage 5.
 - [Deferred PoC v3 assessment](docs/pocv3-reference-resolution-assessment.md): reference resolution, inherited Skopeo behavior, and future Sarus integration; outside PoC v2.
 
 The PoC stores one platform-specific OCI manifest per ref. A registry tag may

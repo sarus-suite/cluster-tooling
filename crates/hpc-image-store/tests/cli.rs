@@ -1,5 +1,7 @@
 use std::process::Command;
 
+use snapshots::snapshot;
+
 #[allow(dead_code)]
 #[path = "support/registry.rs"]
 mod registry;
@@ -123,6 +125,7 @@ fn help_is_successful_and_lists_implemented_commands() {
     assert!(help.contains("list") && help.contains("remove"));
     assert!(help.contains("check"));
     assert!(help.contains("pull"));
+    assert!(help.contains("exists"));
     assert!(help.contains("prune"));
     assert!(!help.contains("--storage-driver"));
     assert!(output.stderr.is_empty());
@@ -795,6 +798,7 @@ fn cleanup_failure_worker() {
 
 fn exercise_cleanup_failure() {
     assert_ne!(unsafe { libc::geteuid() }, 0);
+    exercise_exists_permissions();
     for (json, failure) in [
         (false, "remove"),
         (true, "remove"),
@@ -829,11 +833,17 @@ fn exercise_remove_cleanup_failure(json: bool, failure: &str) {
         command.arg("--json");
     }
     let output = command.args(["remove", "tool:t"]).output().unwrap();
+    let blocked_exists = fixture
+        .command()
+        .args(["exists", "tool:t"])
+        .output()
+        .unwrap();
     // Restore access before assertions so teardown and recovery remain possible.
     if blocked.exists() {
         fs::set_permissions(blocked, fs::Permissions::from_mode(0o700)).unwrap();
     }
     let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert_exists_output(&blocked_exists, 125);
     assert_eq!(output.status.code(), Some(1), "{diagnostic}");
     assert!(output.stdout.is_empty());
     assert!(
@@ -844,6 +854,14 @@ fn exercise_remove_cleanup_failure(json: bool, failure: &str) {
     assert!(root.join("pending-mutation.json").is_file());
     for tool in ["podman", "skopeo"] {
         fs::remove_file(fixture.directory.path().join(tool)).unwrap();
+    }
+    for _ in 0..2 {
+        let output = fixture
+            .command()
+            .args(["--json", "exists", "tool:t"])
+            .output()
+            .unwrap();
+        assert_exists_output(&output, 1);
     }
     for _ in 0..2 {
         let output = fixture.command().args(["--json", "list"]).output().unwrap();
@@ -1713,6 +1731,246 @@ fn cli_remove_reclaims_content_preserves_longer_names_and_ignores_metadata_damag
         assert_cleanup_complete(&root);
         for relative in ["refs", "raw_images", "blobs/sha256"] {
             assert_eq!(fs::read_dir(root.join(relative)).unwrap().count(), 0);
+        }
+    }
+}
+
+fn assert_exists_output(output: &std::process::Output, status: i32) {
+    assert_eq!(
+        output.status.code(),
+        Some(status),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty(), "{:?}", output.stdout);
+    if status == 0 || status == 1 {
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    } else {
+        assert!(!output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn exists_is_silent_and_json_preserves_all_exit_statuses() {
+    use std::{fs, os::unix::fs::symlink};
+    let fixture = InventoryFixture::new();
+    fixture.import("other:t");
+    let report = fixture.report();
+    let root = report["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["local_ref"] == "tool:t")
+        .unwrap()["stored_root"]
+        .as_str()
+        .unwrap();
+    let pointer = fixture
+        .root()
+        .join("refs")
+        .join(
+            hpc_image_store::LocalRef::new("tool:t")
+                .unwrap()
+                .encoded_path(),
+        )
+        .join("ref");
+    let raw = fs::canonicalize(&pointer).unwrap();
+    let other = fixture
+        .root()
+        .join("refs")
+        .join(
+            hpc_image_store::LocalRef::new("other:t")
+                .unwrap()
+                .encoded_path(),
+        )
+        .join("ref");
+    fs::write(fs::canonicalize(other).unwrap().join("index.json"), b"{").unwrap();
+    fs::write(raw.join("metadata.json"), b"{").unwrap();
+    for tool in ["podman", "skopeo"] {
+        fs::remove_file(fixture.directory.path().join(tool)).unwrap();
+    }
+    for json in [false, true] {
+        for (selector, status) in [
+            ("tool:t".to_owned(), 0),
+            ("tool:missing".to_owned(), 1),
+            (format!("tool:ignored@{root}"), 0),
+            (format!("tool@sha256:{}", "0".repeat(64)), 1),
+            (format!("absent@{root}"), 1),
+            (format!("other@{root}"), 125),
+        ] {
+            let mut command = fixture.command();
+            if json {
+                command.arg("--json");
+            }
+            assert_exists_output(
+                &command.args(["exists", &selector]).output().unwrap(),
+                status,
+            );
+        }
+    }
+    fs::write(raw.join("index.json"), b"{").unwrap();
+    for json in [false, true] {
+        let mut command = fixture.command();
+        if json {
+            command.arg("--json");
+        }
+        assert_exists_output(
+            &command
+                .args(["exists", &format!("tool@{root}")])
+                .output()
+                .unwrap(),
+            125,
+        );
+    }
+    fs::remove_file(&pointer).unwrap();
+    symlink("/unavailable/dangling", &pointer).unwrap();
+    for json in [false, true] {
+        let mut command = fixture.command();
+        if json {
+            command.arg("--json");
+        }
+        assert_exists_output(&command.args(["exists", "tool:t"]).output().unwrap(), 0);
+    }
+    let checked = fixture
+        .command()
+        .args(["check", "tool:t"])
+        .output()
+        .unwrap();
+    assert_eq!(checked.status.code(), Some(1));
+}
+
+#[test]
+fn exists_distinguishes_prefix_directories_from_names() {
+    let fixture = InventoryFixture::new();
+    let short = format!("{}:t", "a".repeat(58));
+    let long = format!("{}:tag", "a".repeat(58));
+    fixture.import(&long);
+    for json in [false, true] {
+        for (name, status) in [(&short, 1), (&long, 0)] {
+            let mut command = fixture.command();
+            if json {
+                command.arg("--json");
+            }
+            assert_exists_output(&command.args(["exists", name]).output().unwrap(), status);
+        }
+    }
+    fixture.import(&short);
+    assert_exists_output(
+        &fixture.command().args(["exists", &short]).output().unwrap(),
+        0,
+    );
+    assert!(
+        fixture
+            .command()
+            .args(["remove", &short])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert_exists_output(
+        &fixture.command().args(["exists", &short]).output().unwrap(),
+        1,
+    );
+    assert_exists_output(
+        &fixture.command().args(["exists", &long]).output().unwrap(),
+        0,
+    );
+}
+
+#[test]
+fn exists_usage_setup_failures_and_help_preserve_parser_contract() {
+    use std::fs;
+    for json in [false, true] {
+        for case in [
+            "missing",
+            "empty",
+            "interrupted",
+            "format",
+            "lock",
+            "recovery",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("store");
+            if case == "empty" {
+                fs::create_dir(&path).unwrap();
+            }
+            if matches!(case, "interrupted" | "format" | "lock" | "recovery") {
+                let fixture = InventoryFixture::new();
+                // Move a complete disposable store under the case's prepared parent.
+                fs::rename(fixture.root(), &path).unwrap();
+                match case {
+                    "interrupted" => {
+                        fs::rename(path.join("store.json"), path.join(".store-init.json")).unwrap()
+                    }
+                    "format" => fs::write(path.join("store.json"), br#"{"version":1}"#).unwrap(),
+                    "lock" => {
+                        fs::remove_file(path.join("locks/store.lock")).unwrap();
+                        fs::create_dir(path.join("locks/store.lock")).unwrap();
+                    }
+                    _ => fs::write(path.join("pending-mutation.json"), b"{").unwrap(),
+                }
+            }
+            let before = snapshot(directory.path());
+            let mut command = cli();
+            command.arg("--store").arg(&path);
+            if json {
+                command.arg("--json");
+            }
+            assert_exists_output(&command.args(["exists", "tool:t"]).output().unwrap(), 125);
+            assert_eq!(snapshot(directory.path()), before, "{case}");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("absent");
+        for args in [
+            vec!["exists"],
+            vec!["exists", "tool"],
+            vec!["exists", "tool:t", "extra"],
+            vec!["exists", "tool:t", "--unknown"],
+            vec!["exists", "tool@sha256:bad"],
+        ] {
+            let mut command = cli();
+            command.arg("--store").arg(&path);
+            if json {
+                command.arg("--json");
+            }
+            assert_exists_output(&command.args(args).output().unwrap(), 2);
+            assert!(!path.exists());
+        }
+        let bare = format!("sha256:{}", "a".repeat(64));
+        assert_exists_output(
+            &cli()
+                .arg("--store")
+                .arg(&path)
+                .args(["exists", &bare])
+                .output()
+                .unwrap(),
+            2,
+        );
+    }
+    let output = cli().args(["exists", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("SELECTOR"));
+    assert!(output.stderr.is_empty());
+}
+
+fn exercise_exists_permissions() {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    for json in [false, true] {
+        for target in ["store.json", "locks/store.lock"] {
+            let fixture = InventoryFixture::new();
+            let path = fixture.root().join(target);
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o0)).unwrap();
+            let mut command = fixture.command();
+            if json {
+                command.arg("--json");
+            }
+            let output = command.args(["exists", "tool:t"]).output().unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            assert_exists_output(&output, 125);
         }
     }
 }

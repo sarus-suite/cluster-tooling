@@ -9,7 +9,8 @@ This inventory introduces no independent requirements.
 For context, see the plan's [baseline](pocv2-implementation-plan.md#purpose-and-current-baseline),
 [stage execution guidance](pocv2-implementation-plan.md#stage-execution-and-validation),
 and [scope](pocv2-implementation-plan.md#scope-and-document-handoff).
-Stages 1 through 3 and Stages 4.1 through 4.3 supply the implemented evidence below.
+Stages 1 through 5, including Stages 4.1 through 4.3, supply the implemented
+evidence below.
 Unimplemented acceptance
 cases remain **Planned**, even where existing tests preserve part of their behavior.
 
@@ -203,13 +204,26 @@ including its CLI status and output contract.
 
 | ID | Stage | Fixture | Target | Expected observation | Status |
 | --- | --- | --- | --- | --- | --- |
-| EXISTS-01 | 5 | Prefix, Mutation | lib, CLI | Exact terminal entries count; directory-only prefixes do not; dangling terminal pointers count as present without following the target. Explicit check still diagnoses their damage. | Planned |
-| EXISTS-02 | 5 | Shared, damaged wrapper variants | lib | Digest lookup reads authoritative roots through confined pointers, ignores cached aliases, preserves literal repository scope and tag/digest precedence, and accepts a definite match. | Planned |
-| EXISTS-03 | 5 | Damaged discovery/index variants | lib, CLI | Incomplete relevant enumeration or unreadable candidate indexes cannot establish absence; known damage in another repository does not obscure a definite miss. | Planned |
-| EXISTS-04 | 5 | Snapshot, narrow instrumentation | lib | Clean lookup reserves nothing, initializes nothing, mutates no image data, opens no blobs, traverses no graph, validates no unrelated wrappers, and invokes no tools or remote requests. | Planned |
-| EXISTS-05 | 5 | Setup, recorded Interrupted variants | lib, CLI | Missing/uninitialized stores, permission/lock failures, incomplete digest resolution, and unresolved recovery are operational errors; pending recovery runs before lookup and may perform recorded cleanup. | Planned |
-| EXISTS-06 | 5 | Mutation, Setup | CLI | Present/absent/error/invalid usage return exactly 0/1/125/2 with empty stdout, both with and without `--json`; result silence, contextual errors, lock warnings, and normal help behavior match the contract. Other commands retain exit behavior. | Planned |
-| EXISTS-07 | 5 | Selector cases, source review | lib, CLI, doc | New bool API replaces availability and diagnostics; examples compile; CLI calls the library without Podman and retains existing selector grammar without IDs, bare digests, normalization, implicit tags, or aliases. | Planned |
+| EXISTS-01 | 5 | Prefix, Mutation | lib, CLI | Exact terminal entries count; directory-only prefixes do not; dangling terminal pointers count as present without following the target. Explicit check still diagnoses their damage. | Implemented |
+| EXISTS-02 | 5 | Shared, damaged wrapper variants | lib | Digest lookup reads authoritative roots through confined pointers, ignores cached aliases, preserves literal repository scope and tag/digest precedence, and accepts a definite match. | Implemented |
+| EXISTS-03 | 5 | Damaged discovery/index variants | lib, CLI | Incomplete relevant enumeration or unreadable candidate indexes cannot establish absence; known damage in another repository does not obscure a definite miss. | Implemented |
+| EXISTS-04 | 5 | Snapshot, narrow instrumentation | lib | Clean lookup reserves nothing, initializes nothing, mutates no image data, opens no blobs, traverses no graph, validates no unrelated wrappers, and invokes no tools or remote requests. | Implemented |
+| EXISTS-05 | 5 | Setup, recorded Interrupted variants | lib, CLI | Missing/uninitialized stores, permission/lock failures, incomplete digest resolution, and unresolved recovery are operational errors; pending recovery runs before lookup and may perform recorded cleanup. | Implemented |
+| EXISTS-06 | 5 | Mutation, Setup | CLI | Present/absent/error/invalid usage return exactly 0/1/125/2 with empty stdout, both with and without `--json`; result silence, contextual errors, lock warnings, and normal help behavior match the contract. Other commands retain exit behavior. | Implemented |
+| EXISTS-07 | 5 | Selector cases, source review | lib, CLI, doc | New bool API replaces availability and diagnostics; examples compile; CLI calls the library without Podman and retains existing selector grammar without IDs, bare digests, normalization, implicit tags, or aliases. | Implemented |
+
+Stage 5 evidence (library names are relative to `publication_tests::exists_tests`
+unless another module is named):
+
+| Cases | Passing evidence |
+| --- | --- |
+| EXISTS-01 | lib: `names_require_terminal_entries_and_ignore_pointer_damage`; CLI: `exists_distinguishes_prefix_directories_from_names` and `exists_is_silent_and_json_preserves_all_exit_statuses`. Explicit checks diagnose dangling and malformed entries that name existence accepts. |
+| EXISTS-02 | lib: `digest_lookup_preserves_literal_scope_precedence_and_root_identity` and `clean_lookup_reads_only_requested_identity_and_reserves_nothing` cover authoritative manifest/index roots, duplicate matches, ports, literal domain spelling, tag precedence, cache independence, and rejection of config-root aliases. |
+| EXISTS-03 | lib: `digest_damage_cannot_prove_absence_but_a_definite_match_wins` and `incomplete_discovery_is_an_error_unless_a_match_is_known`; CLI: `exists_is_silent_and_json_preserves_all_exit_statuses`. Malformed indexes and confined-pointer failures block unprovable misses, known refs in another repository do not, and a readable matching root wins. |
+| EXISTS-04 | lib: `clean_lookup_reads_only_requested_identity_and_reserves_nothing` records regular-file opens, snapshots content, removes unrelated wrappers and blobs, and leaves graph/metadata faults unconsumed. `transfer::tests::exists_observations_do_not_reserve_import_destinations_or_invoke_tools` and `pull::tests::exists_observations_do_not_reserve_pull_destinations_or_contact_registry` retain acquisition conflicts and no-tool evidence. CLI lookups succeed after producer executables are removed. |
+| EXISTS-05 | lib: `exists_never_creates_or_resumes_setup`, `exists_reports_unprivileged_permission_failures`, `exists_propagates_short_lock_timeouts_without_changes`, `exists_holds_shared_access_through_name_and_digest_lookup`, and `exists_recovers_recorded_work_before_observing_and_blocks_on_unsafe_recovery`. CLI setup/error cases and the unprivileged cleanup worker verify blocked recovery returns 125 and repeated existence queries finish recovery before reporting absence. |
+| EXISTS-06 | CLI: `exists_is_silent_and_json_preserves_all_exit_statuses`, `exists_usage_setup_failures_and_help_preserve_parser_contract`, and `cleanup_failure_is_an_error_and_recovery_keeps_json_clean` verify exact statuses, byte-empty stdout, result silence, contextual errors, both JSON modes, permissions, and normal help. Existing command error tests preserve status 1; existing lock-wait tests and the short existence timeout test preserve warnings. |
+| EXISTS-07 | Current API/source review removes availability and its diagnostic exports; the library-guide boolean example compiles as a doctest. CLI usage tests retain explicit selectors and reject bare digests. The real-transfer lifecycle uses existence, while `publication_tests::check_regression_tests` retains wrapper, malformed-content, operational-error, and complete nested-index health regressions under explicit check. |
 
 ### Stages 6–8: retirement, list, and closure
 

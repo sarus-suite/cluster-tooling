@@ -291,7 +291,7 @@ fn handle_and_reads_do_not_initialize() {
         Operation::Export,
         Operation::List,
         Operation::Check,
-        Operation::Availability,
+        Operation::Exists,
     ] {
         assert!(matches!(
             handle.prepare(operation),
@@ -427,7 +427,7 @@ fn operation_matrix_is_explicit() {
         Operation::Export,
         Operation::List,
         Operation::Check,
-        Operation::Availability,
+        Operation::Exists,
     ] {
         assert_eq!(operation.store_mode(), Mode::Shared);
         assert!(!operation.initializes());
@@ -485,7 +485,7 @@ fn lock_worker() {
         "export" => Operation::Export,
         "list" => Operation::List,
         "check" => Operation::Check,
-        "availability" => Operation::Availability,
+        "exists" => Operation::Exists,
         "prune" => Operation::Prune,
         _ => panic!("unknown worker operation"),
     };
@@ -594,7 +594,7 @@ fn separate_processes_obey_the_lock_matrix() {
     let cases = [
         ("export", "check", Some("a:t"), false),
         ("list", "export", Some("a:t"), false),
-        ("availability", "list", None, false),
+        ("exists", "list", None, false),
         ("pull", "check", None, true),
         ("remove", "import", Some("b:t"), true),
         ("import", "export", Some("a:t"), true),
@@ -947,7 +947,7 @@ fn format_two_preserves_schema_three_and_rejects_old_stores_without_changes() {
             Operation::Export,
             Operation::List,
             Operation::Check,
-            Operation::Availability,
+            Operation::Exists,
             Operation::Prune,
         ] {
             assert!(

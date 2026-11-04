@@ -172,69 +172,53 @@ and authoritative dependencies must be readable and supported; display metadata
 is not used to authorize reclamation. There is no cleanup-warning report field
 or shared warning type.
 
-## Inspecting image availability
+## Observing image existence
 
-`Store::availability(&ImageSelector)` inspects local content in an existing,
-initialized store. It uses the same selectors and structural validation as
-single-image checking, including every dependency in a supported index graph.
-It invokes no external tools or registry requests and never initializes a store.
+`Store::exists(&ImageSelector) -> Result<bool>` observes identity in an existing,
+initialized store. Use explicit `Store::check` when you need structural health information.
 
 ```no_run
-use hpc_image_store::{
-    ImageAvailability, ImageSelector, PullContext, PullOptions, Store, StoreConfig,
-};
+use hpc_image_store::{ImageSelector, PullContext, PullOptions, Store, StoreConfig};
 # fn example() -> hpc_image_store::Result<()> {
 let store = Store::new(StoreConfig::new("/scratch/user/.sarus-imagestore")?);
 let image = ImageSelector::new("docker.io/library/alpine:3.23")?;
 
-// Propagate preparation, locking, resolution, and inspection errors to the caller.
-match store.availability(&image)? {
-    ImageAvailability::Ready => {
-        println!("Reuse the stored image {image}");
-    }
-    ImageAvailability::Missing => {
-        store.pull(&image, None, &PullContext::default(), &PullOptions::default())?;
-    }
-    ImageAvailability::Unusable { diagnostics } => {
-        // This caller reports the findings and leaves recovery to its operator.
-        for finding in diagnostics {
-            eprintln!("{:?} at {}: {}", finding.kind, finding.path.display(), finding.message);
-        }
-    }
+if store.exists(&image)? {
+    println!("The stored name {image} is present");
+} else {
+    store.pull(&image, None, &PullContext::default(), &PullOptions::default())?;
 }
 # Ok(())
 # }
 ```
 
-`Ready` means the selected ref passes checking within the checker's limits.
-`Missing` means the named ref or repository-qualified stored root is definitively
-absent. Missing stores, permission failures, lock timeouts, and incomplete digest
-searches return errors. A damaged candidate that prevents establishing a digest
-match therefore cannot become `Missing`.
+If the selector does not supply a digest, existence means the canonical encoded name has a terminal
+`ref` entry. A directory used only as a longer name's prefix is insufficient.
+The terminal entry is inspected without following it, so dangling and malformed
+pointers count as present. Unsafe namespace parents and access failures remain
+errors; explicit check diagnoses damaged image content.
 
-`Unusable` contains one or more `AvailabilityDiagnostic` values. Their `kind`
-is `AvailabilityDiagnosticKind::Damage` or `Unsupported`; callers need not parse
-messages to distinguish them. Each diagnostic also contains its existing
-subsystem `category`, path, optional operation, logical ref and object digest,
-and a contextual message. Unsupported versions and representations differ from
-malformed or missing image files. Operational inspection failures return errors,
-even when other damage has already been detected. Checker reports and CLI
-output retain their existing behavior, and availability adds no CLI command.
+If the selector supplies a digest, lookup ignores a supplied tag and compares authoritative stored
+roots in the same literal repository. It follows only canonical confined
+pointers and reads candidate `index.json` files. It does not read cached metadata,
+`oci-layout`, the raw image's `blobs/` wrapper, or CAS objects. Config IDs,
+provenance, and unreferenced blobs are not aliases. A readable match establishes
+presence despite other damage. Without a match, incomplete discovery or unreadable
+relevant roots return `Error::ResolutionIncomplete`, rather than false. Damage
+in known refs from another repository does not obscure a definite miss.
 
-The shared store lock remains held throughout inspection.
-Results describe the content when observed and reserve nothing afterward. A
-later import or pull must check its destination under its own exclusive store lock, so even
-acquisition after `Missing` can fail with `RefExists`. Existing refs always
-require explicit replacement. Callers choose whether to report unusable content
-or request replacement; reacquiring unsupported content may reproduce the same
-problem, and replacing a ref cannot generally repair damaged immutable shared
-CAS objects.
+Missing or uninitialized stores, permission failures, and lock timeouts are
+errors. Preparation first completes pending recorded recovery under exclusive
+access or returns an error. That recovery may change the store; lookup then
+retains shared access throughout its observation. Clean-store lookup initializes
+nothing, changes no persistent content, invokes no tools or remote requests,
+and traverses no image graph.
 
-Availability checks no remote-tag freshness and uses no provenance aliases.
-It does not hash blobs, decompress or unpack layers, or certify execution.
-Same-size corruption may go undetected. Internal index traversal does not add
-index acquisition or export support. Transfers do not run availability
-automatically, and pruning always performs its own fresh authoritative scan.
+Existence reserves nothing afterward and certifies neither health nor execution.
+A later acquisition checks its destination under its own exclusive lock and can
+still fail with `RefExists`. Existing refs require explicit replacement; replacing
+a ref cannot generally repair damaged immutable shared CAS objects. Neither an
+existence result nor an earlier check authorizes subsequent pruning.
 
 ## Library pruning
 
@@ -295,8 +279,8 @@ fallback. Acquisition provenance is descriptive and never a lookup alias.
 Store preparation, locking, selection, capability, and tool failures return
 typed `Error` values with context. List, check, and prune can instead return
 collected reports containing failures; check their `has_errors()` methods.
-Availability's `Unusable` is a classified observation rather than an operational
-error, and may carry several diagnostics.
+`exists` returns false only for definite absence in a valid initialized store.
+It returns typed errors when preparation or identity resolution cannot finish.
 
 `Error::InvalidMutationRecord` identifies invalid durable bookkeeping.
 `Error::Recovery` reports the record path, available ref identity, phase,

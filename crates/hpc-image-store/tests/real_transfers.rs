@@ -1,8 +1,8 @@
 //! Real-tool acceptance with disposable containers-storage prepared by the test
 //! caller. The transfer library inherits that context without changing it.
 use hpc_image_store::{
-    CheckScope, Error, ImageAvailability, ImageSelector, ImportOptions, LocalRef, Platform,
-    PruneKind, PruneOptions, Store, StoreConfig, TransferContext, format_list_podman,
+    CheckScope, Error, ImageSelector, ImportOptions, LocalRef, Platform, PruneKind, PruneOptions,
+    Store, StoreConfig, TransferContext, format_list_podman,
 };
 use serde_json::{Value, json};
 use std::{
@@ -96,10 +96,7 @@ fn poc_lifecycle(directory: &Path, source: &str, output: &str, context: &Transfe
     assert!(!store.config().root().join("pending-mutation.json").exists());
     let store_lock = store.config().root().join("locks/store.lock");
     let lock_before = fs::metadata(&store_lock).unwrap();
-    assert!(matches!(
-        store.availability(&target_selector).unwrap(),
-        ImageAvailability::Missing
-    ));
+    assert!(!store.exists(&target_selector).unwrap());
     let acquired = store
         .import(
             &parse_selector(source),
@@ -110,10 +107,7 @@ fn poc_lifecycle(directory: &Path, source: &str, output: &str, context: &Transfe
         .unwrap();
     assert!(!store.config().root().join("pending-mutation.json").exists());
     assert_eq!(acquired.stored_root, kept.stored_root);
-    assert!(matches!(
-        store.availability(&target_selector).unwrap(),
-        ImageAvailability::Ready
-    ));
+    assert!(store.exists(&target_selector).unwrap());
     let inventory = store.list().unwrap();
     assert!(!inventory.has_errors(), "{inventory:?}");
     assert_eq!(inventory.entries.len(), 2);
@@ -143,10 +137,7 @@ fn poc_lifecycle(directory: &Path, source: &str, output: &str, context: &Transfe
         shared_before
     );
     assert!(!store.config().root().join("pending-mutation.json").exists());
-    assert!(matches!(
-        store.availability(&target_selector).unwrap(),
-        ImageAvailability::Missing
-    ));
+    assert!(!store.exists(&target_selector).unwrap());
     let options = PruneOptions {
         dry_run: true,
         grace_period: Duration::ZERO,
@@ -164,10 +155,7 @@ fn poc_lifecycle(directory: &Path, source: &str, output: &str, context: &Transfe
     assert!(!pruned.has_errors(), "{pruned:?}");
     assert!(pruned.candidates.is_empty());
     assert_eq!(pruned.summaries[&PruneKind::Blob].removed_count, 0);
-    assert!(matches!(
-        store.availability(&keeper_selector).unwrap(),
-        ImageAvailability::Ready
-    ));
+    assert!(store.exists(&keeper_selector).unwrap());
     store.remove(&keeper).unwrap();
     // Assert completion immediately, without another maintenance action.
     assert!(!store.config().root().join("pending-mutation.json").exists());

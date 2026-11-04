@@ -1,5 +1,5 @@
 //! A Linux, user-owned filesystem OCI image store.
-//! Synchronous transfers, inventory, graph checking, local availability,
+//! Synchronous transfers, inventory, graph checking, local existence,
 //! digest selection, removal and conservative pruning.
 
 #![doc = include_str!("../docs/library-guide.md")]
@@ -11,9 +11,9 @@ extern crate self as hpc_image_store;
 #[cfg(not(target_os = "linux"))]
 compile_error!("hpc-image-store currently supports Linux only");
 
-mod availability;
 mod check;
 mod error;
+mod exists;
 mod graph;
 mod identity;
 mod inspection;
@@ -49,7 +49,6 @@ mod store;
 mod subprocess;
 mod transfer;
 
-pub use availability::{AvailabilityDiagnostic, AvailabilityDiagnosticKind, ImageAvailability};
 pub use check::{CheckDiagnostic, CheckEntry, CheckReport, CheckScope, CheckStatus};
 pub use error::{Error, NamespaceChange, Result};
 pub use identity::{ImageSelector, LocalRef, Sha256Digest};

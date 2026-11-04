@@ -7,7 +7,9 @@ use hpc_image_store::{
 use std::{path::PathBuf, time::Duration};
 
 #[derive(Parser)]
-#[command(about = "Import, pull, export, list, check, remove and prune a filesystem OCI store")]
+#[command(
+    about = "Import, pull, export, list, check, test existence, remove and prune a filesystem OCI store"
+)]
 struct Cli {
     #[arg(long)]
     store: PathBuf,
@@ -25,6 +27,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Test local presence silently: exit 0 present, 1 absent, 125 operational error.
+    Exists {
+        /// Stored name[:tag][@sha256:digest]; a digest overrides the tag within this repository.
+        selector: ImageSelector,
+    },
     Import {
         /// Containers-storage name[:tag][@sha256:digest]; a tag or digest is required.
         source: ImageSelector,
@@ -147,6 +154,7 @@ fn execute(cli: Cli) -> hpc_image_store::Result<bool> {
         platform: cli.platform,
     };
     match cli.command {
+        Action::Exists { selector } => return store.exists(&selector),
         Action::Prune {
             dry_run,
             grace_period,
@@ -336,6 +344,11 @@ fn usage_error(message: impl std::fmt::Display) -> ! {
 }
 fn main() {
     let cli = Cli::parse();
+    let operational_error_status = if matches!(&cli.command, Action::Exists { .. }) {
+        125
+    } else {
+        1
+    };
     if let Action::List { format, digests } = &cli.command {
         if cli.json && format.is_some_and(|format| format != ListFormat::Json) {
             usage_error("--json conflicts with --format podman or full");
@@ -365,7 +378,7 @@ fn main() {
                     );
                 }
             }
-            std::process::exit(1);
+            std::process::exit(operational_error_status);
         }
     }
 }

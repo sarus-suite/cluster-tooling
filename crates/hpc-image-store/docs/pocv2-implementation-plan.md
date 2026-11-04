@@ -3,8 +3,8 @@
 ## Purpose and current baseline
 
 PoC v2 simplifies coordination and makes each mutation finish its own content
-lifecycle. Stages 1 through 3 and Stages 4.1 through 4.3 are implemented; later substages
-remain planned. The [architecture](architecture.md) is the authoritative reference for delivered
+lifecycle. Stages 1 through 5, including Stages 4.1 through 4.3, are implemented;
+Stages 6 through 8 remain planned. The [architecture](architecture.md) is the authoritative reference for delivered
 behavior and is updated as each stage completes.
 The plans and results under `archive/` remain historical records.
 
@@ -20,7 +20,7 @@ format 2 and a single store lock, while retaining the baseline content lifecycle
 
 The implementation is primarily in `store`, `initialization`, and `locks` for
 preparation; `transfer`, `pull`, `staging`, `cas`, and `refs` for mutation;
-`discovery`, `inventory`, `inspection`, `graph`, `check`, and `availability` for
+`discovery`, `inventory`, `inspection`, `graph`, `check`, and `exists` for
 queries; and `prune` for deferred reclamation. `main` and `presentation` own CLI
 dispatch and output. Use the existing synthetic fixtures, fault checkpoints,
 subprocess workers, controlled registry, and disposable real-transfer harness
@@ -428,7 +428,7 @@ availability and prune remain public until Stages 5 and 6. This does not
 authorize repairing an externally damaged store or adopting unrecorded data.
 List continues to require an initialized store until Stage 7.
 
-### 5. Introduce lightweight existence
+### 5. Introduce lightweight existence (Implemented)
 
 **Prerequisites:** Stage 4's complete lifecycle, Stage 3's preparation/recovery
 hooks, and the encoded-prefix fixtures from Stage 1.
@@ -477,6 +477,13 @@ cargo test --locked -p hpc-image-store --test cli
 cargo test --locked -p hpc-image-store --doc
 git diff --check
 ```
+
+**Outcome:** the boolean existence API replaces availability and its diagnostic
+types. Name lookup inspects terminal entries without following pointers; digest
+lookup reads authoritative indexes without unrelated wrappers or image content.
+The silent CLI implements statuses 0/1/125/2, including with `--json`. The
+acceptance inventory records EXISTS-01 through EXISTS-07 evidence; the
+development guide records validation and its limits.
 
 **Intermediate limits:** existence is an observation, not a reservation or a
 health certificate. Pending recovery can do recorded cleanup before lookup.

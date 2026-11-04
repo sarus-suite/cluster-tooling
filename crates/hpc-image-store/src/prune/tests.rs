@@ -1,8 +1,8 @@
 //! End-to-end maintenance tests reuse publication's synthetic OCI fixtures.
 use super::*;
 use crate::{
-    CheckScope, ImageAvailability, ImageSelector, PruneKind, PruneOptions, PrunePhase, PruneReport,
-    locks, test_snapshot::snapshot,
+    CheckScope, ImageSelector, PruneKind, PruneOptions, PrunePhase, PruneReport, locks,
+    test_snapshot::snapshot,
 };
 use serde_json::{Value, json};
 use std::{fs::FileTimes, os::unix::fs::PermissionsExt, time::SystemTime};
@@ -364,29 +364,20 @@ fn deletion_stops_on_first_error_reports_partial_changes_and_can_retry() {
 }
 
 #[test]
-fn availability_never_authorizes_a_later_prune_scan() {
+fn exists_never_authorizes_a_later_prune_scan() {
     let temporary = tempfile::tempdir().unwrap();
     let handle = store(temporary.path());
     let raw = publish(&handle, &reference(), Image::One, false);
     let selected = ImageSelector::new(reference().as_str()).unwrap();
-    assert!(matches!(
-        handle.availability(&selected),
-        Ok(ImageAvailability::Ready)
-    ));
+    assert!(matches!(handle.exists(&selected), Ok(true)));
     fs::write(raw.join("metadata.json"), b"{").unwrap();
-    assert!(matches!(
-        handle.availability(&selected),
-        Ok(ImageAvailability::Unusable { .. })
-    ));
+    assert!(matches!(handle.exists(&selected), Ok(true)));
     let extra = orphan(&handle);
     let before = snapshot(temporary.path());
     assert!(handle.prune(&options(false)).unwrap().has_errors());
     assert_eq!(snapshot(temporary.path()), before);
     legacy_unlink(&handle, &reference()).unwrap();
-    assert!(matches!(
-        handle.availability(&selected),
-        Ok(ImageAvailability::Missing)
-    ));
+    assert!(matches!(handle.exists(&selected), Ok(false)));
     prune(&handle);
     assert!(!extra.exists());
 }
@@ -436,7 +427,7 @@ fn process_coordination_covers_active_readers_writers_and_reverse_exclusion() {
         "prune-hold-import",
         "prune-hold-pull",
         "prune-hold-export",
-        "availability-held-name",
+        "exists-held-name",
     ] {
         let mut holder = Worker::start(temporary.path(), &reference(), action);
         holder.wait_for("PUBLICATION_PAUSED");
@@ -464,7 +455,7 @@ fn process_coordination_covers_active_readers_writers_and_reverse_exclusion() {
             Operation::List,
             Operation::Check,
             Operation::Remove,
-            Operation::Availability,
+            Operation::Exists,
             Operation::Prune,
         ] {
             assert!(
@@ -776,7 +767,7 @@ fn namespace_barrier_retains_exclusive_lock_until_sync_and_deletion_finish() {
             Operation::Import,
             Operation::Pull,
             Operation::Remove,
-            Operation::Availability,
+            Operation::Exists,
         ] {
             assert!(
                 matches!(handle.prepare(operation), Err(Error::LockTimeout { .. })),

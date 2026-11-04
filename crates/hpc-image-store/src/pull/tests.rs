@@ -573,15 +573,12 @@ fn failures_preserve_previous_ref_and_successful_replacement_reuses_content() {
 }
 
 #[test]
-fn availability_observations_do_not_reserve_pull_destinations_or_contact_registry() {
-    use crate::{ImageAvailability, locks::Operation, test_snapshot::snapshot};
+fn exists_observations_do_not_reserve_pull_destinations_or_contact_registry() {
+    use crate::{locks::Operation, test_snapshot::snapshot};
     let fixture = Fixture::new();
     drop(fixture.store.prepare(Operation::Pull).unwrap());
     let selected = selector(DESTINATION);
-    assert!(matches!(
-        fixture.store.availability(&selected),
-        Ok(ImageAvailability::Missing)
-    ));
+    assert!(matches!(fixture.store.exists(&selected), Ok(false)));
     fixture.pull(false).unwrap();
     let before = snapshot(fixture.store.config().root());
     let calls = fixture.calls().len();
@@ -589,10 +586,7 @@ fn availability_observations_do_not_reserve_pull_destinations_or_contact_registr
         selected.clone(),
         selector(format!("{}@{}", selected.name(), fixture.root)),
     ] {
-        assert!(matches!(
-            fixture.store.availability(&selected),
-            Ok(ImageAvailability::Ready)
-        ));
+        assert!(matches!(fixture.store.exists(&selected), Ok(true)));
     }
     assert!(matches!(fixture.pull(false), Err(Error::RefExists(_))));
     assert_eq!(fixture.calls().len(), calls);
@@ -600,10 +594,7 @@ fn availability_observations_do_not_reserve_pull_destinations_or_contact_registr
     fixture.pull(true).unwrap();
     let calls = fixture.calls().len();
     fs::remove_file(&fixture.context.skopeo).unwrap();
-    assert!(matches!(
-        fixture.store.availability(&selected),
-        Ok(ImageAvailability::Ready)
-    ));
+    assert!(matches!(fixture.store.exists(&selected), Ok(true)));
     assert_eq!(fixture.calls().len(), calls);
 }
 
@@ -693,10 +684,7 @@ fn terminated_pull_keeps_prior_ref_and_orphan_copy_locks() {
     let mut fixture = Fixture::new();
     fixture.pull(false).unwrap();
     let unused = crate::LocalRef::new("unused:tag").unwrap();
-    fixture
-        .store
-        .availability(&selector(unused.as_str()))
-        .unwrap();
+    fixture.store.exists(&selector(unused.as_str())).unwrap();
 
     let pointer = fs::read_link(fixture.pointer()).unwrap();
     let directory = fixture.temporary.path();
