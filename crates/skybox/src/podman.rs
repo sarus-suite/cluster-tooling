@@ -173,9 +173,11 @@ pub(crate) fn pmd_image_exists(image: &str, ctx: &PodmanCtx) -> pmd::Result<bool
     pmd::image_exists(image, Some(ctx))
 }
 
+/*
 pub(crate) fn pmd_pull(image: &str, ctx: &PodmanCtx) -> pmd::Result<()> {
     pmd::pull(image, Some(ctx))
 }
+*/
 
 pub(crate) fn pmd_parallax_migrate(
     parallax_path: &str,
@@ -186,9 +188,11 @@ pub(crate) fn pmd_parallax_migrate(
     Ok(())
 }
 
+/*
 pub(crate) fn pmd_rmi(image: &str, ctx: &PodmanCtx) -> pmd::Result<()> {
     pmd::rmi(image, Some(ctx))
 }
+*/
 
 pub(crate) fn pmd_run<I, S>(
     edf: &raster::EDF,
@@ -214,4 +218,25 @@ where
 
     result?;
     Ok(())
+}
+
+pub(crate) fn pmd_get_graphroot(ctx: &PodmanCtx) -> pmd::Result<String> {
+    //podman info -f json | jq -r .store.graphRoot
+    let info = pmd::info(Some("json"),Some(ctx))?.stdout;
+    let json_string = String::from_utf8_lossy(&info);
+    let json_value: serde_json::Value = serde_json::from_str(&json_string).unwrap();
+    let graphroot = json_value.as_object()
+        .unwrap()
+        .get("store")
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .get("graphRoot")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+
+   //Ok(String::from("/home/vagrant/.local/share/containers/storage"))
+   Ok(graphroot)
 }
