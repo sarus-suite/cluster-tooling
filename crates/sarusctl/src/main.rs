@@ -2,9 +2,10 @@ mod logging;
 
 use clap::{ArgAction, Parser, Subcommand};
 use sarusctl::{
-    AppDeps, CommandSpec, ExecOptions, FormatOutput, RealContainerRuntime, RealRasterOps,
-    RealUserContext, execute_command_with_options, format_output,
+    AppDeps, CommandSpec, ExecOptions, FormatOutput, RealContainerRuntime, RealHpcStoreOps,
+    RealRasterOps, RealUserContext, execute_command_with_options, format_output,
 };
+use std::path::PathBuf;
 use std::process::ExitCode;
 use tracing::{self, Level, span};
 
@@ -20,8 +21,14 @@ const SARUSCTL_VERSION: &str = match option_env!("SARUSCTL_VERSION") {
 #[command(version = SARUSCTL_VERSION, about)]
 struct Args {
     /// Override the Parallax imagestore path from the configuration
+    // TODO: This arg would make more sense as a PathBuf, but the
+    // corresponding parameter in raster is a String.
     #[arg(long, value_name = "PATH")]
     parallax_imagestore: Option<String>,
+
+    /// Override the HPC imagestore path
+    #[arg(long, value_name = "PATH")]
+    hpc_imagestore: Option<PathBuf>,
 
     /// Report elapsed times for instrumented operations
     #[arg(long)]
@@ -49,8 +56,12 @@ enum Command {
         #[arg(long, short, value_enum, default_value_t = FormatOutput::Text)]
         output: FormatOutput,
     },
-    /// List images including Parallax storage
-    Images {},
+    /// List HPC store images
+    Images {
+        /// Append the combined Podman and Parallax image listing
+        #[arg(long)]
+        all: bool,
+    },
     /// Pull image with Podman and migrate to Parallax storage
     Pull { image: String },
     /// Migrate image to Parallax storage
@@ -69,7 +80,7 @@ impl From<Command> for CommandSpec {
         match value {
             Command::Validate { filepath, output } => CommandSpec::Validate { filepath, output },
             Command::Render { filepath, output } => CommandSpec::Render { filepath, output },
-            Command::Images {} => CommandSpec::Images,
+            Command::Images { all } => CommandSpec::Images { all },
             Command::Pull { image } => CommandSpec::Pull { image },
             Command::Migrate { image } => CommandSpec::Migrate { image },
             Command::Rmi { image } => CommandSpec::Rmi { image },
@@ -95,14 +106,17 @@ fn main() -> ExitCode {
     let raster = RealRasterOps;
     let runtime = RealContainerRuntime;
     let user = RealUserContext;
+    let hpc_store = RealHpcStoreOps;
     let deps = AppDeps {
         raster: &raster,
         runtime: &runtime,
         user: &user,
+        hpc_store: &hpc_store,
     };
     let options = ExecOptions {
         verbose: args.verbose > 0,
         parallax_imagestore: args.parallax_imagestore,
+        hpc_imagestore: args.hpc_imagestore,
     };
     drop(_init_span);
 

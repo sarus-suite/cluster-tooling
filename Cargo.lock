@@ -1559,6 +1559,7 @@ version = "0.8.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "hpc-image-store",
  "nu-ansi-term",
  "predicates",
  "pretty_assertions",
