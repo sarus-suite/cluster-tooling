@@ -29,6 +29,7 @@ pub mod podman;
 pub mod slurmd;
 pub mod slurmstepd;
 pub mod srun;
+pub mod store;
 pub mod sync;
 pub mod tracking;
 

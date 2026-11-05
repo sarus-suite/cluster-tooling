@@ -1739,6 +1739,7 @@ version = "0.5.0"
 dependencies = [
  "cfg-if",
  "eyre",
+ "hpc-image-store",
  "libc",
  "mktemp",
  "nix",

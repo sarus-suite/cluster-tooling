@@ -7,8 +7,7 @@ use slurm_spank::{SpankHandle, spank_log_user};
 
 use sarus_suite_podman_driver::{self as pmd, ContainerCtx, PodmanCtx};
 
-use crate::config::setup_imagestore;
-use crate::{SpankSkyBox, get_job_env, plugin_err, skybox_log_debug, skybox_log_error};
+use crate::{SpankSkyBox, get_job_env, plugin_err, skybox_log_debug};
 
 pub(crate) const PODMAN_PIDFILE_NAME: &str = "pidfile";
 
@@ -25,118 +24,6 @@ fn process_exists(pid: usize) -> bool {
         }
     };
     ret
-}
-
-pub(crate) fn podman_pull(
-    ssb: &mut SpankSkyBox,
-    _spank: &mut SpankHandle,
-) -> Result<(), Box<dyn Error>> {
-    let edf = match &ssb.edf {
-        Some(o) => o,
-        None => {
-            return plugin_err("couldn't find edf");
-        }
-    };
-
-    let run = match &ssb.run {
-        Some(o) => o,
-        None => {
-            return plugin_err("couldn't find run");
-        }
-    };
-
-    let config = &ssb.config;
-    setup_imagestore(config)?;
-
-    let graphroot = format!("{}/graphroot", run.podman_tmp_path);
-    let runroot = format!("{}/runroot", run.podman_tmp_path);
-
-    let ro_ctx = PodmanCtx {
-        podman_path: PathBuf::from(&config.podman_path),
-        conmon_path: Some(PathBuf::from(&config.conmon_path)),
-        module: None,
-        graphroot: Some(PathBuf::from(&graphroot)),
-        runroot: Some(PathBuf::from(&runroot)),
-        parallax_mount_program: None,
-        ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
-        mksquashfs_path: None,
-        podman_env: None,
-    }
-    .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
-    .with_env("PARALLAX_MP_GID", config.parallax_mp_gid.to_string())
-    .with_env(
-        "PARALLAX_MP_SQUASHFUSE_CMD",
-        config.parallax_mp_squashfuse_path.clone(),
-    )
-    .with_env("PARALLAX_MP_LOGFILE", config.parallax_mp_logfile.clone());
-
-    let local_ctx = PodmanCtx {
-        podman_path: PathBuf::from(&config.podman_path),
-        conmon_path: Some(PathBuf::from(&config.conmon_path)),
-        module: None,
-        graphroot: Some(PathBuf::from(&graphroot)),
-        runroot: Some(PathBuf::from(&runroot)),
-        parallax_mount_program: None,
-        ro_store: None,
-        mksquashfs_path: None,
-        podman_env: None,
-    }
-    .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
-    .with_env("PARALLAX_MP_GID", config.parallax_mp_gid.to_string())
-    .with_env(
-        "PARALLAX_MP_SQUASHFUSE_CMD",
-        config.parallax_mp_squashfuse_path.clone(),
-    )
-    .with_env("PARALLAX_MP_LOGFILE", config.parallax_mp_logfile.clone());
-
-    let migrate_ctx = PodmanCtx {
-        podman_path: PathBuf::from(&config.podman_path),
-        conmon_path: Some(PathBuf::from(&config.conmon_path)),
-        module: None,
-        graphroot: Some(PathBuf::from(&graphroot)),
-        runroot: None,
-        parallax_mount_program: None,
-        ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
-        mksquashfs_path: Some(PathBuf::from(&config.mksquashfs_path)),
-        podman_env: None,
-    }
-    .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
-    .with_env("PARALLAX_MP_GID", config.parallax_mp_gid.to_string())
-    .with_env(
-        "PARALLAX_MP_SQUASHFUSE_CMD",
-        config.parallax_mp_squashfuse_path.clone(),
-    )
-    .with_env("PARALLAX_MP_LOGFILE", config.parallax_mp_logfile.clone());
-
-    if !pmd_image_exists(&edf.image, &ro_ctx)? {
-        skybox_log_debug!(
-            "pulling image \"{}\" from remote in local graphroot",
-            edf.image
-        );
-        pmd_pull(&edf.image, &local_ctx)?;
-
-        if !pmd_image_exists(&edf.image, &local_ctx)? {
-            return plugin_err("podman pull failed, cannot find image in local graphroot");
-        }
-
-        skybox_log_debug!("migrating image \"{}\" to shared imagestore", edf.image);
-        pmd_parallax_migrate(&config.parallax_path, &migrate_ctx, &edf.image)?;
-
-        skybox_log_debug!("removing image \"{}\" from local graphroot", edf.image);
-        if let Err(error) = pmd_rmi(&edf.image, &local_ctx) {
-            skybox_log_error!(
-                "failed to remove image \"{}\" from local graphroot: {}",
-                edf.image,
-                error
-            );
-        }
-
-        if !pmd_image_exists(&edf.image, &ro_ctx)? {
-            return plugin_err("couldn't find image on shared imagestore after migration");
-        }
-    }
-
-    Ok(())
 }
 
 pub(crate) fn podman_start(
