@@ -16,8 +16,8 @@ repair, deep check, or migration of existing stores.
 
 The synchronous library owns storage behavior, preparation, locking, transfers,
 and typed diagnostics. The development CLI parses arguments and presents library
-reports. Its seven commands are `import`, `pull`, `export`, `list`, `check`,
-`exists`, and `remove`. Presentation code formats collected reports
+reports. Its eight commands are `import`, `pull`, `export`, `list`, `check`,
+`exists`, `resolve`, and `remove`. Presentation code formats collected reports
 without opening the store.
 
 Each acquired ref contains one platform-specific OCI image manifest. A tag pull
@@ -103,7 +103,7 @@ Unsupported versions are rejected without migration or automatic deletion.
 
 ## Selectors and local lookup
 
-Import, pull, export, single-image check, and existence accept
+Import, pull, export, single-image check, existence, and digest-reference resolution accept
 `name[:tag][@digest]`, requiring a repository and at least one of tag or digest.
 Names follow the upstream named-reference grammar with path-safety restrictions.
 Repository paths are lowercase; domains may retain uppercase letters and numeric
@@ -141,7 +141,7 @@ explicit tagged ref and rejects every digest-bearing selector.
 Constructing `StoreConfig` anchors a relative path to the current working
 directory. Constructing `Store` performs no filesystem access. Import, pull, and
 list can initialize a missing or empty store; there is no `init` command.
-Remove, export, checking, and existence require
+Remove, export, checking, existence, and digest-reference resolution require
 an initialized store and never create a missing root or resume setup.
 
 The immediate parent must already be prepared, including persistence of the
@@ -209,7 +209,7 @@ of persistent content. There are no per-ref lock files or guards.
 | Operation | Store lock |
 | --- | --- |
 | Import, pull, remove | Exclusive |
-| Export, existence, list, check | Shared (list uses exclusive access for required setup) |
+| Export, existence, resolution, list, check | Shared (list uses exclusive access for required setup) |
 | Pending mutation recovery | Exclusive |
 
 Shared readers coexist. Writers serialize across all names and exclude readers.
@@ -476,7 +476,7 @@ and content rather than panicking, ignoring the unsupported declaration, or
 repairing the store. Local fault and termination tests establish ordering and
 retry behavior, not power-loss persistence or Lustre/VAST qualification.
 
-## Inventory, checking, and existence
+## Inventory, checking, existence, and digest-reference resolution
 
 Discovery enumerates the committed namespace rather than hiding malformed refs.
 Inventory inspects pointers and small wrapper files under the shared store lock,
@@ -523,6 +523,19 @@ incomplete discovery or unreadable relevant candidate indexes return incomplete
 resolution, not absence. Known refs from another repository are irrelevant;
 namespace failures whose repository is unknown prevent proving a miss.
 
+`Store::resolve(&ImageSelector) -> Result<Option<String>>` returns the literal
+repository name and authoritative stored root digest as `name@sha256:…`, without
+a tag. For a tag-only selector, it checks the exact terminal entry, returning
+`None` for absence; a present entry must have a canonical confined pointer and
+a readable valid single-root index. Pointer and index errors retain their typed
+causes rather than becoming absence. For digest selectors it shares the
+lightweight digest-existence search above, including tag precedence, repository
+scope, readable-match precedence over damage, and incomplete-resolution errors.
+Resolution reads no cached metadata, unrelated wrappers, or CAS objects.
+It requires completed initialization, finishes prerequisite recorded mutation
+recovery, and retains shared access through lookup and result construction.
+The returned identity reserves nothing and does not guarantee continued availability.
+
 Clean lookup changes no persistent content, traverses no graph, invokes no tools,
 and makes no remote request. Missing stores, permission failures, lock timeouts,
 and unresolved recovery are errors. Results reserve nothing and do not certify
@@ -534,6 +547,12 @@ Presence exits 0, definite absence 1, operational errors 125, and invalid usage 
 Only operational errors and existing lock-wait warnings produce stderr during
 lookup; parser diagnostics and help retain normal behavior. Other commands keep
 their existing exit behavior.
+
+The `resolve` CLI prints the reference followed by a newline when found and
+nothing when absent. With `--json`, it prints an object with `reference` set to
+the string or `null` for absence. Found, absent, operational error, and invalid
+usage exit 0, 1, 125, and 2 respectively. Operational errors produce stderr
+diagnostics and no stdout payload.
 
 ## Reclamation boundary
 

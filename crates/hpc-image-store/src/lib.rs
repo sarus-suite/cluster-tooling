@@ -1,6 +1,6 @@
 //! A Linux, user-owned filesystem OCI image store.
 //! Synchronous transfers, inventory, graph checking, local existence,
-//! digest selection, and removal with immediate reclamation.
+//! digest-reference resolution, digest selection, and removal with immediate reclamation.
 
 #![doc = include_str!("../docs/library-guide.md")]
 

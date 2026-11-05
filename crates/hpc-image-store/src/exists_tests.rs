@@ -54,6 +54,7 @@ fn exists_never_creates_or_resumes_setup() {
             selector(format!("analysis/tool@{}", root(Image::One))),
         ] {
             assert!(handle.exists(&selected).is_err(), "{case}");
+            assert!(handle.resolve(&selected).is_err(), "{case}");
         }
         assert_eq!(snapshot(temporary.path()), before, "{case}");
     }
@@ -61,11 +62,48 @@ fn exists_never_creates_or_resumes_setup() {
     let handle = store(temporary.path());
     drop(handle.prepare(Operation::Import).unwrap());
     assert!(!handle.exists(&selector(reference().as_str())).unwrap());
+    assert_eq!(
+        handle.resolve(&selector(reference().as_str())).unwrap(),
+        None
+    );
     assert!(
         !handle
             .exists(&selector(format!("analysis/tool@{}", root(Image::One))))
             .unwrap()
     );
+    assert_eq!(
+        handle
+            .resolve(&selector(format!("analysis/tool@{}", root(Image::One))))
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn resolution_reads_exact_tagged_roots_and_removes_tags() {
+    let temporary = tempfile::tempdir().unwrap();
+    let handle = store(temporary.path());
+    let (short, long) = prefix_names();
+    publish(&handle, &long, Image::One, false);
+    assert_eq!(handle.resolve(&selector(short.as_str())).unwrap(), None);
+    for (name, image) in [
+        (long, Image::One),
+        (
+            LocalRef::new("REGISTRY:5000/team/tool:Release").unwrap(),
+            Image::Index,
+        ),
+    ] {
+        publish(&handle, &name, image, true);
+        let expected = format!("{}@{}", name.name(), root(image));
+        assert_eq!(
+            handle.resolve(&selector(name.as_str())).unwrap(),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            handle.resolve(&selector(&expected)).unwrap(),
+            Some(expected)
+        );
+    }
 }
 
 #[test]
@@ -96,6 +134,7 @@ fn names_require_terminal_entries_and_ignore_pointer_damage() {
         }
         let before = snapshot(temporary.path());
         assert!(handle.exists(&selector(long.as_str())).unwrap(), "{case}");
+        assert!(handle.resolve(&selector(long.as_str())).is_err(), "{case}");
         assert!(
             handle
                 .check(&CheckScope::Image(selector(long.as_str())))
@@ -159,6 +198,34 @@ fn clean_lookup_reads_only_requested_identity_and_reserves_nothing() {
         );
         assert!(fsutil::fault(point).is_err(), "lookup consumed {point}");
     }
+    for selected in [
+        selector(reference().as_str()),
+        selector(format!("analysis/tool:ignored@{}", root(Image::Index))),
+    ] {
+        fsutil::track_opens();
+        assert_eq!(
+            handle.resolve(&selected).unwrap(),
+            Some(format!("analysis/tool@{}", root(Image::Index)))
+        );
+        let opened = fsutil::take_opens();
+        assert!(opened.contains(&raw.join("index.json")));
+        assert!(
+            opened
+                .iter()
+                .all(|path| path == &handle.layout.marker() || path == &raw.join("index.json")),
+            "{opened:?}"
+        );
+    }
+    for point in ["refs.metadata-read", "graph.observe"] {
+        fsutil::fail_once(point, libc::EIO);
+        assert!(
+            handle
+                .resolve(&selector(reference().as_str()))
+                .unwrap()
+                .is_some()
+        );
+        assert!(fsutil::fault(point).is_err(), "resolution consumed {point}");
+    }
     assert_eq!(snapshot(temporary.path()), before);
 }
 
@@ -169,6 +236,15 @@ fn digest_lookup_preserves_literal_scope_precedence_and_root_identity() {
     let reference = LocalRef::new("registry:5000/tool:aaa").unwrap();
     let raw = publish(&handle, &reference, Image::One, false);
     fs::write(raw.join("metadata.json"), b"{").unwrap();
+    assert_eq!(
+        handle
+            .resolve(&selector(format!(
+                "registry:5000/tool:missing@{}",
+                root(Image::One)
+            )))
+            .unwrap(),
+        Some(format!("registry:5000/tool@{}", root(Image::One)))
+    );
     assert!(
         handle
             .exists(&selector(format!(
@@ -183,6 +259,12 @@ fn digest_lookup_preserves_literal_scope_precedence_and_root_identity() {
         "registry:5000/other",
         "REGISTRY:5000/tool",
     ] {
+        assert_eq!(
+            handle
+                .resolve(&selector(format!("{repository}@{}", root(Image::One))))
+                .unwrap(),
+            None
+        );
         assert!(
             !handle
                 .exists(&selector(format!("{repository}@{}", root(Image::One))))
@@ -190,6 +272,12 @@ fn digest_lookup_preserves_literal_scope_precedence_and_root_identity() {
         );
     }
     for digest in [digest(CONFIG_DIGEST), root(Image::Two)] {
+        assert_eq!(
+            handle
+                .resolve(&selector(format!("registry:5000/tool:aaa@{digest}")))
+                .unwrap(),
+            None
+        );
         assert!(
             !handle
                 .exists(&selector(format!("registry:5000/tool:aaa@{digest}")))
@@ -201,6 +289,15 @@ fn digest_lookup_preserves_literal_scope_precedence_and_root_identity() {
         &LocalRef::new("registry:5000/tool:bbb").unwrap(),
         Image::One,
         false,
+    );
+    assert_eq!(
+        handle
+            .resolve(&selector(format!(
+                "registry:5000/tool@{}",
+                root(Image::One)
+            )))
+            .unwrap(),
+        Some(format!("registry:5000/tool@{}", root(Image::One)))
     );
     assert!(
         handle
@@ -263,7 +360,15 @@ fn digest_damage_cannot_prove_absence_but_a_definite_match_wins() {
             }
         }
         let before = snapshot(temporary.path());
+        assert!(
+            handle.resolve(&selector(broken.as_str())).is_err(),
+            "{case}"
+        );
         for digest in [root(Image::One), root(Image::Two)] {
+            assert!(
+                matches!(handle.resolve(&selector(format!("analysis/tool@{digest}"))), Err(Error::ResolutionIncomplete { diagnostics, .. }) if !diagnostics.is_empty()),
+                "{case}"
+            );
             let error = handle
                 .exists(&selector(format!("analysis/tool@{digest}")))
                 .unwrap_err();
@@ -277,12 +382,25 @@ fn digest_damage_cannot_prove_absence_but_a_definite_match_wins() {
                 .exists(&selector(format!("another/repo@{}", root(Image::One))))
                 .unwrap()
         );
+        assert_eq!(
+            handle
+                .resolve(&selector(format!("another/repo@{}", root(Image::One))))
+                .unwrap(),
+            None
+        );
         assert_eq!(snapshot(temporary.path()), before);
         publish(
             &handle,
             &LocalRef::new("analysis/tool:bbb").unwrap(),
             Image::One,
             false,
+        );
+        assert_eq!(
+            handle
+                .resolve(&selector(format!("analysis/tool@{}", root(Image::One))))
+                .unwrap(),
+            Some(format!("analysis/tool@{}", root(Image::One))),
+            "{case}"
         );
         assert!(
             handle
@@ -301,6 +419,21 @@ fn incomplete_discovery_is_an_error_unless_a_match_is_known() {
     fs::write(handle.layout.root().join("refs/unknown"), b"preserve").unwrap();
     assert!(
         handle
+            .resolve(&selector(format!("analysis/tool@{}", root(Image::One))))
+            .unwrap()
+            .is_some()
+    );
+    assert!(matches!(
+        handle.resolve(&selector(format!("absent@{}", root(Image::One)))),
+        Err(Error::ResolutionIncomplete { .. })
+    ));
+    fsutil::fail_once("discovery.enumerate", libc::EIO);
+    assert!(matches!(
+        handle.resolve(&selector(format!("analysis/tool@{}", root(Image::One)))),
+        Err(Error::ResolutionIncomplete { .. })
+    ));
+    assert!(
+        handle
             .exists(&selector(format!("analysis/tool@{}", root(Image::One))))
             .unwrap()
     );
@@ -317,32 +450,43 @@ fn incomplete_discovery_is_an_error_unless_a_match_is_known() {
 
 #[test]
 fn exists_recovers_recorded_work_before_observing_and_blocks_on_unsafe_recovery() {
-    let temporary = tempfile::tempdir().unwrap();
-    let handle = store(temporary.path());
-    publish(&handle, &reference(), Image::One, false);
-    {
-        let guard = handle.prepare(Operation::Import).unwrap();
-        let mutation = Mutation::begin(&guard, &reference(), Kind::Import).unwrap();
-        drop(mutation.stage().unwrap());
+    for resolve in [false, true] {
+        let observe = |handle: &Store, selected: &ImageSelector| {
+            if resolve {
+                handle
+                    .resolve(selected)
+                    .map(|reference| reference.is_some())
+            } else {
+                handle.exists(selected)
+            }
+        };
+        let temporary = tempfile::tempdir().unwrap();
+        let handle = store(temporary.path());
+        publish(&handle, &reference(), Image::One, false);
+        {
+            let guard = handle.prepare(Operation::Import).unwrap();
+            let mutation = Mutation::begin(&guard, &reference(), Kind::Import).unwrap();
+            drop(mutation.stage().unwrap());
+        }
+        for _ in 0..2 {
+            assert!(observe(&handle, &selector(reference().as_str())).unwrap());
+        }
+        assert!(!crate::recovery::pending(&handle.layout).unwrap());
+        fsutil::fail_once("ref.remove-sync", libc::EIO);
+        assert!(handle.remove(&reference()).is_err());
+        assert!(crate::recovery::pending(&handle.layout).unwrap());
+        for _ in 0..2 {
+            assert!(!observe(&handle, &selector(reference().as_str())).unwrap());
+        }
+        assert!(!crate::recovery::pending(&handle.layout).unwrap());
+        fs::write(handle.layout.root().join("pending-mutation.json"), b"{").unwrap();
+        let before = snapshot(temporary.path());
+        assert!(matches!(
+            observe(&handle, &selector("absent:t")),
+            Err(Error::Recovery { .. })
+        ));
+        assert_eq!(snapshot(temporary.path()), before);
     }
-    for _ in 0..2 {
-        assert!(handle.exists(&selector(reference().as_str())).unwrap());
-    }
-    assert!(!crate::recovery::pending(&handle.layout).unwrap());
-    fsutil::fail_once("ref.remove-sync", libc::EIO);
-    assert!(handle.remove(&reference()).is_err());
-    assert!(crate::recovery::pending(&handle.layout).unwrap());
-    for _ in 0..2 {
-        assert!(!handle.exists(&selector(reference().as_str())).unwrap());
-    }
-    assert!(!crate::recovery::pending(&handle.layout).unwrap());
-    fs::write(handle.layout.root().join("pending-mutation.json"), b"{").unwrap();
-    let before = snapshot(temporary.path());
-    assert!(matches!(
-        handle.exists(&selector("absent:t")),
-        Err(Error::Recovery { .. })
-    ));
-    assert_eq!(snapshot(temporary.path()), before);
 }
 
 #[test]
@@ -352,6 +496,10 @@ fn exists_holds_shared_access_through_name_and_digest_lookup() {
         "exists-held-digest",
         "exists-scan-remove",
         "exists-scan-replace",
+        "resolve-held-name",
+        "resolve-held-digest",
+        "resolve-scan-remove",
+        "resolve-scan-replace",
     ] {
         let temporary = tempfile::tempdir().unwrap();
         let handle = store(temporary.path());
@@ -359,6 +507,12 @@ fn exists_holds_shared_access_through_name_and_digest_lookup() {
         let mut reader = Worker::start(temporary.path(), &reference(), action);
         reader.wait_for("PUBLICATION_PAUSED");
         assert!(handle.exists(&selector(reference().as_str())).unwrap());
+        assert!(
+            handle
+                .resolve(&selector(reference().as_str()))
+                .unwrap()
+                .is_some()
+        );
         finish_reader_before_mutation(temporary.path(), &mut reader, !action.ends_with("replace"));
     }
 }
@@ -379,6 +533,10 @@ fn exists_propagates_short_lock_timeouts_without_changes() {
             handle.exists(&selected),
             Err(Error::LockTimeout { .. })
         ));
+        assert!(matches!(
+            handle.resolve(&selected),
+            Err(Error::LockTimeout { .. })
+        ));
     }
     assert_eq!(snapshot(temporary.path()), before);
 }
@@ -396,17 +554,26 @@ pub(super) fn worker(handle: &Store, reference: &LocalRef, action: &str) {
         permission_cases();
         return;
     }
-    fsutil::pause_once(if action.starts_with("exists-scan-") {
+    fsutil::pause_once(if action.contains("-scan-") {
         "exists.discovered"
+    } else if action == "resolve-held-name" {
+        "resolve.selected"
     } else {
         "exists.selected"
     });
-    let selected = if action == "exists-held-name" {
+    let selected = if action.ends_with("-held-name") {
         selector(reference.as_str())
     } else {
         selector(format!("{}@{}", reference.name(), root(Image::One)))
     };
-    assert!(handle.exists(&selected).unwrap());
+    if action.starts_with("resolve-") {
+        assert_eq!(
+            handle.resolve(&selected).unwrap(),
+            Some(format!("{}@{}", reference.name(), root(Image::One)))
+        );
+    } else {
+        assert!(handle.exists(&selected).unwrap());
+    }
 }
 
 fn permission_cases() {
@@ -430,6 +597,9 @@ fn permission_cases() {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o0)).unwrap();
         let named = handle.exists(&selector(reference().as_str()));
         let by_digest = handle.exists(&selector(format!("analysis/tool@{}", root(Image::One))));
+        let resolved_name = handle.resolve(&selector(reference().as_str()));
+        let resolved_digest =
+            handle.resolve(&selector(format!("analysis/tool@{}", root(Image::One))));
         fs::set_permissions(&path, permissions).unwrap();
         if file == "index.json" {
             assert!(named.unwrap());
@@ -440,5 +610,10 @@ fn permission_cases() {
             );
         }
         assert!(by_digest.is_err(), "{file}");
+        assert!(
+            matches!(resolved_name, Err(Error::Io { source, .. }) if source.kind() == io::ErrorKind::PermissionDenied),
+            "{file}"
+        );
+        assert!(resolved_digest.is_err(), "{file}");
     }
 }

@@ -74,6 +74,7 @@ pub(crate) enum Operation {
     Remove,
     Check,
     Exists,
+    Resolve,
     Recovery,
 }
 impl Operation {
@@ -83,7 +84,7 @@ impl Operation {
     pub fn store_mode(self) -> Mode {
         match self {
             Self::Import | Self::Pull | Self::Remove | Self::Recovery => Mode::Exclusive,
-            Self::Export | Self::List | Self::Check | Self::Exists => Mode::Shared,
+            Self::Export | Self::List | Self::Check | Self::Exists | Self::Resolve => Mode::Shared,
         }
     }
 }

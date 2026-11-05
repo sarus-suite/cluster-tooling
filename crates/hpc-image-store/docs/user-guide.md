@@ -66,7 +66,7 @@ metadata alone does not prevent reclamation. `--replace` is not a repair command
 
 ## Names and digests
 
-Import, pull, export, exists, and single-image check use `name[:tag][@digest]`.
+Import, pull, export, exists, resolve, and single-image check use `name[:tag][@digest]`.
 Supply a repository name and at least a tag or digest. Registry ports work. Names retain
 their spelling: `alpine` and `docker.io/library/alpine` are different repositories.
 No `latest` tag or registry prefix is inferred. Bare digests, image IDs,
@@ -186,7 +186,7 @@ parent, and resumes recognized interrupted initialization. It can therefore
 create persistent store structure and return a complete empty inventory, without
 Podman or Skopeo. Failed setup returns an error without internal retries;
 retry list, import, or pull to finish it.
-Remove, exists, export, and check do not initialize or recover pending setup,
+Remove, exists, resolve, export, and check do not initialize or recover pending setup,
 even when a store marker is already visible.
 
 Check accepts one selector or `--all` and traverses the supported local graph,
@@ -225,6 +225,32 @@ can perform cleanup or block the query. Clean lookup reads no blobs and performs
 no graph validation or tool invocation. Presence reserves nothing for a later
 operation and does not establish image health; request `check` explicitly.
 
+## Resolve a stored digest reference
+
+```sh
+hpc-image-store --store /scratch/me/images resolve analysis/tool:release
+hpc-image-store --store /scratch/me/images --json resolve analysis/tool:release
+```
+
+`resolve` prints the literal repository name and authoritative stored root digest
+as `analysis/tool@sha256:…`, without a tag, followed by a newline. If definitely
+absent, it prints nothing. With `--json`, it emits `{"reference":"analysis/tool@sha256:…"}`
+when found or `{"reference":null}` when absent. Exit statuses are 0 for found,
+1 for absent, 125 for an operational error, and 2 for invalid usage. Operational
+errors print diagnostics to stderr and no result payload.
+
+A tag-only selector resolves the exact stored name. Unlike `exists`, resolution
+requires a valid confined pointer and readable root index, so damaged identities
+return errors. A digest selector ignores any supplied tag and uses the same
+repository-scoped identity search as digest existence. Cached metadata, other
+image wrappers, and blob contents are not inspected.
+
+Resolution requires completed initialization and finishes pending recorded
+mutation recovery first. It invokes no tools or remote requests. The reference
+identifies content independently of tag changes, but reserves nothing and does
+not certify image health or continued availability; removal of the last matching
+ref can make a later lookup fail.
+
 ## Remove refs and reclaim content
 
 ```sh
@@ -255,11 +281,12 @@ Unexpected content is never adopted as part of that cleanup.
 
 ## Output and troubleshooting
 
-For commands other than `exists`, status 0 means success, 1 means an operation
-or collected check/report failed, and 2 means invalid CLI usage. The silent
-`exists` command uses the presence/error statuses described above. JSON results
-go to stdout, with diagnostics, skips, and warnings on stderr. Tools' output is captured so it cannot corrupt
-JSON. A store-preparation or selector-resolution failure may occur before any
+For commands other than `exists` and `resolve`, status 0 means success, 1 means
+an operation or collected check/report failed, and 2 means invalid CLI usage.
+The silent `exists` command and the `resolve` command use the presence/error
+statuses described above. JSON results go to stdout, with diagnostics, skips,
+and warnings on stderr. Tools' output is captured so it cannot corrupt JSON.
+A store-preparation or selector-resolution failure may occur before any
 JSON report exists. Successful import and pull finish durable cleanup and
 reclamation. Their cleanup failures return status 1
 and contextual stderr diagnostics, with no success text or JSON report. A ref

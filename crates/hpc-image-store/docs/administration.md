@@ -30,7 +30,7 @@ is outside this PoC.
 | Import | Local Podman and Skopeo using the same containers-storage context |
 | Pull | Skopeo, registry connectivity, and any required authentication/trust configuration |
 | Export | Skopeo and the destination containers-storage context |
-| List, check, exists, remove | No Podman or Skopeo invocation |
+| List, check, exists, resolve, remove | No Podman or Skopeo invocation |
 
 The library checks Skopeo capabilities rather than enforcing a numeric version
 floor: shared-blob support, platform flags when requested, and preservation for
@@ -54,7 +54,7 @@ internal structure, never missing ancestors. Do not put a store inside another
 store; initialization does not search ancestors to detect that setup error.
 
 Import, pull, and list initialize missing or empty stores and recover recognized
-interrupted setup. Exists, remove, export, and check require completed setup;
+interrupted setup. Exists, resolve, remove, export, and check require completed setup;
 they create no root or lock bookkeeping and do not recover pending initialization.
 List therefore creates persistent structure even when it returns an empty inventory.
 

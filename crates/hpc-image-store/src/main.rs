@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
-    about = "Import, pull, export, list, check, test existence and remove images from a filesystem OCI store"
+    about = "Import, pull, export, list, check, resolve, test existence and remove images from a filesystem OCI store"
 )]
 struct Cli {
     #[arg(long)]
@@ -27,6 +27,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Print a stored digest reference: exit 0 found, 1 absent, 125 operational error.
+    Resolve {
+        /// Stored name[:tag][@sha256:digest]; a digest overrides the tag within this repository.
+        selector: ImageSelector,
+    },
     /// Test local presence silently: exit 0 present, 1 absent, 125 operational error.
     Exists {
         /// Stored name[:tag][@sha256:digest]; a digest overrides the tag within this repository.
@@ -124,6 +129,15 @@ fn execute(cli: Cli) -> hpc_image_store::Result<bool> {
         platform: cli.platform,
     };
     match cli.command {
+        Action::Resolve { selector } => {
+            let reference = store.resolve(&selector)?;
+            if cli.json {
+                println!("{}", serde_json::json!({ "reference": reference }));
+            } else if let Some(reference) = &reference {
+                println!("{reference}");
+            }
+            return Ok(reference.is_some());
+        }
         Action::Exists { selector } => return store.exists(&selector),
         Action::Check { selector, all: _ } => {
             let scope = selector.map_or(CheckScope::All, CheckScope::Image);
@@ -281,11 +295,12 @@ fn usage_error(message: impl std::fmt::Display) -> ! {
 }
 fn main() {
     let cli = Cli::parse();
-    let operational_error_status = if matches!(&cli.command, Action::Exists { .. }) {
-        125
-    } else {
-        1
-    };
+    let operational_error_status =
+        if matches!(&cli.command, Action::Exists { .. } | Action::Resolve { .. }) {
+            125
+        } else {
+            1
+        };
     if let Action::List { format, digests } = &cli.command {
         if cli.json && format.is_some_and(|format| format != ListFormat::Json) {
             usage_error("--json conflicts with --format podman or full");

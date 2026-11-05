@@ -1547,6 +1547,190 @@ fn exists_is_silent_and_json_preserves_all_exit_statuses() {
     assert_eq!(checked.status.code(), Some(1));
 }
 
+fn assert_resolve_output(
+    output: &std::process::Output,
+    json: bool,
+    status: i32,
+    reference: Option<&str>,
+) {
+    assert_eq!(output.status.code(), Some(status), "{output:?}");
+    if status == 0 || status == 1 {
+        let expected = if json {
+            format!("{}\n", serde_json::json!({ "reference": reference }))
+        } else {
+            reference.map_or_else(String::new, |reference| format!("{reference}\n"))
+        };
+        assert_eq!(output.stdout, expected.as_bytes());
+        assert!(output.stderr.is_empty(), "{output:?}");
+    } else {
+        assert!(output.stdout.is_empty(), "{output:?}");
+        assert!(!output.stderr.is_empty(), "{output:?}");
+    }
+}
+
+#[test]
+fn resolve_outputs_digest_references_and_distinguishes_absence_from_damage() {
+    use std::{fs, os::unix::fs::symlink};
+    let fixture = InventoryFixture::new();
+    fixture.import("REGISTRY:5000/team/tool:Release");
+    fixture.import("other:t");
+    let report = fixture.report();
+    let digest = report["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["local_ref"] == "tool:t")
+        .unwrap()["stored_root"]
+        .as_str()
+        .unwrap();
+    let expected = format!("tool@{digest}");
+    let qualified = format!("REGISTRY:5000/team/tool@{digest}");
+    let pointer = fixture
+        .root()
+        .join("refs")
+        .join(
+            hpc_image_store::LocalRef::new("tool:t")
+                .unwrap()
+                .encoded_path(),
+        )
+        .join("ref");
+    let raw = fs::canonicalize(&pointer).unwrap();
+    let other = fixture
+        .root()
+        .join("refs")
+        .join(
+            hpc_image_store::LocalRef::new("other:t")
+                .unwrap()
+                .encoded_path(),
+        )
+        .join("ref");
+    fs::write(fs::canonicalize(other).unwrap().join("index.json"), b"{").unwrap();
+    fs::write(raw.join("metadata.json"), b"{").unwrap();
+    for tool in ["podman", "skopeo"] {
+        fs::remove_file(fixture.directory.path().join(tool)).unwrap();
+    }
+    let before = snapshot(&fixture.root());
+    for json in [false, true] {
+        for (selected, status, reference) in [
+            ("tool:t".to_owned(), 0, Some(expected.as_str())),
+            ("tool:missing".to_owned(), 1, None),
+            (format!("tool:ignored@{digest}"), 0, Some(expected.as_str())),
+            (format!("tool@sha256:{}", "0".repeat(64)), 1, None),
+            (format!("absent@{digest}"), 1, None),
+            (
+                "REGISTRY:5000/team/tool:Release".to_owned(),
+                0,
+                Some(qualified.as_str()),
+            ),
+            (format!("other@{digest}"), 125, None),
+        ] {
+            let mut command = fixture.command();
+            if json {
+                command.arg("--json");
+            }
+            assert_resolve_output(
+                &command.args(["resolve", &selected]).output().unwrap(),
+                json,
+                status,
+                reference,
+            );
+        }
+    }
+    assert_eq!(snapshot(&fixture.root()), before);
+    fs::write(raw.join("index.json"), b"{").unwrap();
+    for json in [false, true] {
+        for selected in ["tool:t".to_owned(), format!("tool@{digest}")] {
+            let mut command = fixture.command();
+            if json {
+                command.arg("--json");
+            }
+            assert_resolve_output(
+                &command.args(["resolve", &selected]).output().unwrap(),
+                json,
+                125,
+                None,
+            );
+        }
+    }
+    fs::remove_file(&pointer).unwrap();
+    symlink("/unavailable/dangling", &pointer).unwrap();
+    for json in [false, true] {
+        let mut command = fixture.command();
+        if json {
+            command.arg("--json");
+        }
+        assert_resolve_output(
+            &command.args(["resolve", "tool:t"]).output().unwrap(),
+            json,
+            125,
+            None,
+        );
+    }
+}
+
+#[test]
+fn resolve_preserves_setup_recovery_and_parser_contracts() {
+    use std::fs;
+    for json in [false, true] {
+        for case in ["missing", "empty", "recovery", "invalid-recovery"] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join("store");
+            let stage = match case {
+                "empty" => {
+                    fs::create_dir(&root).unwrap();
+                    None
+                }
+                "recovery" | "invalid-recovery" => Some(recorded_acquisition(&root)),
+                _ => None,
+            };
+            if case == "invalid-recovery" {
+                fs::write(root.join("pending-mutation.json"), b"{").unwrap();
+            }
+            let before = snapshot(directory.path());
+            let mut command = cli();
+            command.arg("--store").arg(&root);
+            if json {
+                command.arg("--json");
+            }
+            let status = if case == "recovery" { 1 } else { 125 };
+            assert_resolve_output(
+                &command.args(["resolve", "tool:tag"]).output().unwrap(),
+                json,
+                status,
+                None,
+            );
+            if case == "recovery" {
+                assert!(!stage.unwrap().exists());
+                assert!(!root.join("pending-mutation.json").exists());
+            } else {
+                assert_eq!(snapshot(directory.path()), before, "{case}");
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("absent");
+        for args in [
+            vec!["resolve"],
+            vec!["resolve", "tool"],
+            vec!["resolve", "tool:t", "extra"],
+            vec!["resolve", "tool:t", "--unknown"],
+            vec!["resolve", "tool@sha256:bad"],
+            vec!["resolve", &format!("sha256:{}", "a".repeat(64))],
+        ] {
+            let mut command = cli();
+            command.arg("--store").arg(&root);
+            if json {
+                command.arg("--json");
+            }
+            assert_resolve_output(&command.args(args).output().unwrap(), json, 2, None);
+            assert!(!root.exists());
+        }
+    }
+    let output = cli().args(["resolve", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("<SELECTOR>"));
+}
+
 #[test]
 fn exists_distinguishes_prefix_directories_from_names() {
     let fixture = InventoryFixture::new();
@@ -1823,6 +2007,7 @@ fn noninitializing_commands_preserve_pending_setup_before_and_after_publication(
             for args in [
                 vec!["remove", "missing:t"],
                 vec!["exists", "missing:t"],
+                vec!["resolve", "missing:t"],
                 vec!["export", "missing:t"],
                 vec!["check", "--all"],
             ] {
@@ -1839,7 +2024,11 @@ fn noninitializing_commands_preserve_pending_setup_before_and_after_publication(
                 let output = command.args(&args).output().unwrap();
                 assert_eq!(
                     output.status.code(),
-                    Some(if args[0] == "exists" { 125 } else { 1 })
+                    Some(if matches!(args[0], "exists" | "resolve") {
+                        125
+                    } else {
+                        1
+                    })
                 );
                 assert!(output.stdout.is_empty());
                 let error = String::from_utf8_lossy(&output.stderr);

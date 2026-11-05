@@ -30,7 +30,7 @@ graph traversal. Unrecorded remnants are not automatically recovered.
 Import, pull, and remove record their complete mutation lifecycle. Import, pull,
 and list may initialize a missing or empty store beneath an already prepared
 parent and recover recorded interrupted setup. List returns a complete empty
-inventory for a newly initialized store. Remove, exists, export, and check require
+inventory for a newly initialized store. Remove, exists, resolve, export, and check require
 completed initialization and never create a missing root or resume setup.
 
 Initialization records pending setup separately from image mutations. A failed
@@ -229,6 +229,42 @@ a ref cannot generally repair damaged immutable shared CAS objects. Neither an
 existence result nor an earlier check authorizes later reclamation; mutations
 and recovery read authoritative dependency declarations when cleanup is needed.
 Unrecorded remnants remain preserved without a general reclamation API.
+
+## Resolving a stored digest reference
+
+`Store::resolve(&ImageSelector) -> Result<Option<String>>` returns an existing
+image's literal repository name and authoritative stored root digest, without
+a tag. Definite absence returns `None`; unreadable or invalid identity returns
+a typed error.
+
+```no_run
+use hpc_image_store::{ImageSelector, Store, StoreConfig};
+
+let store = Store::new(StoreConfig::new("/scratch/me/images")?);
+let selector = ImageSelector::new("analysis/tool:release")?;
+if let Some(reference) = store.resolve(&selector)? {
+    // For example: analysis/tool@sha256:<64 lowercase hexadecimal digits>.
+    let by_digest = ImageSelector::new(reference)?;
+    assert!(by_digest.tag().is_none());
+    assert!(by_digest.digest().is_some());
+}
+# Ok::<(), hpc_image_store::Error>(())
+```
+
+For a tag-only selector, resolution checks the exact terminal entry, follows
+only a canonical confined pointer, and reads its authoritative root index.
+This is stricter than tagged `exists`, which accepts malformed or dangling
+pointers. A supplied digest overrides the tag and uses the same literal
+repository search as digest existence: a readable match wins despite other
+damage, while incomplete resolution without a match is an error.
+
+Resolution requires completed initialization and finishes pending recorded
+mutation recovery before retaining shared access through lookup and result
+construction. Clean resolution reads no cached metadata, unrelated wrappers,
+or CAS objects, traverses no graph, and invokes no tools or remote requests.
+The returned reference reserves nothing, certifies no structural health, and
+does not guarantee continued availability. Another operation may remove the
+last matching ref before the reference is used.
 
 ## Registry settings and metadata types
 

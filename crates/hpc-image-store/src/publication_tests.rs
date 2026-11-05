@@ -971,7 +971,7 @@ fn publication_worker() {
         interruption_worker(&handle, &reference, &action);
         return;
     }
-    if action.starts_with("exists-") {
+    if action.starts_with("exists-") || action.starts_with("resolve-") {
         exists_tests::worker(&handle, &reference, &action);
         println!("PUBLICATION_READY");
         return;

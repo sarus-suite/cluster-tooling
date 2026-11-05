@@ -2,8 +2,9 @@
 
 The current PoC implements single-platform containers-storage import/export,
 manifest-preserving registry pull, inventory, structural graph checking,
-explicit ref removal with immediate reclamation, and lightweight existence queries.
-The CLI has seven commands. Store format 2 and ref metadata schema 3 are used.
+explicit ref removal with immediate reclamation, lightweight existence queries,
+and stored digest-reference resolution. The CLI has eight commands.
+Store format 2 and ref metadata schema 3 are used.
 PoC v2 Stage 2 replaces per-ref locks with one permanent store lock; the content
 lifecycle was retained through Stage 3, which adds durable mutation records and
 automatic recovery during operation preparation. Stages 4.1 through 4.3 integrate
@@ -33,6 +34,35 @@ Rust examples remain doctests. The crate README is the short navigation entry
 point. Keep relative repository links out of the included library guide; use
 API references or self-contained explanations so generated rustdoc navigation
 also works.
+
+## Stored digest-reference resolution
+
+`Store::resolve(&ImageSelector) -> Result<Option<String>>` and the `resolve` CLI
+return the literal repository and authoritative stored root as `name@sha256:…`.
+Tag-only resolution reads the exact ref's pointer and root index; digest lookup
+shares existence's lightweight search. Resolution requires completed setup and
+retains shared access after prerequisite recorded mutation recovery. It does not
+certify structural health or reserve content. CLI statuses are 0/1/125/2 for
+found/absent/error/invalid usage; JSON carries a `reference` string or null.
+
+The publication existence fixtures also cover resolution, including exact tags,
+manifest/index roots, literal repositories, damaged pointers/indexes, minimal
+reads, recovery, short lock timeouts, permissions, and shared-reader/writer
+coordination. CLI regressions verify result bytes, JSON, errors, setup, recovery,
+parser behavior, and independence from transfer tools. The library example is
+compiled as a doctest.
+
+On 5 November 2026, the complete crate suite passed 250 tests: 204 library
+tests, 33 CLI tests, one real-transfer test, five controlled-registry tests,
+and seven doctests. Six library subprocess helpers and one CLI helper remained
+ignored by their top-level runners and were invoked by their owning tests.
+The separately ignored Docker Hub smoke test was not selected; no live registry
+was contacted. The real-transfer test used disposable local storage with
+Podman 5.4.2 and Skopeo 1.18.0. Crate check, all-target Clippy with warnings
+denied, formatting verification, rustdoc with warnings denied, and diff checks
+passed. Cargo required access to its configured build cache outside the
+filesystem sandbox. These local results do not qualify Lustre/VAST behavior
+or power-loss durability.
 
 ## PoC v2 Stage 7: list initialization and recorded setup recovery
 
@@ -711,6 +741,27 @@ Imported images gain no round-trip digest comparisons.
 The six ignored subprocess helpers, including `pull_worker`, are invoked only
 by their owning tests. The Docker Hub smoke test is separately ignored for its
 network access. Never use an unfiltered `--ignored` invocation.
+
+## Future work: align existence with digest-reference resolution
+
+Consider making `Store::exists()` require the same readable identity as
+`Store::resolve()`. With that contract, existence could delegate to resolution
+and return `self.resolve(selector).map(|reference| reference.is_some())`,
+preserving typed errors and returning false only for definite absence.
+
+This would change tag-only existence: a terminal entry would need a canonical
+confined pointer and a readable valid root index. Dangling or malformed pointers
+and unreadable or invalid indexes would return errors instead of counting as
+present. Tagged existence would also read the root index. The silent `exists`
+CLI would consequently return operational-error status 125 for these cases,
+where it currently returns 0. Digest existence already shares resolution's
+identity requirements. The stricter contract would still certify neither image
+health nor continued availability and would reserve nothing.
+
+This is deferred work, not a change to current behavior. Before implementing it,
+review callers that rely on terminal-entry presence and update the architecture,
+guides, and library/CLI regression tests to describe and verify the stricter
+contract. Retain resolution's preparation, recovery, and shared-lock guarantees.
 
 ## Future work: guided in-place repair
 

@@ -8,7 +8,7 @@ The workspace-private crate provides a synchronous Rust library and the
 Import images from local Podman containers-storage, pull one OCI image manifest
 directly from a registry, and export stored images back to containers-storage.
 The store shares immutable image objects between refs. It also supports inventory,
-structural checking, lightweight existence queries, and explicit ref removal
+structural checking, lightweight existence and digest-reference queries, and explicit ref removal
 with immediate unused-content reclamation.
 
 ## Quick start
@@ -29,6 +29,7 @@ an already prepared parent directory. See the
 hpc-image-store --store /scratch/me/images import localhost/tool:latest analysis/tool:release
 hpc-image-store --store /scratch/me/images list
 hpc-image-store --store /scratch/me/images exists analysis/tool:release
+hpc-image-store --store /scratch/me/images resolve analysis/tool:release
 hpc-image-store --store /scratch/me/images check analysis/tool:release
 hpc-image-store --store /scratch/me/images export analysis/tool:release localhost/restored:latest
 hpc-image-store --store /scratch/me/images remove analysis/tool:release
@@ -43,9 +44,11 @@ and namespace prefixes needed by other names. Import, pull, and their replacemen
 also complete their own durable staging cleanup and reclamation. Unrecorded
 remnants remain preserved; there is no general reclamation interface.
 
-`exists` is silent: status 0 means present, 1 absent, 125 an operational error,
-and 2 invalid usage. It requires an initialized store and does not establish image health;
-use explicit `check` for that.
+`exists` is silent; `resolve` prints the stored image's literal repository name and
+root digest as `name@sha256:…`, without a tag.
+Both commands return status 0 when found, 1 when absent, 125 on an operational error,
+and 2 for invalid usage. They require an initialized store and do not establish image
+health; use explicit `check` for that.
 
 Cleanup failures are errors recovered during later operation preparation. A
 removed name can already be absent when damage elsewhere blocks cleanup and

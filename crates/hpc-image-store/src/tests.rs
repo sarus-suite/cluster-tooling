@@ -425,7 +425,12 @@ fn operation_matrix_is_explicit() {
         assert_eq!(operation.store_mode(), Mode::Exclusive);
         assert!(operation.initializes());
     }
-    for operation in [Operation::Export, Operation::Check, Operation::Exists] {
+    for operation in [
+        Operation::Export,
+        Operation::Check,
+        Operation::Exists,
+        Operation::Resolve,
+    ] {
         assert_eq!(operation.store_mode(), Mode::Shared);
         assert!(!operation.initializes());
     }
@@ -1064,6 +1069,7 @@ fn noninitializing_operations_preserve_bootstrap_and_published_pending_setup() {
         for operation in [
             Operation::Remove,
             Operation::Exists,
+            Operation::Resolve,
             Operation::Export,
             Operation::Check,
         ] {
