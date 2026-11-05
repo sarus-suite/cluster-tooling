@@ -21,6 +21,10 @@
         }
       }
     },
+    "hpc_imagestore": {
+      "description": "filesystem path to the HPC image store",
+      "type": "string"
+    },
     "parallax_imagestore": {
       "description": "shared filesystem path where to store/load images",
       "type": "string"
@@ -78,6 +82,10 @@
     },
     "runtime_path": {
       "description": "filesystem path to OCI container runtime",
+      "type": "string"
+    },
+    "skopeo_path": {
+      "description": "filesystem path to the skopeo executable",
       "type": "string"
     },
     "skybox_enabled": {

@@ -29,6 +29,7 @@ impl Error for ConfigResolutionError {}
 pub struct RawConfig {
     edf_system_search_path: Option<String>,
     hooks: Option<RawConfigHooks>,
+    hpc_imagestore: Option<String>,
     parallax_imagestore: Option<String>,
     parallax_imagestore_keepalive: Option<bool>,
     parallax_mount_program: Option<String>,
@@ -44,6 +45,7 @@ pub struct RawConfig {
     conmon_path: Option<String>,
     podman_tmp_path: Option<String>,
     runtime_path: Option<String>,
+    skopeo_path: Option<String>,
     skybox_enabled: Option<bool>,
     tracking_enabled: Option<bool>,
     tracking_tool: Option<String>,
@@ -60,6 +62,8 @@ pub struct Config {
     pub edf_system_search_path: String,
     #[serde(default = "get_default_hooks")]
     pub hooks: ConfigHooks,
+    #[serde(default = "get_default_hpc_imagestore")]
+    pub hpc_imagestore: String,
     #[serde(default = "get_default_parallax_imagestore")]
     pub parallax_imagestore: String,
     #[serde(default = "get_default_parallax_imagestore_keepalive")]
@@ -90,6 +94,8 @@ pub struct Config {
     pub podman_tmp_path: String,
     #[serde(default = "get_default_runtime_path")]
     pub runtime_path: String,
+    #[serde(default = "get_default_skopeo_path")]
+    pub skopeo_path: String,
     #[serde(default = "get_default_skybox_enabled")]
     pub skybox_enabled: bool,
     #[serde(default = "get_default_tracking_enabled")]
@@ -122,6 +128,10 @@ fn get_default_edf_system_search_path() -> String {
 }
 
 fn get_default_parallax_imagestore() -> String {
+    return String::from("");
+}
+
+fn get_default_hpc_imagestore() -> String {
     return String::from("");
 }
 
@@ -191,6 +201,10 @@ fn get_default_runtime_path() -> String {
     return String::from("crun");
 }
 
+fn get_default_skopeo_path() -> String {
+    return String::from("skopeo");
+}
+
 fn get_default_skybox_enabled() -> bool {
     return false;
 }
@@ -228,6 +242,10 @@ impl From<RawConfig> for Config {
             hooks: match r.hooks {
                 Some(s) => ConfigHooks::from(s),
                 None => get_default_hooks(),
+            },
+            hpc_imagestore: match r.hpc_imagestore {
+                Some(s) => s,
+                None => get_default_hpc_imagestore(),
             },
             parallax_imagestore: match r.parallax_imagestore {
                 Some(s) => s,
@@ -283,6 +301,10 @@ impl From<RawConfig> for Config {
                 Some(s) => s,
                 None => get_default_runtime_path(),
             },
+            skopeo_path: match r.skopeo_path {
+                Some(s) => s,
+                None => get_default_skopeo_path(),
+            },
             skybox_enabled: match r.skybox_enabled {
                 Some(s) => s,
                 None => get_default_skybox_enabled(),
@@ -307,6 +329,9 @@ impl RawConfig {
         }
         if i.hooks.is_some() {
             self.hooks = i.hooks;
+        }
+        if i.hpc_imagestore.is_some() {
+            self.hpc_imagestore = i.hpc_imagestore;
         }
         if i.parallax_imagestore.is_some() {
             self.parallax_imagestore = i.parallax_imagestore;
@@ -352,6 +377,9 @@ impl RawConfig {
         }
         if i.runtime_path.is_some() {
             self.runtime_path = i.runtime_path;
+        }
+        if i.skopeo_path.is_some() {
+            self.skopeo_path = i.skopeo_path;
         }
         if i.skybox_enabled.is_some() {
             self.skybox_enabled = i.skybox_enabled;
@@ -454,6 +482,7 @@ fn expand_raw_config_fields(
     };
 
     expand_raw_option_string(&mut r.edf_system_search_path, force, e)?;
+    expand_raw_option_string(&mut r.hpc_imagestore, force, e)?;
     expand_raw_option_string(&mut r.parallax_imagestore, force, e)?;
     expand_raw_option_string(&mut r.parallax_mount_program, force, e)?;
     expand_raw_option_string(&mut r.parallax_path, force, e)?;
@@ -465,6 +494,7 @@ fn expand_raw_config_fields(
     expand_raw_option_string(&mut r.conmon_path, force, e)?;
     expand_raw_option_string(&mut r.podman_tmp_path, force, e)?;
     expand_raw_option_string(&mut r.runtime_path, force, e)?;
+    expand_raw_option_string(&mut r.skopeo_path, force, e)?;
     expand_raw_option_string(&mut r.tracking_tool, force, e)?;
     Ok(())
 }
@@ -880,8 +910,10 @@ mod tests {
         let cfg = get_rendered_config("config").unwrap();
         let pwd = std::env::var("PWD").unwrap();
         let expected_imagestore = format!("{pwd}/imagestore");
+        let expected_hpc_imagestore = format!("{pwd}/hpc-imagestore");
 
         assert!(cfg.edf_system_search_path == "/etc/edf_test");
+        assert_eq!(cfg.hpc_imagestore, expected_hpc_imagestore);
         assert!(cfg.parallax_imagestore == expected_imagestore);
         assert!(cfg.parallax_mount_program == "parallax_mount_program77");
         assert!(cfg.parallax_path == "parallax50");
@@ -892,6 +924,7 @@ mod tests {
         assert!(cfg.conmon_path == "conmon");
         assert!(cfg.podman_tmp_path == "podman_tmp_path");
         assert!(cfg.runtime_path == "crun99");
+        assert_eq!(cfg.skopeo_path, "skopeo99");
         assert!(cfg.skybox_enabled == true);
         assert!(cfg.tracking_enabled == false);
         assert!(cfg.tracking_tool == "");
@@ -925,9 +958,19 @@ mod tests {
 
     #[test]
     fn load_config_rejects_empty_mksquashfs_path() {
-        let config_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test/config.empty-mksquashfs");
-        let error = load_config_path(Some(config_dir), VarExpand::Must, &None).unwrap_err();
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("invalid.conf"),
+            "mksquashfs_path = \"\"\n",
+        )
+        .unwrap();
+
+        let error = load_config_path(
+            Some(temp.path().to_path_buf()),
+            VarExpand::Must,
+            &None,
+        )
+        .unwrap_err();
 
         assert_eq!(error.code, 4);
         assert!(error.file_path.is_some());
@@ -1158,8 +1201,10 @@ mod tests {
         let temp = tempdir().unwrap();
         let config =
             load_config_path(Some(temp.path().to_path_buf()), VarExpand::Must, &None).unwrap();
+        assert_eq!(config.hpc_imagestore, "");
         assert_eq!(config.parallax_path, "parallax");
         assert_eq!(config.parallax_imagestore, "");
+        assert_eq!(config.skopeo_path, "skopeo");
     }
 
     #[cfg(unix)]
