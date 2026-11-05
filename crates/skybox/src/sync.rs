@@ -8,8 +8,9 @@ use sysinfo::{Pid, ProcessStatus, System};
 use slurm_spank::SpankHandle;
 
 use crate::{
-    SpankSkyBox, get_local_task_id, plugin_err, plugin_string, podman::podman_pull,
+    SpankSkyBox, get_local_task_id, plugin_err, plugin_string,
     podman::podman_start, podman::podman_stop, skybox_log_debug, skybox_log_error,
+    store::store_pull,
     tracking::track_usage,
 };
 
@@ -160,28 +161,28 @@ fn is_process_stopped(pid: usize) -> Result<bool, Box<dyn Error>> {
     }
 }
 
-pub(crate) fn sync_podman_pull(
+pub(crate) fn sync_store_pull(
     ssb: &mut SpankSkyBox,
     spank: &mut SpankHandle,
 ) -> Result<(), Box<dyn Error>> {
     if is_global_task_0(ssb, spank) {
-        match podman_pull(ssb, spank) {
+        match store_pull(ssb, spank) {
             Ok(_) => {
-                sync_podman_pull_done(ssb, spank, 0)?;
+                sync_store_pull_done(ssb, spank, 0)?;
             }
             Err(e) => {
-                sync_podman_pull_done(ssb, spank, -1)?;
+                sync_store_pull_done(ssb, spank, -1)?;
                 return Err(e);
             }
         }
     } else {
-        sync_podman_pull_wait(ssb, spank)?;
+        sync_store_pull_wait(ssb, spank)?;
     }
 
     Ok(())
 }
 
-pub(crate) fn sync_podman_pull_wait(
+pub(crate) fn sync_store_pull_wait(
     ssb: &mut SpankSkyBox,
     _spank: &mut SpankHandle,
 ) -> Result<(), Box<dyn Error>> {
@@ -224,7 +225,7 @@ pub(crate) fn sync_podman_pull_wait(
     Ok(())
 }
 
-pub(crate) fn sync_podman_pull_done(
+pub(crate) fn sync_store_pull_done(
     ssb: &mut SpankSkyBox,
     _spank: &mut SpankHandle,
     result: i32,
