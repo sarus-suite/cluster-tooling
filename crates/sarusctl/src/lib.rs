@@ -1,9 +1,12 @@
+mod yaml_images;
+
 use clap::ValueEnum;
 use hpc_image_store::{
     ExportReport, ImageSelector, ListReport, PullContext, PullOptions, PullReport, Store,
     StoreConfig, TransferContext, format_list_podman,
 };
 use raster::{self, EDF, ExecutedCommand, config::Config, hook_run};
+use saphyr::{ScalarOwned, YamlOwned};
 use sarus_suite_podman_driver::{self as pmd, ContainerCtx, PodmanCtx};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,6 +19,7 @@ use std::str;
 use std::time::{Duration, Instant};
 use tracing::instrument;
 use uuid::Uuid;
+use yaml_images::ParsedManifest;
 
 // TODO review pub status in this file, restrict pub only to entities needed in main.rs and tests
 
@@ -691,20 +695,16 @@ fn describe_dir_entries(path: &Path) -> String {
     }
 }
 
-pub fn extract_images_from_yaml_value(
-    manifest: &yaml_serde::Value,
-) -> Result<Vec<String>, AppError> {
+pub fn extract_images_from_yaml_value(manifest: &YamlOwned) -> Result<Vec<String>, AppError> {
     let mut images = BTreeSet::new();
     collect_yaml_images(manifest, &mut images);
     Ok(images.into_iter().collect())
 }
 
-pub fn extract_join_container_from_yaml_value(
-    manifest: &yaml_serde::Value,
-) -> Result<String, AppError> {
+pub fn extract_join_container_from_yaml_value(manifest: &YamlOwned) -> Result<String, AppError> {
     let containers = yaml_mapping_get(manifest, "spec")
         .and_then(|spec| yaml_mapping_get(spec, "containers"))
-        .and_then(yaml_serde::Value::as_sequence)
+        .and_then(|value| yaml_untag(value).as_sequence())
         .ok_or_else(|| AppError::Yaml(String::from("YAML manifest must define spec.containers")))?;
 
     let mut all_names = Vec::new();
@@ -712,7 +712,7 @@ pub fn extract_join_container_from_yaml_value(
 
     for container in containers {
         let name = yaml_mapping_get(container, "name")
-            .and_then(yaml_serde::Value::as_str)
+            .and_then(|value| yaml_untag(value).as_str())
             .ok_or_else(|| {
                 AppError::Yaml(String::from(
                     "Each container in spec.containers must define a string name",
@@ -722,7 +722,7 @@ pub fn extract_join_container_from_yaml_value(
 
         let join_label = yaml_mapping_get(container, "labels")
             .and_then(|labels| yaml_mapping_get(labels, "run.sarus.join"))
-            .and_then(yaml_serde::Value::as_str);
+            .and_then(|value| yaml_untag(value).as_str());
 
         if join_label == Some("true") {
             join_names.push(name.clone());
@@ -748,10 +748,10 @@ pub fn extract_join_container_from_yaml_value(
     }
 }
 
-pub fn extract_pod_name_from_yaml_value(manifest: &yaml_serde::Value) -> Result<String, AppError> {
+pub fn extract_pod_name_from_yaml_value(manifest: &YamlOwned) -> Result<String, AppError> {
     yaml_mapping_get(manifest, "metadata")
         .and_then(|metadata| yaml_mapping_get(metadata, "name"))
-        .and_then(yaml_serde::Value::as_str)
+        .and_then(|value| yaml_untag(value).as_str())
         .map(String::from)
         .ok_or_else(|| {
             AppError::Yaml(String::from(
@@ -760,45 +760,40 @@ pub fn extract_pod_name_from_yaml_value(manifest: &yaml_serde::Value) -> Result<
         })
 }
 
-pub fn get_join_container_from_yaml_manifest(
-    manifest: &yaml_serde::Value,
-) -> Result<String, AppError> {
+pub fn get_join_container_from_yaml_manifest(manifest: &YamlOwned) -> Result<String, AppError> {
     let container_name = extract_join_container_from_yaml_value(manifest)?;
     let pod_name = extract_pod_name_from_yaml_value(manifest)?;
     Ok(format!("{pod_name}-{container_name}"))
 }
 
-fn parse_yaml_value_from_file(filepath: &Path) -> Result<yaml_serde::Value, AppError> {
-    let contents = fs::read_to_string(filepath)
-        .map_err(|e| AppError::Io(format!("failed to read {}: {e}", filepath.display())))?;
-    parse_yaml_value_from_str(&contents)
-}
-
-fn parse_yaml_value_from_str(contents: &str) -> Result<yaml_serde::Value, AppError> {
-    yaml_serde::from_str::<yaml_serde::Value>(contents).map_err(|e| AppError::Yaml(e.to_string()))
-}
-
-fn yaml_mapping_get<'a>(value: &'a yaml_serde::Value, key: &str) -> Option<&'a yaml_serde::Value> {
+fn yaml_untag(mut value: &YamlOwned) -> &YamlOwned {
+    while let YamlOwned::Tagged(_, inner) = value {
+        value = inner;
+    }
     value
+}
+
+fn yaml_mapping_get<'a>(value: &'a YamlOwned, key: &str) -> Option<&'a YamlOwned> {
+    yaml_untag(value)
         .as_mapping()?
-        .get(yaml_serde::Value::String(String::from(key)))
+        .get(&YamlOwned::Value(ScalarOwned::String(key.into())))
 }
 
 /// Recursively traverse the YAML structure to find all values of "image" keys that are strings, and collect them into the provided set.
-fn collect_yaml_images(value: &yaml_serde::Value, images: &mut BTreeSet<String>) {
+fn collect_yaml_images(value: &YamlOwned, images: &mut BTreeSet<String>) {
     match value {
-        yaml_serde::Value::Mapping(mapping) => {
+        YamlOwned::Mapping(mapping) => {
             for (key, value) in mapping {
-                if matches!(key, yaml_serde::Value::String(s) if s == "image")
-                    && matches!(value, yaml_serde::Value::String(_))
-                    && let yaml_serde::Value::String(image) = value
+                if matches!(key, YamlOwned::Value(ScalarOwned::String(s)) if s == "image")
+                    && matches!(value, YamlOwned::Value(ScalarOwned::String(_)))
+                    && let YamlOwned::Value(ScalarOwned::String(image)) = value
                 {
                     images.insert(image.clone());
                 }
                 collect_yaml_images(value, images);
             }
         }
-        yaml_serde::Value::Sequence(sequence) => {
+        YamlOwned::Sequence(sequence) => {
             for value in sequence {
                 collect_yaml_images(value, images);
             }
@@ -1159,13 +1154,13 @@ fn run_command(
         Err(_) => {
             let contents = fs::read_to_string(filepath)
                 .map_err(|e| AppError::Io(format!("failed to read {filepath}: {e}")))?;
-            yaml_serde::from_str::<yaml_serde::Value>(&contents).map_err(|_| {
+            let manifest = ParsedManifest::parse(contents).map_err(|_| {
                 AppError::UnsupportedInput(format!("{filepath} is not valid EDF nor YAML"))
             })?;
 
             let config = load_config_with_options(deps.raster, options)?;
             setup_imagestore(&config)?;
-            run_yaml_command(filepath, container_cmd, &config, deps, options)
+            run_yaml_command(&manifest, container_cmd, &config, deps, options)
         }
     }
 }
@@ -1221,15 +1216,14 @@ fn run_edf_command(
 }
 
 fn run_yaml_command(
-    filepath: &str,
+    parsed: &ParsedManifest,
     container_cmd: &[String],
     config: &Config,
     deps: &AppDeps<'_>,
     options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
-    let user = deps.user.current_user()?;
-    let mut manifest = parse_yaml_value_from_file(Path::new(filepath))?;
-    let images = extract_images_from_yaml_value(&manifest)?;
+    let manifest = &parsed.document;
+    let images = extract_images_from_yaml_value(manifest)?;
     let mut output = AppOutput::success("");
     let mut resolved_images = BTreeMap::new();
     for image in images {
@@ -1237,10 +1231,10 @@ fn run_yaml_command(
         merge_output(&mut output, preparation);
         resolved_images.insert(image, resolved.to_string());
     }
-    replace_yaml_images(&mut manifest, &resolved_images);
 
-    let join_container = get_join_container_from_yaml_manifest(&manifest)?;
+    let join_container = get_join_container_from_yaml_manifest(manifest)?;
 
+    let user = deps.user.current_user()?;
     let (mut run_ctx, roots_base) = build_run_ctx(config, &user, &Uuid::new_v4())?;
     // Podman kube play doesn't seem to honor all settings from a module
     // so to avoid confusion we disable the module for the time being.
@@ -1250,9 +1244,10 @@ fn run_yaml_command(
     // In order to use the resolved image selectors when running, we need to provide them in the k8s manifest.
     // To avoid modifying the original file, create an amended runtime-only file in the run-specific
     // directory which will host the podman rootdirs
-    let runtime_manifest = prepare_runtime_manifest(&roots_base, &manifest)?;
+    let prepared = parsed.render_images(&resolved_images)?;
+    let runtime_manifest = prepare_runtime_manifest(&roots_base, &prepared)?;
 
-    // Keep the exact prepared input available through teardown and retain it if teardown fails.
+    // Reuse the runtime manifest through play and teardown
     let play_result = deps.runtime.kube_play(&runtime_manifest, &run_ctx);
     let exec_result = play_result.as_ref().ok().map(|_| {
         deps.runtime
@@ -1291,32 +1286,7 @@ fn run_yaml_command(
     Ok(output)
 }
 
-fn replace_yaml_images(value: &mut yaml_serde::Value, images: &BTreeMap<String, String>) {
-    match value {
-        yaml_serde::Value::Mapping(mapping) => {
-            for (key, value) in mapping {
-                if matches!(key, yaml_serde::Value::String(key) if key == "image")
-                    && let yaml_serde::Value::String(image) = value
-                    && let Some(resolved) = images.get(image)
-                {
-                    *image = resolved.clone();
-                }
-                replace_yaml_images(value, images);
-            }
-        }
-        yaml_serde::Value::Sequence(sequence) => {
-            for value in sequence {
-                replace_yaml_images(value, images);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn prepare_runtime_manifest(
-    roots_base: &Path,
-    manifest: &yaml_serde::Value,
-) -> Result<String, AppError> {
+fn prepare_runtime_manifest(roots_base: &Path, contents: &str) -> Result<String, AppError> {
     let path = roots_base.join("manifest.yaml");
     let result = (|| {
         let manifest_path = path.to_str().ok_or_else(|| {
@@ -1334,11 +1304,6 @@ fn prepare_runtime_manifest(
                 AppError::Io(format!("failed to create {}: {error}", path.display()))
             })?;
 
-        let contents = yaml_serde::to_string(&manifest).map_err(|error| {
-            AppError::Yaml(format!(
-                "failed to serialize contents of runtime YAML manifest: {error}"
-            ))
-        })?;
         file.write_all(contents.as_bytes()).map_err(|error| {
             AppError::Io(format!(
                 "failed to write runtime YAML manifest at {}: {error}",
@@ -1643,7 +1608,7 @@ mod tests {
         migrate_results: RefCell<HashMap<String, Result<(), AppError>>>,
         rmi_results: RefCell<HashMap<String, Result<(), AppError>>>,
         run_result: Result<i32, AppError>,
-        kube_manifests: RefCell<Vec<(String, yaml_serde::Value)>>,
+        kube_manifests: RefCell<Vec<(String, YamlOwned)>>,
         kube_play_result: Result<(), AppError>,
         kube_down_result: Result<(), AppError>,
         cleanup_container_result: Result<(), AppError>,
@@ -1733,6 +1698,16 @@ mod tests {
         fn run_logfiles(&self) -> Vec<Option<String>> {
             self.run_logfiles.borrow().clone()
         }
+    }
+
+    fn parse_yaml_value_from_file(filepath: &Path) -> Result<YamlOwned, AppError> {
+        let contents = fs::read_to_string(filepath)
+            .map_err(|e| AppError::Io(format!("failed to read {}: {e}", filepath.display())))?;
+        parse_yaml_value_from_str(&contents)
+    }
+
+    fn parse_yaml_value_from_str(contents: &str) -> Result<YamlOwned, AppError> {
+        ParsedManifest::parse(contents.to_owned()).map(|manifest| manifest.document)
     }
 
     impl ContainerRuntime for FakeContainerRuntime {
@@ -1964,6 +1939,45 @@ spec:
         let manifest = parse_yaml_value_from_str(yaml).unwrap();
         let images = extract_images_from_yaml_value(&manifest).unwrap();
         assert_eq!(images, vec![String::from("alpine:3.22")]);
+    }
+
+    #[test]
+    fn yaml_inspection_preserves_string_types_and_aliases() {
+        let manifest = parse_yaml_value_from_str(
+            "reference: &image alpine:3.22\nimages:\n  - {image: *image}\n  - {image: null}\n  - {image: true}\n  - {image: 123}\n  - {image: '123'}\n",
+        ).unwrap();
+        assert_eq!(
+            extract_images_from_yaml_value(&manifest).unwrap(),
+            vec!["123", "alpine:3.22"]
+        );
+    }
+
+    #[test]
+    fn yaml_join_label_requires_a_string_and_accepts_explicit_string_tags() {
+        for label in ["true", "'true'", "!!str true"] {
+            let manifest = parse_yaml_value_from_str(&format!(
+                "metadata: {{name: training-pod}}\nspec:\n  containers:\n    - name: app\n    - name: sidecar\n      labels:\n        run.sarus.join: {label}\n",
+            )).unwrap();
+            if label == "true" {
+                assert!(extract_join_container_from_yaml_value(&manifest).is_err());
+            } else {
+                assert_eq!(
+                    get_join_container_from_yaml_manifest(&manifest).unwrap(),
+                    "training-pod-sidecar"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn yaml_field_lookups_unwrap_custom_tags() {
+        let manifest = parse_yaml_value_from_str(
+            "podName: &pod !name training-pod\nmetadata: !metadata {name: *pod}\nspec: !spec\n  containers: !containers\n    - !container\n      name: !name app\n      labels: !labels\n        run.sarus.join: !label 'true'\n",
+        ).unwrap();
+        assert_eq!(
+            get_join_container_from_yaml_manifest(&manifest).unwrap(),
+            "training-pod-app"
+        );
     }
 
     #[test]
@@ -3355,8 +3369,7 @@ spec:
         let roots = temp.path().join("runtime");
         fs::create_dir(&roots).unwrap();
         fs::write(roots.join("manifest.yaml"), "existing file").unwrap();
-        let runtime_manifest_value = yaml_serde::Value::from("prepared input");
-        let error = prepare_runtime_manifest(&roots, &runtime_manifest_value).unwrap_err();
+        let error = prepare_runtime_manifest(&roots, "prepared input").unwrap_err();
         assert!(error.to_string().contains("failed to create"));
         assert!(!roots.exists());
     }
@@ -3688,16 +3701,16 @@ spec:
         assert_eq!(manifests[0], manifests[1]);
         let prepared_manifest = &manifests[0].1;
         assert_eq!(
-            prepared_manifest["spec"]["initContainers"][0]["image"],
-            test_digest("alpine:3.22")
+            prepared_manifest["spec"]["initContainers"][0]["image"].as_str(),
+            Some(test_digest("alpine:3.22").as_str())
         );
         assert_eq!(
-            prepared_manifest["spec"]["containers"][0]["image"],
-            test_digest("alpine:3.22")
+            prepared_manifest["spec"]["containers"][0]["image"].as_str(),
+            Some(test_digest("alpine:3.22").as_str())
         );
         assert_eq!(
-            prepared_manifest["spec"]["containers"][1]["image"],
-            test_digest("ubuntu:24.04")
+            prepared_manifest["spec"]["containers"][1]["image"].as_str(),
+            Some(test_digest("ubuntu:24.04").as_str())
         );
         assert!(!Path::new(&manifests[0].0).exists());
         let prepared = runtime.kube_manifests.borrow()[0].0.clone();

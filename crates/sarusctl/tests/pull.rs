@@ -616,6 +616,32 @@ fn run_retains_prepared_yaml_when_teardown_fails() {
 }
 
 #[test]
+fn run_yaml_preserves_octal_numbers_and_other_scalar_spellings() {
+    let fixture = Fixture::new();
+    let input = fixture.root().join("pod.yaml");
+    let original = format!(
+        "# Grüße 🐧\r\napiVersion: v1\r\nkind: Pod\r\nmetadata:\r\n  name: training-pod\r\n  annotations:\r\n    quoted: '01000'\r\nspec:\r\n  securityContext:\r\n    runAsUser: 01000\r\n  containers:\r\n    - name: app\r\n      image: {SOURCE} # preserve comment\r\n      securityContext:\r\n        privileged: yes\r\n"
+    );
+    fs::write(&input, &original).unwrap();
+    fixture
+        .command()
+        .args(["run", input.to_str().unwrap(), "true"])
+        .assert()
+        .success();
+
+    let expected = original.replace(SOURCE, &format!("\"{}\"", fixture.resolved()));
+    for phase in ["play", "down"] {
+        let prepared =
+            fs::read_to_string(fixture.root().join(format!("manifest-{phase}"))).unwrap();
+        assert_eq!(prepared, expected);
+        // Check the source spelling; the inspection tree is not the input passed to Podman.
+        // Leaving 01000 unquoted preserves Podman's interpretation as UID 512.
+        assert!(prepared.contains("runAsUser: 01000\r\n"));
+    }
+    assert_eq!(fs::read_to_string(input).unwrap(), original);
+}
+
+#[test]
 fn run_digest_inputs_honor_store_overrides() {
     for yaml in [false, true] {
         let fixture = Fixture::new();

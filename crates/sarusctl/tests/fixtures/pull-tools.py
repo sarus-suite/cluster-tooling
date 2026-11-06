@@ -109,7 +109,7 @@ elif tool == "podman":
         manifest = pathlib.Path(arguments[-1])
         assert manifest.is_file()
         assert manifest.stat().st_mode & 0o777 == 0o600
-        contents = manifest.read_text()
+        contents = manifest.read_bytes().decode()
         assert reference in contents
         assert "image: registry.example/image:release" not in contents
         phase = "play" if "play" in arguments else "down"
