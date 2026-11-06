@@ -1,0 +1,121 @@
+#!/usr/bin/python3
+"""Controlled transfer tools for sarusctl tests; no network or real storage."""
+import hashlib
+import json
+import os
+import pathlib
+import sys
+
+directory = pathlib.Path(os.environ["PULL_FIXTURE"])
+arguments = sys.argv[1:]
+tool = pathlib.Path(sys.argv[0]).name
+
+
+def encoded(value):
+    return json.dumps(value, separators=(",", ":")).encode()
+
+
+def descriptor(content, media_type):
+    return {
+        "mediaType": media_type,
+        "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
+        "size": len(content),
+    }
+
+
+if arguments[:1] == ["--prepare"]:
+    layout = directory / "producer"
+    blobs = layout / "blobs" / "sha256"
+    blobs.mkdir(parents=True, exist_ok=True)
+    layer = b"synthetic layer bytes"
+    config = encoded({
+        "os": "linux", "architecture": "amd64", "revision": arguments[1],
+        "rootfs": {"type": "layers", "diff_ids": []},
+    })
+    manifest_type = "application/vnd.oci.image.manifest.v1+json"
+    manifest = encoded({
+        "schemaVersion": 2, "mediaType": manifest_type,
+        "config": descriptor(config, "application/vnd.oci.image.config.v1+json"),
+        "layers": [descriptor(layer, "application/vnd.oci.image.layer.v1.tar+gzip")],
+    })
+    for content in [layer, config, manifest]:
+        (blobs / hashlib.sha256(content).hexdigest()).write_bytes(content)
+    root = descriptor(manifest, manifest_type)
+    (layout / "oci-layout").write_text('{"imageLayoutVersion":"1.0.0"}')
+    (layout / "index.json").write_bytes(encoded({"schemaVersion": 2, "manifests": [root]}))
+    (directory / "manifest").write_bytes(manifest)
+    (directory / "root").write_text(root["digest"])
+    print(root["digest"])
+    sys.exit(0)
+
+with (directory / "calls").open("a") as log:
+    log.write(json.dumps({
+        "tool": tool, "args": arguments,
+        "auth": os.getenv("REGISTRY_AUTH_FILE"),
+        "storage": os.getenv("CONTAINERS_STORAGE_CONF"),
+    }) + "\n")
+
+failure = os.getenv("FAIL_STAGE")
+
+
+def fail(stage):
+    if failure == stage:
+        sys.stderr.write(stage + " diagnostic\n")
+        sys.exit(19)
+
+
+reference = "registry.example/image@" + (directory / "root").read_text()
+if tool == "hook":
+    fail("hook")
+elif tool == "skopeo":
+    if "--help" in arguments:
+        print("--raw --retry-times --preserve-digests --dest-shared-blob-dir --src-shared-blob-dir")
+    elif arguments[0] == "inspect":
+        fail("inspect")
+        sys.stdout.buffer.write((directory / "manifest").read_bytes())
+    elif arguments[0] == "copy":
+        assert "--preserve-digests" in arguments
+        assert "--all" not in arguments and "--format" not in arguments
+        if arguments[-1].startswith("containers-storage:"):
+            fail("export")
+            assert "--src-shared-blob-dir" in arguments
+            assert arguments[-1] == "containers-storage:" + reference
+            layout = pathlib.Path(arguments[-2][len("oci:"):])
+            root = json.loads((layout / "index.json").read_text())["manifests"][0]
+            assert root["digest"] == (directory / "root").read_text()
+            (directory / "exported").write_text(reference)
+        else:
+            fail("pull")
+            assert arguments[-2] == "docker://" + reference
+            layout = pathlib.Path(arguments[-1][len("oci:"):])
+            producer = directory / "producer"
+            for name in ["oci-layout", "index.json"]:
+                (layout / name).write_bytes((producer / name).read_bytes())
+            blobs = pathlib.Path(arguments[arguments.index("--dest-shared-blob-dir") + 1]) / "sha256"
+            for blob in (producer / "blobs" / "sha256").iterdir():
+                (blobs / blob.name).write_bytes(blob.read_bytes())
+        print("captured transfer progress")
+    else:
+        raise AssertionError(arguments)
+elif tool == "podman":
+    assert "pull" not in arguments
+    if "info" in arguments:
+        fail("graphroot")
+        print(directory / "graphroot")
+    else:
+        assert "image" in arguments and "exists" in arguments
+        fail("podman")
+        assert arguments[-1] == reference
+        assert (directory / "exported").read_text() == reference
+elif tool == "parallax":
+    assert arguments[arguments.index("--image") + 1] == reference
+    assert (directory / "exported").read_text() == reference
+    if "--migrate" in arguments:
+        fail("migrate")
+        (directory / "migrated").write_text(reference)
+    else:
+        assert "--exist" in arguments
+        fail("exist")
+        assert (directory / "migrated").read_text() == reference
+else:
+    raise AssertionError(tool)
