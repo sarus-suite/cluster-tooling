@@ -21,8 +21,12 @@
         }
       }
     },
-    "parallax_imagestore": {
+    "hpc_image_store": {
       "description": "shared filesystem path where to store/load images",
+      "type": "string"
+    },
+    "parallax_imagestore": {
+      "description": "shared filesystem path where to cache images for runtime",
       "type": "string"
     },
     "parallax_imagestore_keepalive": {
@@ -70,6 +74,10 @@
     },
     "conmon_path": {
       "description": "filesystem path to conmon tool",
+      "type": "string"
+    },
+    "skopeo_path": {
+      "description": "filesystem path to skopeo tool",
       "type": "string"
     },
     "podman_tmp_path": {

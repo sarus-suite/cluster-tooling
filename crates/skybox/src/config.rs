@@ -70,7 +70,8 @@ pub(crate) fn load_config(
 }
 */
 
-pub(crate) fn setup_imagestore(config: &Config) -> Result<(), Box<dyn Error>> {
+pub(crate) fn setup_imagestores(config: &Config) -> Result<(), Box<dyn Error>> {
+    
     let imagestore = &config.parallax_imagestore;
 
     match hook_run(config, "parallax_imagestore_create", vec![imagestore])? {
@@ -82,6 +83,20 @@ pub(crate) fn setup_imagestore(config: &Config) -> Result<(), Box<dyn Error>> {
         // If imagestore does not exist, it tries to create it
         if let Err(e) = std::fs::create_dir_all(imagestore) {
             return plugin_err(&format!("cannot create parallax_imagestore: {e}"));
+        }
+    }
+    
+    let hpc_image_store = &config.hpc_image_store;
+    
+    match hook_run(config, "parallax_imagestore_create", vec![hpc_image_store])? {
+        Some(ec) => log_hook_ec(ec, "parallax_imagestore_create hook"),
+        None => {},
+    }
+
+    if !Path::new(hpc_image_store).exists() {
+        // If imagestore does not exist, it tries to create it
+        if let Err(e) = std::fs::create_dir_all(hpc_image_store) {
+            return plugin_err(&format!("cannot create hpc_image_store: {e}"));
         }
     }
     Ok(())

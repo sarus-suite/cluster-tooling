@@ -29,6 +29,7 @@ impl Error for ConfigResolutionError {}
 pub struct RawConfig {
     edf_system_search_path: Option<String>,
     hooks: Option<RawConfigHooks>,
+    hpc_image_store: Option<String>,
     parallax_imagestore: Option<String>,
     parallax_imagestore_keepalive: Option<bool>,
     parallax_mount_program: Option<String>,
@@ -42,6 +43,7 @@ pub struct RawConfig {
     podman_module: Option<String>,
     podman_path: Option<String>,
     conmon_path: Option<String>,
+    skopeo_path: Option<String>,
     podman_tmp_path: Option<String>,
     runtime_path: Option<String>,
     skybox_enabled: Option<bool>,
@@ -60,6 +62,8 @@ pub struct Config {
     pub edf_system_search_path: String,
     #[serde(default = "get_default_hooks")]
     pub hooks: ConfigHooks,
+    #[serde(default = "get_default_hpc_image_store")]
+    pub hpc_image_store: String,
     #[serde(default = "get_default_parallax_imagestore")]
     pub parallax_imagestore: String,
     #[serde(default = "get_default_parallax_imagestore_keepalive")]
@@ -86,6 +90,8 @@ pub struct Config {
     pub podman_path: String,
     #[serde(default = "get_default_conmon_path")]
     pub conmon_path: String,
+    #[serde(default = "get_default_skopeo_path")]
+    pub skopeo_path: String,
     #[serde(default = "get_default_podman_tmp_path")]
     pub podman_tmp_path: String,
     #[serde(default = "get_default_runtime_path")]
@@ -119,6 +125,10 @@ pub enum VarExpand {
 
 fn get_default_edf_system_search_path() -> String {
     return String::from("/etc/edf");
+}
+
+fn get_default_hpc_image_store() -> String {
+    return String::from("");
 }
 
 fn get_default_parallax_imagestore() -> String {
@@ -174,6 +184,10 @@ fn get_default_conmon_path() -> String {
     return String::from("conmon");
 }
 
+fn get_default_skopeo_path() -> String {
+    return String::from("skopeo");
+}
+
 fn conmon_path_for(podman_path: &str) -> String {
     Path::new(podman_path)
         .parent()
@@ -219,6 +233,7 @@ impl From<RawConfig> for Config {
         let conmon_path = r
             .conmon_path
             .unwrap_or_else(|| conmon_path_for(&podman_path));
+        let skopeo_path = r.skopeo_path.unwrap_or_else(get_default_skopeo_path);
 
         Config {
             edf_system_search_path: match r.edf_system_search_path {
@@ -228,6 +243,10 @@ impl From<RawConfig> for Config {
             hooks: match r.hooks {
                 Some(s) => ConfigHooks::from(s),
                 None => get_default_hooks(),
+            },
+            hpc_image_store: match r.hpc_image_store {
+                Some(s) => s,
+                None => get_default_hpc_image_store(),
             },
             parallax_imagestore: match r.parallax_imagestore {
                 Some(s) => s,
@@ -275,6 +294,7 @@ impl From<RawConfig> for Config {
             },
             podman_path,
             conmon_path,
+            skopeo_path,
             podman_tmp_path: match r.podman_tmp_path {
                 Some(s) => s,
                 None => get_default_podman_tmp_path(),
@@ -307,6 +327,9 @@ impl RawConfig {
         }
         if i.hooks.is_some() {
             self.hooks = i.hooks;
+        }
+        if i.hpc_image_store.is_some() {
+            self.hpc_image_store = i.hpc_image_store;
         }
         if i.parallax_imagestore.is_some() {
             self.parallax_imagestore = i.parallax_imagestore;
@@ -346,6 +369,9 @@ impl RawConfig {
         }
         if i.conmon_path.is_some() {
             self.conmon_path = i.conmon_path;
+        }
+        if i.skopeo_path.is_some() {
+            self.skopeo_path = i.skopeo_path;
         }
         if i.podman_tmp_path.is_some() {
             self.podman_tmp_path = i.podman_tmp_path;
@@ -454,6 +480,7 @@ fn expand_raw_config_fields(
     };
 
     expand_raw_option_string(&mut r.edf_system_search_path, force, e)?;
+    expand_raw_option_string(&mut r.hpc_image_store, force, e)?;
     expand_raw_option_string(&mut r.parallax_imagestore, force, e)?;
     expand_raw_option_string(&mut r.parallax_mount_program, force, e)?;
     expand_raw_option_string(&mut r.parallax_path, force, e)?;
@@ -463,6 +490,7 @@ fn expand_raw_config_fields(
     expand_raw_option_string(&mut r.podman_module, force, e)?;
     expand_raw_option_string(&mut r.podman_path, force, e)?;
     expand_raw_option_string(&mut r.conmon_path, force, e)?;
+    expand_raw_option_string(&mut r.skopeo_path, force, e)?;
     expand_raw_option_string(&mut r.podman_tmp_path, force, e)?;
     expand_raw_option_string(&mut r.runtime_path, force, e)?;
     expand_raw_option_string(&mut r.tracking_tool, force, e)?;
@@ -719,6 +747,11 @@ pub fn update_config_by_user(config: &mut Config, edf: EDF) -> SarusResult<()> {
         }
     }
 
+    let hpc_image_store = edf.annotations.get("com.sarus.hpc_image_store");
+    if hpc_image_store.is_some() {
+        config.hpc_image_store = hpc_image_store.unwrap().to_string();
+    }
+
     let parallax_imagestore = edf.annotations.get("com.sarus.parallax_imagestore");
     if parallax_imagestore.is_some() {
         config.parallax_imagestore = parallax_imagestore.unwrap().to_string();
@@ -773,6 +806,16 @@ pub fn update_config_by_user(config: &mut Config, edf: EDF) -> SarusResult<()> {
     let podman_path = edf.annotations.get("com.sarus.podman_path");
     if podman_path.is_some() {
         config.podman_path = podman_path.unwrap().to_string();
+    }
+
+    let conmon_path = edf.annotations.get("com.sarus.conmon_path");
+    if conmon_path.is_some() {
+        config.conmon_path = conmon_path.unwrap().to_string();
+    }
+
+    let skopeo_path = edf.annotations.get("com.sarus.skopeo_path");
+    if skopeo_path.is_some() {
+        config.skopeo_path = skopeo_path.unwrap().to_string();
     }
 
     let podman_tmp_path = edf.annotations.get("com.sarus.podman_tmp_path");

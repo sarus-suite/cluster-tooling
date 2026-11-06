@@ -122,7 +122,7 @@ pub(crate) fn slurmstepd_task_init(
     let _ = task_set_info(plugin, spank)?;
 
     sync_tracking(plugin, spank)?;
-    sync_podman_pull(plugin, spank)?;
+    sync_store_pull(plugin, spank)?;
     sync_podman_start(plugin, spank)?;
     container_join(plugin, spank)?;
     container_wait_cwd(plugin, spank)?;
