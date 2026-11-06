@@ -285,8 +285,8 @@ jobs:
           edf_system_search_path = "/tmp/containers/edf"
           hpc_image_store = "/tmp/.hpc_image_store"
           parallax_imagestore = "/tmp/.parallax_imagestore"
-          parallax_path = "/usr/local/bin/parallax"
-          parallax_mount_program = "/usr/local/bin/parallax-mount-program"
+          parallax_path = "/opt/sarus-suite/bin/parallax"
+          parallax_mount_program = "/opt/sarus-suite/bin/parallax-mount-program"
           skybox_enabled = true
           tracking_enabled = false
           tracking_tool = "/usr/local/opt/pyxis_tracking_tool/pyxis_tracking_tool"
