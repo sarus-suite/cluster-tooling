@@ -21,22 +21,20 @@ pub(crate) fn store_pull(
         }
     };
 
-    /*
-    let run = match &ssb.run {
+    let run = match &mut ssb.run {
         Some(o) => o,
         None => {
             return plugin_err("couldn't find run");
         }
     };
-    */
 
     let config = &ssb.config;
+    //let parallax_path = PathBuf::from(&config.parallax_path);
     setup_imagestores(config)?;
 
-    /*
     let graphroot = format!("{}/graphroot", run.podman_tmp_path);
     let runroot = format!("{}/runroot", run.podman_tmp_path);
-    */
+
     let local_ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
         conmon_path: Some(PathBuf::from(&config.conmon_path)),
@@ -56,16 +54,14 @@ pub(crate) fn store_pull(
     )
     .with_env("PARALLAX_MP_LOGFILE", config.parallax_mp_logfile.clone());
 
-    let graphroot = pmd_get_graphroot(&local_ctx)?;
+    let local_graphroot = pmd_get_graphroot(&local_ctx)?;
 
     let ro_ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
         conmon_path: Some(PathBuf::from(&config.conmon_path)),
         module: None,
         graphroot: Some(PathBuf::from(&graphroot)),
-        //graphroot: None,
-        //runroot: Some(PathBuf::from(&runroot)),
-        runroot: None,
+        runroot: Some(PathBuf::from(&runroot)),
         parallax_mount_program: None,
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
         mksquashfs_path: None,
@@ -104,8 +100,8 @@ pub(crate) fn store_pull(
         podman_path: PathBuf::from(&config.podman_path),
         conmon_path: Some(PathBuf::from(&config.conmon_path)),
         module: None,
-        //graphroot: Some(PathBuf::from(&graphroot)),
-        graphroot: None,
+        graphroot: Some(PathBuf::from(&local_graphroot)),
+        //graphroot: None,
         runroot: None,
         parallax_mount_program: None,
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
@@ -135,6 +131,7 @@ pub(crate) fn store_pull(
         },
     };
     skybox_log_debug!("Resolved image digest: \"{image_digest}\"");
+    run.image_digest = image_digest.clone();
 
     if !pmd_image_exists(&image_digest, &ro_ctx)? {
         let image_digest_selector = ImageSelector::new(&image_digest)?;

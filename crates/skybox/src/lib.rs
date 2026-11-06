@@ -87,6 +87,7 @@ struct Run {
     // TODO: consider using PathBuf instead of String for paths
     podman_tmp_path: String,
     syncfile_path: String,
+    image_digest: String,
 }
 
 #[macro_export]
@@ -247,6 +248,7 @@ pub(crate) fn run_set_info(
         pid: pid,
         podman_tmp_path: podman_tmp_path,
         syncfile_path: syncfile_path,
+        image_digest: String::from(""),
     });
 
     Ok(())

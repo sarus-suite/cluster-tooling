@@ -41,7 +41,7 @@ pub fn imagestore_keepalive(config: &Config) -> Result<Option<String>,String> {
 
 pub fn imagestore_folder_keepalive(config: &Config) -> Result<String,String> {
     let imagestore = &config.parallax_imagestore;
-    folder_keepalive("imagestore", imagestore)
+    folder_keepalive("parallax_imagestore", imagestore)
 }
 pub fn hpc_image_store_folder_keepalive(config: &Config) -> Result<String,String> {
     let hpc_image_store = &config.hpc_image_store;

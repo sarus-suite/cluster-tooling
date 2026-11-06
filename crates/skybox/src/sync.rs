@@ -3,6 +3,7 @@ use std::fs::{self, File};
 use std::io::ErrorKind;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use regex::Regex;
 use sysinfo::{Pid, ProcessStatus, System};
 
 use slurm_spank::SpankHandle;
@@ -186,12 +187,13 @@ pub(crate) fn sync_store_pull_wait(
     ssb: &mut SpankSkyBox,
     _spank: &mut SpankHandle,
 ) -> Result<(), Box<dyn Error>> {
+    let local_task_id = get_local_task_id(ssb);
     skybox_log_debug!(
         "task {} - waiting on image importer",
-        get_local_task_id(ssb)
+        local_task_id
     );
 
-    let run = match ssb.run.clone() {
+    let run = match &mut ssb.run {
         Some(r) => r,
         None => {
             return plugin_err("cannot find run structure");
@@ -207,14 +209,24 @@ pub(crate) fn sync_store_pull_wait(
     let f = File::open(file_path)?;
     let mut reader = BufReader::new(f);
     let mut line = String::new();
+
     reader.read_line(&mut line)?;
-    let line = line.trim_end();
-    let result = line.parse::<i32>().unwrap();
+    line = line.trim_end().to_string();
+    let result_pattern = Regex::new(r"^RESULT: (.*)$").unwrap();
+    let result_captures = result_pattern.captures(&line).unwrap();
+    let result_string = result_captures.get(1).map_or("", |m| m.as_str());
+    let result = result_string.parse::<i32>().unwrap();
+
+    reader.read_line(&mut line)?;
+    line = line.trim_end().to_string();
+    let image_digest_pattern = Regex::new(r"^IMAGE_DIGEST: (.*)$").unwrap();
+    let image_digest_captures = image_digest_pattern.captures(&line).unwrap();
+    let image_digest = image_digest_captures.get(1).map_or("", |m| m.as_str()).to_string();
 
     let msg2 = plugin_string(format!("image importer exited with {}", result).as_str());
     skybox_log_debug!(
         "task {} - image importer exited with {}",
-        get_local_task_id(ssb),
+        local_task_id,
         result
     );
 
@@ -222,6 +234,7 @@ pub(crate) fn sync_store_pull_wait(
         return plugin_err(&msg2);
     }
 
+    run.image_digest = image_digest.clone();
     Ok(())
 }
 
@@ -243,7 +256,7 @@ pub(crate) fn sync_store_pull_done(
     );
 
     let mut file = File::create(run.syncfile_path)?;
-    write!(file, "{}\n", result)?;
+    write!(file, "RESULT: {}\nIMAGE_DIGEST: {}\n", result, run.image_digest)?;
 
     Ok(())
 }
@@ -465,7 +478,9 @@ pub(crate) fn sync_cleanup_fs_shared(
     }
 
     if let Some(output) = raster::imagestore_keepalive(&ssb.config)? {
-        skybox_log_debug!("{}", output);
+        for line in output.lines() {
+            skybox_log_debug!("{}", line);
+        }
     }
 
     Ok(())
@@ -492,6 +507,7 @@ mod tests {
             pid: usize::MAX,
             podman_tmp_path: directory.to_string_lossy().into_owned(),
             syncfile_path: directory.join("pull.done").to_string_lossy().into_owned(),
+            image_digest: "",
         }
     }
 

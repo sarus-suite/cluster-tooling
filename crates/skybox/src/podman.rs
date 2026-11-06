@@ -30,7 +30,7 @@ pub(crate) fn podman_start(
     ssb: &mut SpankSkyBox,
     spank: &mut SpankHandle,
 ) -> Result<(), Box<dyn Error>> {
-    let edf = match &ssb.edf {
+    let orig_edf = match &ssb.edf {
         Some(o) => o,
         None => {
             return plugin_err("couldn't find edf");
@@ -53,12 +53,16 @@ pub(crate) fn podman_start(
 
     let config = &ssb.config;
 
+    let image_digest = run.image_digest.clone();
     let graphroot = format!("{}/graphroot", run.podman_tmp_path);
     let runroot = format!("{}/runroot", run.podman_tmp_path);
     let pidfile = format!("{}/{}", run.podman_tmp_path, PODMAN_PIDFILE_NAME);
     //let command = vec!["sleep", "infinity"];
     let command = vec!["sh", "-c", "kill -STOP $$ ; exit 0"];
     //let command = vec!["sh", "-l", "-c", "exec sh -c 'kill -STOP $$ ; exit 0'"];
+
+    let mut edf = orig_edf.clone();
+    edf.image = image_digest;
 
     let c_ctx = ContainerCtx {
         name: run.name.clone(),
@@ -174,6 +178,12 @@ pub(crate) fn pmd_image_exists(image: &str, ctx: &PodmanCtx) -> pmd::Result<bool
 }
 
 /*
+pub(crate) fn parallax_image_exists(parallax: &PathBuf, image: &str, ctx: &PodmanCtx) -> pmd::Result<bool> {
+    pmd::parallax_exist(parallax, ctx, image)
+}
+*/
+
+/*
 pub(crate) fn pmd_pull(image: &str, ctx: &PodmanCtx) -> pmd::Result<()> {
     pmd::pull(image, Some(ctx))
 }
@@ -221,23 +231,12 @@ where
 }
 
 pub(crate) fn pmd_get_graphroot(ctx: &PodmanCtx) -> Result<String, Box<dyn Error>> {
-    //podman info -f json | jq -r .store.graphRoot
-    let info = pmd::info(Some("json"),Some(ctx))?.stdout;
-    let json_string = String::from_utf8_lossy(&info);
-    let json_value: serde_json::Value = serde_json::from_str(&json_string)
-        .map_err(|_| "Failed to map string into json value")?;
+    let info_out = pmd::info(Some("{{.Store.GraphRoot}}"),Some(ctx))?
+        .stdout;
 
-    let graphroot = json_value.as_object()
-        .ok_or_else(|| "json output root is not an object")?
-        .get("store")
-        .ok_or_else(|| "json output root doesn't have \"store\" field")?
-        .as_object()
-        .ok_or_else(|| "\"store\" field is not an object")?
-        .get("graphRoot")
-        .ok_or_else(|| "\"store\" doesn't have \"graphRoot\" field")?
-        .as_str()
-        .ok_or_else(|| "\"graphRoot\" field is not a string")?
+    let graphroot = String::from_utf8_lossy(&info_out)
+        .trim_end_matches('\n')
         .to_string();
 
-   Ok(graphroot)
+    Ok(graphroot)
 }
