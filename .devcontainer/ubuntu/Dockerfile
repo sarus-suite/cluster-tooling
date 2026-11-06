@@ -10,14 +10,16 @@ COPY --chown=vscode:vscode crates/skybox/Cargo.toml crates/skybox/Cargo.toml
 COPY --chown=vscode:vscode crates/sarusctl/Cargo.toml crates/sarusctl/Cargo.toml
 COPY --chown=vscode:vscode crates/podman-driver/Cargo.toml crates/podman-driver/Cargo.toml
 COPY --chown=vscode:vscode crates/raster/Cargo.toml crates/raster/Cargo.toml
-RUN mkdir -p crates/skybox/src crates/sarusctl/src crates/sarusctl/tests crates/podman-driver/src crates/raster/src && \
+COPY --chown=vscode:vscode crates/hpc-image-store/Cargo.toml crates/hpc-image-store/Cargo.toml
+RUN mkdir -p crates/skybox/src crates/sarusctl/src crates/sarusctl/tests crates/podman-driver/src crates/raster/src crates/hpc-image-store/src && \
     printf 'pub fn placeholder() {}\n' > crates/skybox/src/lib.rs && \
     printf 'pub fn placeholder() {}\n' > crates/sarusctl/src/lib.rs && \
     printf 'fn main() {}\n' > crates/sarusctl/src/main.rs && \
     printf '#[test]\nfn placeholder() {}\n' > crates/sarusctl/tests/cli.rs && \
     printf '#[test]\nfn placeholder() {}\n' > crates/sarusctl/tests/smoke.rs && \
     printf 'pub fn placeholder() {}\n' > crates/podman-driver/src/lib.rs && \
-    printf 'pub fn placeholder() {}\n' > crates/raster/src/lib.rs
+    printf 'pub fn placeholder() {}\n' > crates/raster/src/lib.rs && \
+    printf 'pub fn placeholder() {}\n' > crates/hpc-image-store/src/lib.rs
 
 USER vscode
 RUN cargo chef prepare --recipe-path recipe.json
