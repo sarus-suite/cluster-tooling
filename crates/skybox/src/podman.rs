@@ -220,23 +220,24 @@ where
     Ok(())
 }
 
-pub(crate) fn pmd_get_graphroot(ctx: &PodmanCtx) -> pmd::Result<String> {
+pub(crate) fn pmd_get_graphroot(ctx: &PodmanCtx) -> Result<String, Box<dyn Error>> {
     //podman info -f json | jq -r .store.graphRoot
     let info = pmd::info(Some("json"),Some(ctx))?.stdout;
     let json_string = String::from_utf8_lossy(&info);
-    let json_value: serde_json::Value = serde_json::from_str(&json_string).unwrap();
+    let json_value: serde_json::Value = serde_json::from_str(&json_string)
+        .map_err(|_| "Failed to map string into json value")?;
+
     let graphroot = json_value.as_object()
-        .unwrap()
+        .ok_or_else(|| "json output root is not an object")?
         .get("store")
-        .unwrap()
+        .ok_or_else(|| "json output root doesn't have \"store\" field")?
         .as_object()
-        .unwrap()
+        .ok_or_else(|| "\"store\" field is not an object")?
         .get("graphRoot")
-        .unwrap()
+        .ok_or_else(|| "\"store\" doesn't have \"graphRoot\" field")?
         .as_str()
-        .unwrap()
+        .ok_or_else(|| "\"graphRoot\" field is not a string")?
         .to_string();
 
-   //Ok(String::from("/home/vagrant/.local/share/containers/storage"))
    Ok(graphroot)
 }
