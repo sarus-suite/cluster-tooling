@@ -66,13 +66,28 @@ enum Command {
     Pull { image: String },
     /// Migrate image to Parallax storage
     Migrate { image: String },
-    /// Remove image from Parallax storage
-    Rmi { image: String },
+    /// Remove an explicitly tagged image from the HPC store
+    Rmi {
+        /// Exact local reference (name:tag)
+        image: String,
+    },
+    /// Advanced, low-level Parallax operations
+    #[command(hide = true)]
+    Plx {
+        #[command(subcommand)]
+        command: PlxCommand,
+    },
     /// Run container from EDF file
     Run {
         filepath: String,
         container_cmd: Vec<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum PlxCommand {
+    /// Remove an image directly from Parallax storage
+    Rmi { image: String },
 }
 
 impl From<Command> for CommandSpec {
@@ -84,6 +99,9 @@ impl From<Command> for CommandSpec {
             Command::Pull { image } => CommandSpec::Pull { image },
             Command::Migrate { image } => CommandSpec::Migrate { image },
             Command::Rmi { image } => CommandSpec::Rmi { image },
+            Command::Plx {
+                command: PlxCommand::Rmi { image },
+            } => CommandSpec::PlxRmi { image },
             Command::Run {
                 filepath,
                 container_cmd,
