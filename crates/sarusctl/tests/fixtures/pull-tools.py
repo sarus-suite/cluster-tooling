@@ -109,13 +109,16 @@ elif tool == "podman":
         assert (directory / "exported").read_text() == reference
 elif tool == "parallax":
     assert arguments[arguments.index("--image") + 1] == reference
-    assert (directory / "exported").read_text() == reference
+    migrated = directory / "migrated-references"
+    references = json.loads(migrated.read_text()) if migrated.exists() else []
     if "--migrate" in arguments:
+        assert (directory / "exported").read_text() == reference
         fail("migrate")
         (directory / "migrated").write_text(reference)
+        migrated.write_text(json.dumps(sorted(set(references + [reference]))))
     else:
         assert "--exist" in arguments
         fail("exist")
-        assert (directory / "migrated").read_text() == reference
+        sys.exit(0 if reference in references else 1)
 else:
     raise AssertionError(tool)
