@@ -425,6 +425,7 @@ jobs:
             echo "runner:100000:65536" | sudo tee -a /etc/subgid >/dev/null
           fi
 
+          export PATH="/opt/sarus-suite/bin:${PATH}"
           test -e /dev/fuse
           command -v newuidmap
           command -v newgidmap
