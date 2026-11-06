@@ -94,7 +94,7 @@ jobs:
             --force \
             --import-binary "${GITHUB_WORKSPACE}/dist/sarusctl"
 
-          export PATH="/usr/local/bin:${PATH}"
+          export PATH="/opt/sarus-suite/bin:${PATH}"
           test "$(command -v sarusctl)" = "/opt/sarus-suite/bin/sarusctl"
           cmp --silent dist/sarusctl /opt/sarus-suite/bin/sarusctl
           command -v podman
