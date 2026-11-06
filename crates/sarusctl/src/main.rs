@@ -62,7 +62,7 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// Pull image with Podman and migrate to Parallax storage
+    /// Pull into the HPC store, resolve and export to Podman, then migrate to Parallax
     Pull { image: String },
     /// Migrate image to Parallax storage
     Migrate { image: String },
