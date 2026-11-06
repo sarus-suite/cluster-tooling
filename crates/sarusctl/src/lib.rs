@@ -71,10 +71,10 @@ pub enum CommandSpec {
     Pull {
         image: String,
     },
-    Migrate {
+    Rmi {
         image: String,
     },
-    Rmi {
+    PlxMigrate {
         image: String,
     },
     PlxRmi {
@@ -834,13 +834,13 @@ pub fn execute_command_with_options(
             let config = load_config_with_options(deps.raster, &options)?;
             pull_command(&image, &config, deps, &options)
         }
-        CommandSpec::Migrate { image } => {
-            let config = load_config_with_options(deps.raster, &options)?;
-            migrate_command(&image, &config, deps, &options)
-        }
         CommandSpec::Rmi { image } => {
             let config = load_config_with_options(deps.raster, &options)?;
             rmi_command(&image, &config, deps, &options)
+        }
+        CommandSpec::PlxMigrate { image } => {
+            let config = load_config_with_options(deps.raster, &options)?;
+            migrate_command(&image, &config, deps, &options)
         }
         CommandSpec::PlxRmi { image } => {
             let config = load_config_with_options(deps.raster, &options)?;
@@ -3096,7 +3096,7 @@ spec:
     }
 
     #[test]
-    fn migrate_success_runs_migration_steps() {
+    fn plx_migrate_success_runs_migration_steps() {
         let config = sample_config();
         let raster = FakeRasterOps::new(config);
         let runtime = FakeContainerRuntime::new();
@@ -3106,7 +3106,7 @@ spec:
         };
 
         let output = execute_command(
-            CommandSpec::Migrate {
+            CommandSpec::PlxMigrate {
                 image: String::from("alpine:3.22"),
             },
             &mock_deps(&raster, &runtime, &user),
@@ -3126,7 +3126,7 @@ spec:
     }
 
     #[test]
-    fn migrate_failure_is_returned_as_runtime_error() {
+    fn plx_migrate_failure_is_returned_as_runtime_error() {
         let config = sample_config();
         let raster = FakeRasterOps::new(config);
         let runtime = FakeContainerRuntime::new();
@@ -3139,7 +3139,7 @@ spec:
         };
 
         let err = execute_command(
-            CommandSpec::Migrate {
+            CommandSpec::PlxMigrate {
                 image: String::from("alpine:3.22"),
             },
             &mock_deps(&raster, &runtime, &user),

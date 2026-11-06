@@ -64,8 +64,6 @@ enum Command {
     },
     /// Pull into the HPC store, resolve and export to Podman, then migrate to Parallax
     Pull { image: String },
-    /// Migrate image to Parallax storage
-    Migrate { image: String },
     /// Remove an explicitly tagged image from the HPC store
     Rmi {
         /// Exact local reference (name:tag)
@@ -86,6 +84,8 @@ enum Command {
 
 #[derive(Subcommand)]
 enum PlxCommand {
+    /// Migrate an image from Podman to Parallax storage
+    Migrate { image: String },
     /// Remove an image directly from Parallax storage
     Rmi { image: String },
 }
@@ -97,8 +97,10 @@ impl From<Command> for CommandSpec {
             Command::Render { filepath, output } => CommandSpec::Render { filepath, output },
             Command::Images { all } => CommandSpec::Images { all },
             Command::Pull { image } => CommandSpec::Pull { image },
-            Command::Migrate { image } => CommandSpec::Migrate { image },
             Command::Rmi { image } => CommandSpec::Rmi { image },
+            Command::Plx {
+                command: PlxCommand::Migrate { image },
+            } => CommandSpec::PlxMigrate { image },
             Command::Plx {
                 command: PlxCommand::Rmi { image },
             } => CommandSpec::PlxRmi { image },
