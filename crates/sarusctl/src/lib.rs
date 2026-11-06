@@ -1009,6 +1009,14 @@ fn pull_command(
     let resolved = ImageSelector::new(&resolved)
         .map_err(|error| hpc_operation_error("resolve", &path, &source, error))?;
 
+    if deps.runtime.parallax_exist(
+        Path::new(&config.parallax_path),
+        &build_parallax_seed_ctx(config),
+        resolved.as_str(),
+    )? {
+        return Ok(AppOutput::success(""));
+    }
+
     print_progress_message(&format!("Exporting {resolved} to Podman storage..."));
     deps.hpc_store.export(&path, &resolved, &transfer_context)?;
     if !deps
@@ -2650,7 +2658,7 @@ spec:
                 let store = FakeHpcStore::new(&runtime).with_image(&image);
                 let resolved = store.resolved.as_ref().unwrap();
                 runtime.push_image_exists(resolved, vec![true]);
-                runtime.push_parallax_exist(resolved, vec![true]);
+                runtime.push_parallax_exist(resolved, vec![false, true]);
                 let user = FakeUserContext {
                     user: CurrentUser { uid: 1, gid: 1 },
                 };
@@ -2678,6 +2686,7 @@ spec:
                     vec![
                         format!("hpc_pull:{image}"),
                         format!("hpc_resolve:{image}"),
+                        format!("parallax_exist:{resolved}"),
                         format!("hpc_export:{resolved}"),
                         format!("image_exists:{resolved}"),
                         String::from("default_graphroot"),
@@ -2711,7 +2720,7 @@ spec:
         let newer = format!("alpine@sha256:{}", "b".repeat(64));
         store.resolved = Some(newer.clone());
         runtime.push_image_exists(&newer, vec![true]);
-        runtime.push_parallax_exist(&newer, vec![true]);
+        runtime.push_parallax_exist(&newer, vec![false, true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -2730,6 +2739,7 @@ spec:
             vec![
                 String::from("hpc_pull:alpine:3.22"),
                 String::from("hpc_resolve:alpine:3.22"),
+                format!("parallax_exist:{newer}"),
                 format!("hpc_export:{newer}"),
                 format!("image_exists:{newer}"),
                 String::from("default_graphroot"),
@@ -2740,19 +2750,58 @@ spec:
     }
 
     #[test]
+    fn pull_skips_export_and_migration_when_resolved_image_exists_in_parallax() {
+        let temp = tempdir().unwrap();
+        let parallax = temp.path().join("parallax");
+        let mut config = sample_config();
+        config.parallax_imagestore = parallax.to_string_lossy().into_owned();
+        let raster = FakeRasterOps::new(config);
+        let runtime = FakeContainerRuntime::new();
+        let store = FakeHpcStore::new(&runtime).with_image("alpine:3.22");
+        let resolved = store.resolved.as_ref().unwrap();
+        runtime.push_parallax_exist(resolved, vec![true]);
+        let user = FakeUserContext {
+            user: CurrentUser { uid: 1, gid: 1 },
+        };
+
+        let output = execute_command(
+            CommandSpec::Pull {
+                image: String::from("alpine:3.22"),
+            },
+            &AppDeps {
+                hpc_store: &store,
+                ..mock_deps(&raster, &runtime, &user)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(output, AppOutput::success(""));
+        assert_eq!(
+            runtime.calls(),
+            vec![
+                String::from("hpc_pull:alpine:3.22"),
+                String::from("hpc_resolve:alpine:3.22"),
+                format!("parallax_exist:{resolved}"),
+            ]
+        );
+        assert!(store.transfer_contexts.borrow().is_empty());
+        assert!(!parallax.exists());
+    }
+
+    #[test]
     fn pull_stops_at_each_failed_stage() {
         for (failure, calls) in [
             ("pull", 1),
             ("resolve", 2),
             ("absent", 2),
             ("invalid_resolution", 2),
-            ("export", 3),
-            ("missing_podman", 4),
-            ("podman_error", 4),
-            ("graphroot", 5),
-            ("migrate", 6),
-            ("missing_parallax", 7),
-            ("parallax_error", 7),
+            ("parallax_error", 3),
+            ("export", 4),
+            ("missing_podman", 5),
+            ("podman_error", 5),
+            ("graphroot", 6),
+            ("migrate", 7),
+            ("missing_parallax", 8),
         ] {
             let raster = FakeRasterOps::new(sample_config());
             let mut runtime = FakeContainerRuntime::new();
@@ -2775,7 +2824,7 @@ spec:
                 _ => {}
             }
             runtime.push_image_exists(&resolved, vec![failure != "missing_podman"]);
-            runtime.push_parallax_exist(&resolved, vec![failure != "missing_parallax"]);
+            runtime.push_parallax_exist(&resolved, vec![false, failure != "missing_parallax"]);
             let user = FakeUserContext {
                 user: CurrentUser { uid: 1, gid: 1 },
             };
@@ -2789,9 +2838,16 @@ spec:
                 },
             );
             assert!(result.is_err(), "{failure}");
+            if failure == "parallax_error" {
+                assert_eq!(
+                    result.unwrap_err(),
+                    AppError::Runtime(String::from("parallax_error test failure"))
+                );
+            }
             let expected = [
                 String::from("hpc_pull:alpine:3.22"),
                 String::from("hpc_resolve:alpine:3.22"),
+                format!("parallax_exist:{resolved}"),
                 format!("hpc_export:{resolved}"),
                 format!("image_exists:{resolved}"),
                 String::from("default_graphroot"),
@@ -3537,7 +3593,7 @@ spec:
         let store = FakeHpcStore::new(&runtime).with_image("alpine:3.22");
         let resolved = store.resolved.as_ref().unwrap();
         runtime.push_image_exists(resolved, vec![true]);
-        runtime.push_parallax_exist(resolved, vec![true]);
+        runtime.push_parallax_exist(resolved, vec![false, true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };

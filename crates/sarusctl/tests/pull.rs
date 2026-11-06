@@ -127,11 +127,12 @@ fn pull_refreshes_store_and_exports_resolved_digest_before_migration() {
         assert_eq!(
             actions.iter().map(|(tool, _)| *tool).collect::<Vec<_>>(),
             [
-                "skopeo", "skopeo", "skopeo", "podman", "podman", "hook", "parallax", "parallax"
+                "skopeo", "skopeo", "parallax", "skopeo", "podman", "podman", "hook", "parallax",
+                "parallax"
             ]
         );
         assert!(
-            actions[5]
+            actions[6]
                 .1
                 .contains(&fixture.root().join("parallax-store").to_str().unwrap())
         );
@@ -147,23 +148,36 @@ fn pull_refreshes_store_and_exports_resolved_digest_before_migration() {
         );
         assert!(actions[1].1.contains(&"--dest-shared-blob-dir"));
         assert!(actions[1].1.contains(&"--preserve-digests"));
+        assert!(actions[2].1.contains(&"--exist"));
+        assert_eq!(actions[2].1.last(), Some(&resolved.as_str()));
+        assert!(!actions[2].1.contains(&"--podmanRoot"));
         assert!(
             actions[2]
                 .1
+                .contains(&fixture.root().join("parallax-store").to_str().unwrap())
+        );
+        assert!(
+            actions[2]
+                .1
+                .contains(&fixture.root().join("mksquashfs").to_str().unwrap())
+        );
+        assert!(
+            actions[3]
+                .1
                 .contains(&format!("containers-storage:{resolved}").as_str())
         );
-        assert!(actions[2].1.contains(&"--src-shared-blob-dir"));
-        assert!(actions[2].1.contains(&"--preserve-digests"));
-        assert_eq!(actions[3].1.last(), Some(&resolved.as_str()));
-        assert!(actions[4].1.contains(&"info"));
-        for (_, arguments) in &actions[6..] {
+        assert!(actions[3].1.contains(&"--src-shared-blob-dir"));
+        assert!(actions[3].1.contains(&"--preserve-digests"));
+        assert_eq!(actions[4].1.last(), Some(&resolved.as_str()));
+        assert!(actions[5].1.contains(&"info"));
+        for (_, arguments) in &actions[7..] {
             assert_eq!(arguments.last(), Some(&resolved.as_str()));
             assert!(arguments.contains(&fixture.root().join("graphroot").to_str().unwrap()));
             assert!(arguments.contains(&fixture.root().join("parallax-store").to_str().unwrap()));
             assert!(arguments.contains(&fixture.root().join("mksquashfs").to_str().unwrap()));
         }
-        assert!(actions[6].1.contains(&"--migrate"));
-        assert!(actions[7].1.contains(&"--exist"));
+        assert!(actions[7].1.contains(&"--migrate"));
+        assert!(actions[8].1.contains(&"--exist"));
         for entry in &calls {
             assert_eq!(
                 entry["auth"],
@@ -191,6 +205,62 @@ fn args(entry: &Value) -> Vec<&str> {
         .iter()
         .map(|value| value.as_str().unwrap())
         .collect()
+}
+
+#[test]
+fn repeated_pull_skips_export_and_migration_until_digest_changes() {
+    let fixture = Fixture::new();
+    fixture.command().args(["pull", SOURCE]).assert().success();
+    let first = fixture.resolved();
+
+    // The fast path must not depend on the image still being in Podman storage.
+    fs::remove_file(fixture.root().join("exported")).unwrap();
+    fs::write(fixture.root().join("calls"), "").unwrap();
+    fixture
+        .command()
+        .args(["pull", SOURCE])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Exporting").not())
+        .stderr(predicate::str::contains("Migrating").not());
+    let calls = fixture.calls();
+    let actions: Vec<_> = calls
+        .iter()
+        .filter(|entry| !args(entry).contains(&"--help"))
+        .collect();
+    assert_eq!(
+        actions
+            .iter()
+            .map(|entry| entry["tool"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["skopeo", "skopeo", "parallax"]
+    );
+    assert!(args(actions[2]).contains(&"--exist"));
+    assert_eq!(args(actions[2]).last(), Some(&first.as_str()));
+    assert!(!fixture.root().join("exported").exists());
+    assert_eq!(
+        fixture
+            .store("hpc-imagestore")
+            .resolve(&ImageSelector::new(SOURCE).unwrap())
+            .unwrap(),
+        Some(first.clone())
+    );
+
+    fixture.select_image("second");
+    fs::write(fixture.root().join("calls"), "").unwrap();
+    fixture.command().args(["pull", SOURCE]).assert().success();
+    let second = fixture.resolved();
+    assert_ne!(first, second);
+    assert_eq!(
+        fs::read_to_string(fixture.root().join("exported")).unwrap(),
+        second
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.root().join("migrated")).unwrap(),
+        second
+    );
+    let calls = fixture.calls();
+    assert!(calls.iter().any(|entry| args(entry).contains(&"--migrate")));
 }
 
 #[test]
@@ -233,12 +303,12 @@ fn pull_failures_stop_pipeline_and_preserve_completed_acquisitions() {
     for (stage, operations) in [
         ("inspect", 1),
         ("pull", 2),
-        ("export", 3),
-        ("podman", 4),
-        ("graphroot", 5),
-        ("hook", 6),
-        ("migrate", 7),
-        ("exist", 8),
+        ("export", 4),
+        ("podman", 5),
+        ("graphroot", 6),
+        ("hook", 7),
+        ("migrate", 8),
+        ("exist", 9),
     ] {
         let fixture = Fixture::new();
         let result = fixture
@@ -262,7 +332,8 @@ fn pull_failures_stop_pipeline_and_preserve_completed_acquisitions() {
             .map(|entry| entry["tool"].as_str().unwrap())
             .collect();
         let expected = [
-            "skopeo", "skopeo", "skopeo", "podman", "podman", "hook", "parallax", "parallax",
+            "skopeo", "skopeo", "parallax", "skopeo", "podman", "podman", "hook", "parallax",
+            "parallax",
         ];
         assert_eq!(tools, expected[..operations], "{stage}");
         if ["export", "podman", "graphroot", "hook", "migrate", "exist"].contains(&stage) {
