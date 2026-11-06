@@ -19,6 +19,7 @@ impl Fixture {
             directory: tempdir().unwrap(),
         };
         fs::create_dir(fixture.root().join("bin")).unwrap();
+        fs::create_dir(fixture.root().join("runtime")).unwrap();
         for tool in ["skopeo", "podman", "parallax", "hook"] {
             let path = fixture.root().join("bin").join(tool);
             fs::write(&path, include_str!("fixtures/pull-tools.py")).unwrap();
@@ -73,6 +74,7 @@ impl Fixture {
             .current_dir(self.root())
             .env("PATH", std::env::join_paths(paths).unwrap())
             .env("PULL_FIXTURE", self.root())
+            .env("XDG_RUNTIME_DIR", self.root().join("runtime"))
             .env("XDG_CONFIG_HOME", self.root().join("config"))
             .env("XDG_CONFIG_DIRS", self.root().join("system-config"))
             .env("REGISTRY_AUTH_FILE", self.root().join("auth.json"))
@@ -361,7 +363,9 @@ fn pull_validates_syntax_and_store_paths_without_running_tools() {
         .args(["pull", "alpine"])
         .assert()
         .code(1)
-        .stderr(predicate::str::contains("Invalid image alpine"));
+        .stderr(predicate::str::contains(
+            "Error constructing selector for image alpine",
+        ));
     assert!(fixture.calls().is_empty());
     assert!(!fixture.root().join("parallax-store").exists());
 
@@ -391,4 +395,263 @@ fn pull_validates_syntax_and_store_paths_without_running_tools() {
     assert!(!occupied.join("store.json").exists());
     assert!(fixture.calls().is_empty());
     assert!(!fixture.root().join("parallax-store").exists());
+}
+
+fn run_input(fixture: &Fixture, yaml: bool) -> PathBuf {
+    let path = fixture
+        .root()
+        .join(if yaml { "pod.yaml" } else { "job.toml" });
+    let contents = if yaml {
+        format!(
+            "apiVersion: v1\nkind: Pod\nmetadata:\n  name: training-pod\nspec:\n  containers:\n    - name: app\n      image: {SOURCE}\n"
+        )
+    } else {
+        format!("image = {SOURCE:?}\n")
+    };
+    fs::write(&path, contents).unwrap();
+    path
+}
+
+#[test]
+fn run_acquires_images_from_missing_empty_and_pending_stores() {
+    for state in ["missing", "empty", "pending"] {
+        for yaml in [false, true] {
+            let fixture = Fixture::new();
+            match state {
+                "empty" => fs::create_dir(fixture.root().join("hpc-imagestore")).unwrap(),
+                "pending" => {
+                    fixture.store("hpc-imagestore").list().unwrap();
+                    fs::write(
+                        fixture.root().join("hpc-imagestore/.store-init-pending"),
+                        "",
+                    )
+                    .unwrap();
+                }
+                _ => {}
+            }
+            let input = run_input(&fixture, yaml);
+            let original = fs::read(&input).unwrap();
+            fixture
+                .command()
+                .args(["run", input.to_str().unwrap(), "true"])
+                .assert()
+                .success();
+            assert_eq!(fs::read(&input).unwrap(), original);
+            assert_eq!(
+                fixture
+                    .store("hpc-imagestore")
+                    .resolve(&ImageSelector::new(SOURCE).unwrap())
+                    .unwrap(),
+                Some(fixture.resolved())
+            );
+            let calls = fixture.calls();
+            let registry_calls: Vec<_> = calls
+                .iter()
+                .filter(|entry| {
+                    entry["tool"] == "skopeo"
+                        && args(entry).iter().any(|arg| arg.starts_with("docker://"))
+                })
+                .collect();
+            assert_eq!(registry_calls.len(), 2, "{state}, yaml={yaml}");
+            if yaml {
+                assert_eq!(
+                    fs::read(fixture.root().join("manifest-play")).unwrap(),
+                    fs::read(fixture.root().join("manifest-down")).unwrap()
+                );
+                let prepared =
+                    fs::read_to_string(fixture.root().join("manifest-path-play")).unwrap();
+                assert_eq!(
+                    prepared,
+                    fs::read_to_string(fixture.root().join("manifest-path-down")).unwrap()
+                );
+                assert!(!Path::new(&prepared).exists());
+            } else {
+                assert_eq!(
+                    fs::read_to_string(fixture.root().join("executed")).unwrap(),
+                    fixture.resolved()
+                );
+            }
+            assert_eq!(
+                fs::read_dir(fixture.root().join("runtime/sarus-suite"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+        }
+    }
+}
+
+#[test]
+fn run_exports_cached_images_without_refreshing_the_registry() {
+    for yaml in [false, true] {
+        let fixture = Fixture::new();
+        let input = run_input(&fixture, yaml);
+        let resolved = fixture.resolved();
+        // Stop after acquisition to leave the image cached only in the HPC store.
+        fixture
+            .command()
+            .env("FAIL_STAGE", "export")
+            .args(["pull", SOURCE])
+            .assert()
+            .code(1);
+        for prepared in [false, true] {
+            fs::write(fixture.root().join("calls"), "").unwrap();
+            fixture
+                .command()
+                .env("WORKLOAD_EXIT_CODE", "7")
+                .args(["run", input.to_str().unwrap(), "true"])
+                .assert()
+                .code(7);
+            let calls = fixture.calls();
+            assert!(
+                !calls
+                    .iter()
+                    .any(|entry| args(entry).iter().any(|arg| arg.starts_with("docker://")))
+            );
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|entry| entry["tool"] == "skopeo"
+                        && args(entry).contains(&"copy")
+                        && !args(entry).contains(&"--help"))
+                    .count(),
+                usize::from(!prepared)
+            );
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|entry| args(entry).contains(&"--migrate"))
+                    .count(),
+                usize::from(!prepared)
+            );
+            assert_eq!(
+                fs::read_to_string(fixture.root().join("migrated")).unwrap(),
+                resolved
+            );
+        }
+        // A changed registry tag must not replace the locally cached identity during run.
+        fixture.select_image("second");
+        fs::write(fixture.root().join("calls"), "").unwrap();
+        fixture
+            .command()
+            .env("EXPECTED_REFERENCE", &resolved)
+            .args(["run", input.to_str().unwrap(), "true"])
+            .assert()
+            .success();
+        assert!(
+            !fixture
+                .calls()
+                .iter()
+                .any(|entry| entry["tool"] == "skopeo")
+        );
+    }
+}
+
+#[test]
+fn run_rejects_damaged_and_inaccessible_stores_without_acquisition() {
+    for state in ["occupied", "damaged", "inaccessible"] {
+        if state == "inaccessible" && users::get_effective_uid() == 0 {
+            continue; // Root bypasses these permission restrictions.
+        }
+        let fixture = Fixture::new();
+        let input = run_input(&fixture, false);
+        let root = fixture.root().join("hpc-imagestore");
+        if state == "occupied" {
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join("keep"), "preserved").unwrap();
+        } else {
+            fixture.store("hpc-imagestore").list().unwrap();
+            if state == "damaged" {
+                fs::write(root.join("store.json"), "invalid marker").unwrap();
+            } else {
+                fs::set_permissions(
+                    root.join("locks/store.lock"),
+                    fs::Permissions::from_mode(0o000),
+                )
+                .unwrap();
+            }
+        }
+        fixture
+            .command()
+            .args(["run", input.to_str().unwrap()])
+            .assert()
+            .code(1)
+            .stderr(predicate::str::contains("HPC store"));
+        if state == "inaccessible" {
+            fs::set_permissions(
+                root.join("locks/store.lock"),
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+        }
+        assert!(
+            !fixture
+                .calls()
+                .iter()
+                .any(|entry| entry["tool"] == "skopeo")
+        );
+        if state == "occupied" {
+            assert_eq!(fs::read_to_string(root.join("keep")).unwrap(), "preserved");
+        }
+    }
+}
+
+#[test]
+fn run_retains_prepared_yaml_when_teardown_fails() {
+    let fixture = Fixture::new();
+    let input = run_input(&fixture, true);
+    fixture
+        .command()
+        .env("FAIL_STAGE", "down")
+        .args(["run", input.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("rootdirs retained"));
+    let prepared = fs::read_to_string(fixture.root().join("manifest-path-down")).unwrap();
+    assert!(Path::new(&prepared).is_file());
+    assert_eq!(
+        fs::read(&prepared).unwrap(),
+        fs::read(fixture.root().join("manifest-play")).unwrap()
+    );
+}
+
+#[test]
+fn run_digest_inputs_honor_store_overrides() {
+    for yaml in [false, true] {
+        let fixture = Fixture::new();
+        let input = run_input(&fixture, yaml);
+        let resolved = fixture.resolved();
+        let source = if yaml {
+            resolved.replace('@', ":release@")
+        } else {
+            resolved.clone()
+        };
+        let contents = fs::read_to_string(&input).unwrap().replace(SOURCE, &source);
+        fs::write(&input, &contents).unwrap();
+        fixture
+            .command()
+            .args([
+                "--hpc-imagestore",
+                "selected-hpc",
+                "--parallax-imagestore",
+                "selected-parallax",
+                "--verbose",
+                "run",
+                input.to_str().unwrap(),
+                "true",
+            ])
+            .assert()
+            .success();
+        assert_eq!(
+            fixture
+                .store("selected-hpc")
+                .resolve(&ImageSelector::new(&source).unwrap())
+                .unwrap(),
+            Some(resolved)
+        );
+        assert!(fixture.root().join("selected-parallax").is_dir());
+        assert!(!fixture.root().join("hpc-imagestore").exists());
+        assert!(!fixture.root().join("parallax-store").exists());
+        assert_eq!(fs::read_to_string(input).unwrap(), contents);
+    }
 }

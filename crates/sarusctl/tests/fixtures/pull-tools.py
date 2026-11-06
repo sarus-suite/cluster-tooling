@@ -64,7 +64,7 @@ def fail(stage):
         sys.exit(19)
 
 
-reference = "registry.example/image@" + (directory / "root").read_text()
+reference = os.getenv("EXPECTED_REFERENCE", "registry.example/image@" + (directory / "root").read_text())
 if tool == "hook":
     fail("hook")
 elif tool == "skopeo":
@@ -82,7 +82,7 @@ elif tool == "skopeo":
             assert arguments[-1] == "containers-storage:" + reference
             layout = pathlib.Path(arguments[-2][len("oci:"):])
             root = json.loads((layout / "index.json").read_text())["manifests"][0]
-            assert root["digest"] == (directory / "root").read_text()
+            assert root["digest"] == reference.split("@")[1]
             (directory / "exported").write_text(reference)
         else:
             fail("pull")
@@ -99,7 +99,29 @@ elif tool == "skopeo":
         raise AssertionError(arguments)
 elif tool == "podman":
     assert "pull" not in arguments
-    if "info" in arguments:
+    if "run" in arguments:
+        fail("run")
+        assert reference in arguments
+        assert reference in json.loads((directory / "migrated-references").read_text())
+        (directory / "executed").write_text(reference)
+        sys.exit(int(os.getenv("WORKLOAD_EXIT_CODE", "0")))
+    elif "kube" in arguments:
+        manifest = pathlib.Path(arguments[-1])
+        assert manifest.is_file()
+        assert manifest.stat().st_mode & 0o777 == 0o600
+        contents = manifest.read_text()
+        assert reference in contents
+        assert "image: registry.example/image:release" not in contents
+        phase = "play" if "play" in arguments else "down"
+        (directory / ("manifest-" + phase)).write_text(contents)
+        (directory / ("manifest-path-" + phase)).write_text(str(manifest))
+        fail(phase)
+    elif "exec" in arguments:
+        assert "training-pod-app" in arguments
+        sys.exit(int(os.getenv("WORKLOAD_EXIT_CODE", "0")))
+    elif "container" in arguments:
+        assert "exists" in arguments or "cleanup" in arguments
+    elif "info" in arguments:
         fail("graphroot")
         print(directory / "graphroot")
     else:
