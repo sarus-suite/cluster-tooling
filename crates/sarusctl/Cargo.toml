@@ -15,7 +15,8 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 users = "0.11.0"
 uuid = { version = "1.4.1", features = ["v4"] }
-yaml_serde = "0.10.3"
+saphyr-parser = "0.3.3"
+saphyr = { version = "0.3.3", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2.0.17"
