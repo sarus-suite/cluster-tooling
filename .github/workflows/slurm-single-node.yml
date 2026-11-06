@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 env:
-  SARUS_SUITE_VERSION: v26.8.1
+  SARUS_SUITE_VERSION: v26.11.3
   SARUS_SUITE_AMD64_SHA256: c6e8ee55197fbf5f664a89c1ffc42cca0176fde8c9a16aebae9a62bccd6f75c8
 
 jobs:
@@ -282,6 +282,7 @@ jobs:
           # /etc/sarus-suite/sarus-suite.conf like in zinal
           sudo tee /etc/sarus-suite/sarus-suite.conf >/dev/null <<'EOF'
           edf_system_search_path = "/tmp/containers/edf"
+          hpc_image_store = "/tmp/.hpc_image_store"
           parallax_imagestore = "/tmp/.parallax_imagestore"
           parallax_path = "/usr/local/bin/parallax"
           parallax_mount_program = "/usr/local/bin/parallax-mount-program"
