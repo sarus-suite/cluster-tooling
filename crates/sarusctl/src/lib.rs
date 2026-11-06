@@ -2,8 +2,8 @@ mod yaml_images;
 
 use clap::ValueEnum;
 use hpc_image_store::{
-    ExportReport, ImageSelector, ListReport, PullContext, PullOptions, PullReport, Store,
-    StoreConfig, TransferContext, format_list_podman,
+    ExportReport, ImageSelector, ListReport, LocalRef, PullContext, PullOptions, PullReport,
+    RemoveReport, Store, StoreConfig, TransferContext, format_list_podman,
 };
 use raster::{self, EDF, ExecutedCommand, config::Config, hook_run};
 use saphyr::{ScalarOwned, YamlOwned};
@@ -75,6 +75,9 @@ pub enum CommandSpec {
         image: String,
     },
     Rmi {
+        image: String,
+    },
+    PlxRmi {
         image: String,
     },
     Run {
@@ -211,6 +214,12 @@ pub trait ContainerRuntime {
 }
 
 pub trait HpcStoreOps {
+    fn export(
+        &self,
+        path: &Path,
+        image: &ImageSelector,
+        context: &TransferContext,
+    ) -> Result<ExportReport, AppError>;
     fn list(&self, path: &Path) -> Result<ListReport, AppError>;
     fn pull(
         &self,
@@ -218,18 +227,25 @@ pub trait HpcStoreOps {
         image: &ImageSelector,
         context: &PullContext,
     ) -> Result<PullReport, AppError>;
+    fn remove(&self, path: &Path, image: &LocalRef) -> Result<RemoveReport, AppError>;
     fn resolve(&self, path: &Path, image: &ImageSelector) -> Result<Option<String>, AppError>;
-    fn export(
-        &self,
-        path: &Path,
-        image: &ImageSelector,
-        context: &TransferContext,
-    ) -> Result<ExportReport, AppError>;
 }
 
 pub struct RealHpcStoreOps;
 
 impl HpcStoreOps for RealHpcStoreOps {
+    fn export(
+        &self,
+        path: &Path,
+        image: &ImageSelector,
+        context: &TransferContext,
+    ) -> Result<ExportReport, AppError> {
+        StoreConfig::new(path)
+            .map(Store::new)
+            .and_then(|store| store.export(image, None, context))
+            .map_err(|error| hpc_operation_error("export", path, image, error))
+    }
+
     fn list(&self, path: &Path) -> Result<ListReport, AppError> {
         let config =
             StoreConfig::new(path).map_err(|error| AppError::Runtime(error.to_string()))?;
@@ -260,6 +276,13 @@ impl HpcStoreOps for RealHpcStoreOps {
             .map_err(|error| hpc_operation_error("pull", path, image, error))
     }
 
+    fn remove(&self, path: &Path, image: &LocalRef) -> Result<RemoveReport, AppError> {
+        StoreConfig::new(path)
+            .map(Store::new)
+            .and_then(|store| store.remove(image))
+            .map_err(|error| hpc_operation_error("remove", path, image, error))
+    }
+
     fn resolve(&self, path: &Path, image: &ImageSelector) -> Result<Option<String>, AppError> {
         StoreConfig::new(path)
             .map(Store::new)
@@ -275,24 +298,12 @@ impl HpcStoreOps for RealHpcStoreOps {
                 }
             })
     }
-
-    fn export(
-        &self,
-        path: &Path,
-        image: &ImageSelector,
-        context: &TransferContext,
-    ) -> Result<ExportReport, AppError> {
-        StoreConfig::new(path)
-            .map(Store::new)
-            .and_then(|store| store.export(image, None, context))
-            .map_err(|error| hpc_operation_error("export", path, image, error))
-    }
 }
 
 fn hpc_operation_error(
     operation: &str,
     path: &Path,
-    image: &ImageSelector,
+    image: &impl fmt::Display,
     error: impl fmt::Display,
 ) -> AppError {
     AppError::Runtime(format!(
@@ -831,6 +842,10 @@ pub fn execute_command_with_options(
             let config = load_config_with_options(deps.raster, &options)?;
             rmi_command(&image, &config, deps, &options)
         }
+        CommandSpec::PlxRmi { image } => {
+            let config = load_config_with_options(deps.raster, &options)?;
+            plx_rmi_command(&image, &config, deps, &options)
+        }
         CommandSpec::Run {
             // Run is the only command that loads the config on its own to facilitate testing of invalid EDF files without needing a valid config present
             filepath,
@@ -1091,6 +1106,20 @@ fn migrate_command(
 }
 
 fn rmi_command(
+    image: &str,
+    config: &Config,
+    deps: &AppDeps<'_>,
+    options: &ExecOptions,
+) -> Result<AppOutput, AppError> {
+    let path = hpc_imagestore_path(config, options)?;
+    let image = LocalRef::new(image).map_err(|error| {
+        AppError::UnsupportedInput(format!("Invalid image argument '{image}' for rmi: {error}"))
+    })?;
+    deps.hpc_store.remove(&path, &image)?;
+    Ok(AppOutput::success(""))
+}
+
+fn plx_rmi_command(
     image: &str,
     config: &Config,
     deps: &AppDeps<'_>,
@@ -1590,6 +1619,12 @@ mod tests {
         }
     }
 
+    struct RecordedRmiContext {
+        executable: PathBuf,
+        store: Option<PathBuf>,
+        graphroot: Option<PathBuf>,
+    }
+
     struct FakeContainerRuntime {
         calls: Rc<RefCell<Vec<String>>>,
         create_run_rootdirs: bool,
@@ -1597,6 +1632,7 @@ mod tests {
         pull_verbose: RefCell<Vec<bool>>,
         migrate_verbose: RefCell<Vec<bool>>,
         rmi_verbose: RefCell<Vec<bool>>,
+        rmi_contexts: RefCell<Vec<RecordedRmiContext>>,
         run_logfiles: RefCell<Vec<Option<String>>>,
         graphroot: Result<PathBuf, AppError>,
         images_result: Result<(), AppError>,
@@ -1623,6 +1659,7 @@ mod tests {
                 pull_verbose: RefCell::new(Vec::new()),
                 migrate_verbose: RefCell::new(Vec::new()),
                 rmi_verbose: RefCell::new(Vec::new()),
+                rmi_contexts: RefCell::new(Vec::new()),
                 run_logfiles: RefCell::new(Vec::new()),
                 graphroot: Ok(PathBuf::from("/graphroot")),
                 images_result: Ok(()),
@@ -1778,13 +1815,18 @@ mod tests {
 
         fn parallax_rmi(
             &self,
-            _parallax_path: &Path,
-            _ctx: &PodmanCtx,
+            parallax_path: &Path,
+            ctx: &PodmanCtx,
             image: &str,
             verbose: bool,
         ) -> Result<(), AppError> {
             self.calls.borrow_mut().push(format!("rmi:{image}"));
             self.rmi_verbose.borrow_mut().push(verbose);
+            self.rmi_contexts.borrow_mut().push(RecordedRmiContext {
+                executable: parallax_path.to_path_buf(),
+                store: ctx.ro_store.clone(),
+                graphroot: ctx.graphroot.clone(),
+            });
             self.rmi_results
                 .borrow_mut()
                 .remove(image)
@@ -2399,6 +2441,7 @@ spec:
         resolved: Option<String>,
         stored_images: RefCell<Option<BTreeMap<String, String>>>,
         resolution_results: RefCell<HashMap<String, ResolutionQueue>>,
+        remove_error: Option<AppError>,
         failure: Option<&'static str>,
     }
 
@@ -2417,6 +2460,7 @@ spec:
                 resolved: None,
                 stored_images: RefCell::new(None),
                 resolution_results: RefCell::new(HashMap::new()),
+                remove_error: None,
                 failure: None,
             }
         }
@@ -2442,7 +2486,7 @@ spec:
             &self,
             operation: &str,
             path: &Path,
-            image: &ImageSelector,
+            image: &impl fmt::Display,
         ) -> Result<(), AppError> {
             self.calls
                 .borrow_mut()
@@ -2456,6 +2500,16 @@ spec:
     }
 
     impl HpcStoreOps for FakeHpcStore {
+        fn remove(&self, path: &Path, image: &LocalRef) -> Result<RemoveReport, AppError> {
+            self.record("remove", path, image)?;
+            if let Some(error) = &self.remove_error {
+                return Err(error.clone());
+            }
+            Ok(RemoveReport {
+                local_ref: image.clone(),
+            })
+        }
+
         fn list(&self, path: &Path) -> Result<ListReport, AppError> {
             self.paths.borrow_mut().push(path.to_path_buf());
             self.list_report.clone()
@@ -3096,8 +3150,204 @@ spec:
     }
 
     #[test]
-    fn rmi_success_runs_removal_steps() {
+    fn rmi_removes_exact_reference_at_effective_hpc_path_only() {
+        let cwd = std::env::current_dir().unwrap();
+        let cases = [
+            (
+                ExecOptions::default(),
+                std::env::temp_dir().join("hpc-imagestore"),
+            ),
+            (
+                ExecOptions {
+                    parallax_imagestore: Some("relative/parallax".into()),
+                    ..ExecOptions::default()
+                },
+                cwd.join("relative/hpc-imagestore"),
+            ),
+            (
+                ExecOptions {
+                    parallax_imagestore: Some("other/parallax".into()),
+                    hpc_imagestore: Some("selected".into()),
+                    verbose: true,
+                },
+                cwd.join("selected"),
+            ),
+        ];
+        for (options, expected) in cases {
+            let mut config = sample_config();
+            config.hooks.parallax_imagestore_create = "/missing/hook".into();
+            let raster = FakeRasterOps::new(config);
+            let runtime = FakeContainerRuntime::new();
+            let store = FakeHpcStore::new(&runtime);
+            let user = FakeUserContext {
+                user: CurrentUser { uid: 1, gid: 1 },
+            };
+            let output = execute_command_with_options(
+                CommandSpec::Rmi {
+                    image: "registry.example:5000/analysis/tool:Release_1".into(),
+                },
+                &AppDeps {
+                    hpc_store: &store,
+                    ..mock_deps(&raster, &runtime, &user)
+                },
+                options,
+            )
+            .unwrap();
+            assert_eq!(output, AppOutput::success(""));
+            assert_eq!(
+                runtime.calls(),
+                ["hpc_remove:registry.example:5000/analysis/tool:Release_1"]
+            );
+            assert_eq!(*store.paths.borrow(), [expected]);
+        }
+    }
+
+    #[test]
+    fn rmi_rejects_invalid_references_and_paths_before_removal() {
+        let raster = FakeRasterOps::new(sample_config());
+        let runtime = FakeContainerRuntime::new();
+        let store = FakeHpcStore::new(&runtime);
+        let user = FakeUserContext {
+            user: CurrentUser { uid: 1, gid: 1 },
+        };
+        let deps = AppDeps {
+            hpc_store: &store,
+            ..mock_deps(&raster, &runtime, &user)
+        };
+        for image in [
+            "alpine",
+            "",
+            "../escape:tag",
+            "image with spaces:tag",
+            "alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "alpine:tag@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            let error = execute_command(
+                CommandSpec::Rmi {
+                    image: image.into(),
+                },
+                &deps,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, AppError::UnsupportedInput(_)),
+                "{image}: {error}"
+            );
+        }
+        let error = execute_command_with_options(
+            CommandSpec::Rmi {
+                image: "alpine:tag".into(),
+            },
+            &deps,
+            ExecOptions {
+                hpc_imagestore: Some(PathBuf::new()),
+                ..ExecOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, AppError::ConfigLoad(_)));
+        assert!(runtime.calls().is_empty());
+        assert!(store.paths.borrow().is_empty());
+    }
+
+    #[test]
+    fn rmi_propagates_store_errors_without_retrying() {
+        let raster = FakeRasterOps::new(sample_config());
+        let runtime = FakeContainerRuntime::new();
+        let mut store = FakeHpcStore::new(&runtime);
+        let user = FakeUserContext {
+            user: CurrentUser { uid: 1, gid: 1 },
+        };
+        for message in [
+            "missing reference",
+            "reference removal may be visible; recovery pending at /store/.pending; sync failed",
+        ] {
+            runtime.calls.borrow_mut().clear();
+            store.remove_error = Some(AppError::Runtime(message.into()));
+            let error = execute_command(
+                CommandSpec::Rmi {
+                    image: "alpine:tag".into(),
+                },
+                &AppDeps {
+                    hpc_store: &store,
+                    ..mock_deps(&raster, &runtime, &user)
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error, AppError::Runtime(message.into()));
+            assert_eq!(runtime.calls(), ["hpc_remove:alpine:tag"]);
+        }
+    }
+
+    #[test]
+    fn plx_rmi_stops_after_graphroot_failure() {
+        let raster = FakeRasterOps::new(sample_config());
+        let mut runtime = FakeContainerRuntime::new();
+        runtime.graphroot = Err(AppError::PodmanInfo("graphroot failure".into()));
+        let user = FakeUserContext {
+            user: CurrentUser { uid: 1, gid: 1 },
+        };
+        let error = execute_command(
+            CommandSpec::PlxRmi {
+                image: "alpine:tag".into(),
+            },
+            &mock_deps(&raster, &runtime, &user),
+        )
+        .unwrap_err();
+        assert_eq!(error, AppError::PodmanInfo("graphroot failure".into()));
+        assert_eq!(runtime.calls(), ["default_graphroot"]);
+    }
+
+    #[test]
+    fn plx_rmi_honors_override_and_legacy_context() {
+        let temp = tempdir().unwrap();
+        let selected = temp.path().join("selected-parallax");
         let config = sample_config();
+        let executable = PathBuf::from(&config.parallax_path);
+        let raster = FakeRasterOps::new(config);
+        let runtime = FakeContainerRuntime::new();
+        let store = FakeHpcStore::new(&runtime);
+        let user = FakeUserContext {
+            user: CurrentUser { uid: 1, gid: 1 },
+        };
+        let output = execute_command_with_options(
+            CommandSpec::PlxRmi {
+                image: "arbitrary-legacy-reference".into(),
+            },
+            &AppDeps {
+                hpc_store: &store,
+                ..mock_deps(&raster, &runtime, &user)
+            },
+            ExecOptions {
+                parallax_imagestore: Some(selected.to_string_lossy().into_owned()),
+                hpc_imagestore: Some(temp.path().join("unused-hpc")),
+                verbose: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(output, AppOutput::success(""));
+        assert_eq!(
+            runtime.calls(),
+            ["default_graphroot", "rmi:arbitrary-legacy-reference"]
+        );
+        let contexts = runtime.rmi_contexts.borrow();
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].executable, executable);
+        assert_eq!(contexts[0].store.as_deref(), Some(selected.as_path()));
+        assert_eq!(
+            contexts[0].graphroot.as_deref(),
+            Some(Path::new("/graphroot"))
+        );
+        assert_eq!(runtime.rmi_verbose(), [true]);
+        assert!(selected.is_dir());
+        assert!(store.paths.borrow().is_empty());
+    }
+
+    #[test]
+    fn plx_rmi_success_runs_removal_steps() {
+        let temp = tempdir().unwrap();
+        let mut config = sample_config();
+        config.parallax_imagestore = temp.path().join("parallax").to_string_lossy().into_owned();
         let raster = FakeRasterOps::new(config);
         let runtime = FakeContainerRuntime::new();
         let user = FakeUserContext {
@@ -3105,7 +3355,7 @@ spec:
         };
 
         let output = execute_command(
-            CommandSpec::Rmi {
+            CommandSpec::PlxRmi {
                 image: String::from("alpine:3.22"),
             },
             &mock_deps(&raster, &runtime, &user),
@@ -3124,8 +3374,10 @@ spec:
     }
 
     #[test]
-    fn rmi_failure_is_returned_as_runtime_error() {
-        let config = sample_config();
+    fn plx_rmi_failure_is_returned_as_runtime_error() {
+        let temp = tempdir().unwrap();
+        let mut config = sample_config();
+        config.parallax_imagestore = temp.path().join("parallax").to_string_lossy().into_owned();
         let raster = FakeRasterOps::new(config);
         let runtime = FakeContainerRuntime::new();
         runtime.rmi_results.borrow_mut().insert(
@@ -3137,7 +3389,7 @@ spec:
         };
 
         let err = execute_command(
-            CommandSpec::Rmi {
+            CommandSpec::PlxRmi {
                 image: String::from("alpine:3.22"),
             },
             &mock_deps(&raster, &runtime, &user),
@@ -4072,8 +4324,10 @@ spec:
     }
 
     #[test]
-    fn rmi_propagates_verbose_option() {
-        let config = sample_config();
+    fn plx_rmi_propagates_verbose_option() {
+        let temp = tempdir().unwrap();
+        let mut config = sample_config();
+        config.parallax_imagestore = temp.path().join("parallax").to_string_lossy().into_owned();
         let raster = FakeRasterOps::new(config);
         let runtime = FakeContainerRuntime::new();
         let user = FakeUserContext {
@@ -4081,7 +4335,7 @@ spec:
         };
 
         let output = execute_command_with_options(
-            CommandSpec::Rmi {
+            CommandSpec::PlxRmi {
                 image: String::from("alpine:3.22"),
             },
             &mock_deps(&raster, &runtime, &user),
