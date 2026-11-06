@@ -139,7 +139,14 @@ pub(crate) fn store_pull(
     if !pmd_image_exists(&image_digest, &ro_ctx)? {
         let image_digest_selector = ImageSelector::new(&image_digest)?;
         skybox_log_debug!("exporting image \"{image_digest}\" from hpc_image_store");
-        store.export(&image_digest_selector, None, &TransferContext::default())?;
+
+        let transfer_ctx = TransferContext {
+            podman: PathBuf::from(&config.podman_path),
+            skopeo: PathBuf::from(&config.skopeo_path),
+            platform: None,
+        };
+
+        store.export(&image_digest_selector, None, &transfer_ctx)?;
 
         skybox_log_debug!("migrating image \"{image_digest}\" to parallax imagestore");
         pmd_parallax_migrate(&config.parallax_path, &migrate_ctx, &image_digest)?;
