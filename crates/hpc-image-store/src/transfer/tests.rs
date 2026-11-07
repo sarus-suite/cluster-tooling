@@ -61,7 +61,8 @@ else:
     assert not any(flag in a for flag in ['--all', '--format', '--dest-compress', '--dest-decompress', '--dest-compress-format', '--dest-compress-level'])
     source = pathlib.Path(a[-2][4:])
     root = json.loads((source / 'index.json').read_text())['manifests'][0]['digest']
-    if c.get('export_failure') or ('@' in a[-1] and a[-1].rsplit('@', 1)[1] != root):
+    destination = a[-1].split(']', 1)[-1]
+    if c.get('export_failure') or ('@' in destination and destination.rsplit('@', 1)[1] != root):
         sys.stderr.write(c.get('export_failure', 'manifest does not match expected digest'))
         sys.exit(18)
 "#;
@@ -91,6 +92,7 @@ impl Fixture {
             podman: directory.join("podman"),
             skopeo: directory.join("skopeo"),
             platform: None,
+            storage: None,
         };
         for executable in [&context.podman, &context.skopeo] {
             fs::write(executable, TOOL).unwrap();
@@ -183,6 +185,127 @@ impl Fixture {
         )
         .unwrap();
     }
+}
+
+#[test]
+fn overlay_storage_requires_representable_absolute_paths() {
+    let storage = OverlayStorage::new("/var/lib/example", "/run/user/1000/example").unwrap();
+    assert_eq!(storage.graphroot(), Path::new("/var/lib/example"));
+    assert_eq!(storage.runroot(), Path::new("/run/user/1000/example"));
+
+    for (graphroot, runroot, field) in [
+        ("relative/graph", "/run/example", "graphroot"),
+        ("/var/lib/example", "relative/run", "runroot"),
+        ("/var/lib/example:option", "/run/example", "graphroot"),
+        ("/var/lib/example", "/run/example+other", "runroot"),
+    ] {
+        let error = OverlayStorage::new(graphroot, runroot).unwrap_err();
+        assert!(matches!(error, Error::InvalidTransfer(_)));
+        assert!(error.to_string().contains(field), "{error}");
+    }
+}
+
+#[test]
+fn overlay_storage_renders_skopeo_and_podman_arguments() {
+    let graphroot = PathBuf::from("/var/lib/example");
+    let runroot = PathBuf::from("/run/user/1000/example");
+    let context = TransferContext {
+        storage: Some(OverlayStorage::new(&graphroot, &runroot).unwrap()),
+        ..TransferContext::default()
+    };
+    assert_eq!(
+        context.storage_argument("example/image:tag"),
+        OsString::from(
+            "containers-storage:[overlay@/var/lib/example+/run/user/1000/example]example/image:tag"
+        )
+    );
+
+    let mut command = Command::new("podman");
+    context.configure_podman_storage(&mut command);
+    assert_eq!(
+        command.get_args().map(OsStr::to_owned).collect::<Vec<_>>(),
+        vec![
+            OsString::from("--storage-driver"),
+            OsString::from("overlay"),
+            OsString::from("--root"),
+            graphroot.into_os_string(),
+            OsString::from("--runroot"),
+            runroot.into_os_string(),
+        ]
+    );
+}
+
+#[test]
+fn explicit_overlay_storage_configures_podman_import_and_skopeo_transports() {
+    let mut fixture = Fixture::new();
+    let graphroot = fixture.temporary.path().join("containers-graph");
+    let runroot = fixture.temporary.path().join("containers-run");
+    fixture.context.storage = Some(OverlayStorage::new(&graphroot, &runroot).unwrap());
+
+    let report = fixture.import(false).unwrap();
+    let log = fixture.log();
+    let podman = log.iter().find(|entry| entry["tool"] == "podman").unwrap();
+    let podman_args = podman["args"].as_array().unwrap();
+    assert_eq!(
+        &podman_args[..6],
+        &[
+            json!("--storage-driver"),
+            json!("overlay"),
+            json!("--root"),
+            json!(graphroot),
+            json!("--runroot"),
+            json!(runroot),
+        ]
+    );
+    assert_eq!(podman_args[6], "image");
+
+    let expected_source = format!(
+        "containers-storage:[overlay@{}+{}]{}",
+        graphroot.display(),
+        runroot.display(),
+        report.image_id.as_str()
+    );
+    let import_copy = log
+        .iter()
+        .find(|entry| {
+            let args = entry["args"].as_array().unwrap();
+            entry["tool"] == "skopeo"
+                && args.iter().any(|argument| argument == "copy")
+                && args.last().is_some_and(|argument| {
+                    argument
+                        .as_str()
+                        .is_some_and(|argument| argument.starts_with("oci:"))
+                })
+        })
+        .unwrap();
+    assert_eq!(
+        import_copy["args"].as_array().unwrap()[import_copy["args"].as_array().unwrap().len() - 2],
+        expected_source
+    );
+
+    let destination = parse_selector("localhost/explicit:tag");
+    fixture
+        .store
+        .export(
+            &parse_selector(fixture.reference.as_str()),
+            Some(&destination),
+            &fixture.context,
+        )
+        .unwrap();
+    let expected_destination = format!(
+        "containers-storage:[overlay@{}+{}]{}",
+        graphroot.display(),
+        runroot.display(),
+        destination
+    );
+    assert_eq!(
+        fixture.log().last().unwrap()["args"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap(),
+        &json!(expected_destination)
+    );
 }
 
 #[test]
@@ -1304,6 +1427,7 @@ fn transfer_worker() {
         podman: root.join("podman"),
         skopeo: root.join("skopeo"),
         platform: None,
+        storage: None,
     };
     if let Ok(point) = std::env::var("HPC_IMPORT_PAUSE") {
         let point = [
