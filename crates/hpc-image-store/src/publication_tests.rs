@@ -144,6 +144,7 @@ fn export_rejects_a_complete_stored_index_before_invoking_tools() {
         podman: "/unavailable/podman".into(),
         skopeo: "/unavailable/skopeo".into(),
         platform: None,
+        storage: None,
     };
     for selector in [
         reference().to_string(),
