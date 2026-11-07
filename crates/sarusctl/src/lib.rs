@@ -1180,12 +1180,18 @@ fn run_command(
             setup_imagestore(&config)?;
             run_edf_command(&edf, container_cmd, &config, deps, options)
         }
-        Err(_) => {
-            let contents = fs::read_to_string(filepath)
-                .map_err(|e| AppError::Io(format!("failed to read {filepath}: {e}")))?;
-            let manifest = ParsedManifest::parse(contents).map_err(|_| {
-                AppError::UnsupportedInput(format!("{filepath} is not valid EDF nor YAML"))
-            })?;
+        Err(edf_error) => {
+            let manifest = fs::read_to_string(filepath)
+                .map_err(|e| AppError::Io(format!("failed to read {filepath}: {e}")))
+                .and_then(ParsedManifest::parse)
+                .map_err(|yaml_error| {
+                    let message = if filepath.ends_with(".yaml") || filepath.ends_with(".yml") {
+                        format!("Invalid YAML file '{filepath}': {yaml_error}")
+                    } else {
+                        format!("Invalid EDF file '{filepath}': {edf_error}")
+                    };
+                    AppError::UnsupportedInput(message)
+                })?;
 
             let config = load_config_with_options(deps.raster, options)?;
             setup_imagestore(&config)?;
@@ -4394,38 +4400,44 @@ spec:
     #[test]
     fn run_invalid_input_returns_unsupported_input_error() {
         let temp = tempdir().unwrap();
-        let input = temp.path().join("bad.txt");
-        fs::write(&input, "foo: [bar").unwrap();
+        for extension in ["txt", "yaml", "yml"] {
+            let input = temp.path().join(format!("bad.{extension}"));
+            fs::write(&input, "foo: [bar").unwrap();
 
-        let mut raster = FakeRasterOps::new(sample_config());
-        raster.render_results.insert(
-            input.to_string_lossy().into_owned(),
-            Err(String::from("not an edf")),
-        );
-        let runtime = FakeContainerRuntime::new();
-        let store = FakeHpcStore::for_run(&runtime);
-        let user = FakeUserContext {
-            user: CurrentUser { uid: 1, gid: 1 },
-        };
+            let mut raster = FakeRasterOps::new(sample_config());
+            raster.render_results.insert(
+                input.to_string_lossy().into_owned(),
+                Err(String::from("not an edf")),
+            );
+            let runtime = FakeContainerRuntime::new();
+            let store = FakeHpcStore::for_run(&runtime);
+            let user = FakeUserContext {
+                user: CurrentUser { uid: 1, gid: 1 },
+            };
 
-        let err = execute_command(
-            CommandSpec::Run {
-                filepath: input.to_string_lossy().into_owned(),
-                container_cmd: vec![],
-            },
-            &AppDeps {
-                hpc_store: &store,
-                ..mock_deps(&raster, &runtime, &user)
-            },
-        )
-        .unwrap_err();
+            let err = execute_command(
+                CommandSpec::Run {
+                    filepath: input.to_string_lossy().into_owned(),
+                    container_cmd: vec![],
+                },
+                &AppDeps {
+                    hpc_store: &store,
+                    ..mock_deps(&raster, &runtime, &user)
+                },
+            )
+            .unwrap_err();
 
-        assert_eq!(
-            err,
-            AppError::UnsupportedInput(format!(
-                "{} is not valid EDF nor YAML",
-                input.to_string_lossy()
-            ))
-        );
+            assert!(matches!(err, AppError::UnsupportedInput(_)));
+            let message = err.to_string();
+            // assert!(message.contains("not an edf"), "{message}");
+            if extension == "yaml" || extension == "yml" {
+                assert!(message.contains("Invalid YAML file"), "{message}");
+            } else {
+                assert_eq!(
+                    message,
+                    format!("Invalid EDF file '{}': not an edf", input.to_string_lossy())
+                );
+            }
+        }
     }
 }
