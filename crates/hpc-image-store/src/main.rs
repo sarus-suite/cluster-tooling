@@ -127,6 +127,7 @@ fn execute(cli: Cli) -> hpc_image_store::Result<bool> {
         skopeo: cli.skopeo,
         podman: cli.podman,
         platform: cli.platform,
+        storage: None,
     };
     match cli.command {
         Action::Resolve { selector } => {

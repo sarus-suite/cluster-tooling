@@ -13,7 +13,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     process::Command,
@@ -24,13 +24,74 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 const OCI_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 const OCI_CONFIG: &str = "application/vnd.oci.image.config.v1+json";
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OverlayStorage {
+    graphroot: PathBuf,
+    runroot: PathBuf,
+    transport_prefix: OsString,
+}
+
+impl OverlayStorage {
+    pub fn new(graphroot: impl Into<PathBuf>, runroot: impl Into<PathBuf>) -> Result<Self> {
+        let graphroot = graphroot.into();
+        let runroot = runroot.into();
+        validate_storage_path("graphroot", &graphroot)?;
+        validate_storage_path("runroot", &runroot)?;
+        // building the transport
+        let mut transport_prefix = OsString::from("containers-storage:[overlay@");
+        transport_prefix.push(&graphroot);
+        transport_prefix.push("+");
+        transport_prefix.push(&runroot);
+        transport_prefix.push("]");
+        Ok(Self {
+            graphroot,
+            runroot,
+            transport_prefix,
+        })
+    }
+
+    pub fn graphroot(&self) -> &Path {
+        &self.graphroot
+    }
+
+    pub fn runroot(&self) -> &Path {
+        &self.runroot
+    }
+
+    fn argument(&self, image: &str) -> OsString {
+        let mut argument = self.transport_prefix.clone();
+        argument.push(image);
+        argument
+    }
+}
+
+fn validate_storage_path(field: &'static str, path: &Path) -> Result<()> {
+    if !path.is_absolute() {
+        return Err(Error::InvalidTransfer(format!(
+            "containers-storage {field} must be an absolute path"
+        )));
+    }
+    if path
+        .as_os_str()
+        .as_bytes()
+        .iter()
+        .any(|byte| matches!(*byte, 0 | b':' | b'+' | b'[' | b']'))
+    {
+        return Err(Error::InvalidTransfer(format!(
+            "containers-storage {field} contains a character that cannot be represented in a storage specifier"
+        )));
+    }
+    Ok(())
+}
+
 /// Both tools inherit the caller's environment, storage configuration and
-/// namespace. No storage settings are reconstructed or overridden.
+/// namespace, unless storage overlay with transport options graphroot and runroot is used.
 #[derive(Clone, Debug)]
 pub struct TransferContext {
     pub podman: PathBuf,
     pub skopeo: PathBuf,
     pub platform: Option<Platform>,
+    pub storage: Option<OverlayStorage>,
 }
 impl Default for TransferContext {
     fn default() -> Self {
@@ -38,6 +99,7 @@ impl Default for TransferContext {
             podman: "podman".into(),
             skopeo: "skopeo".into(),
             platform: None,
+            storage: None,
         }
     }
 }
@@ -68,6 +130,22 @@ impl TransferContext {
         }
         command.arg("copy");
         command
+    }
+    fn storage_argument(&self, image: &str) -> OsString {
+        self.storage.as_ref().map_or_else(
+            || OsString::from(format!("containers-storage:{image}")),
+            |storage| storage.argument(image),
+        )
+    }
+    fn configure_podman_storage(&self, command: &mut Command) {
+        if let Some(storage) = &self.storage {
+            command
+                .args([OsStr::new("--storage-driver"), OsStr::new("overlay")])
+                .arg("--root")
+                .arg(storage.graphroot())
+                .arg("--runroot")
+                .arg(storage.runroot());
+        }
     }
     fn check_capabilities(&self, shared_option: &'static str, preserve: bool) -> Result<()> {
         let help = subprocess::run(
@@ -175,10 +253,6 @@ pub(crate) fn oci_argument(path: &Path) -> Result<OsString> {
     argument.push(path);
     Ok(argument)
 }
-fn storage_argument(image: &str) -> String {
-    format!("containers-storage:{image}")
-}
-
 impl Store {
     /// Import a containers-storage image, retaining an effective destination
     /// tag or deriving one from the explicit source digest's first 12 hex digits.
@@ -207,15 +281,18 @@ impl Store {
             Some(digest) => format!("{}@{digest}", source.name()),
             None => source.to_string(),
         };
+        let mut inspect = Command::new(&context.podman);
+        context.configure_podman_storage(&mut inspect);
+        inspect.args([
+            "image",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            "--",
+            &selected_source,
+        ]);
         let output = subprocess::run(
-            Command::new(&context.podman).args([
-                "image",
-                "inspect",
-                "--format",
-                "{{.Id}}",
-                "--",
-                &selected_source,
-            ]),
+            &mut inspect,
             "inspect source image ID",
             &context.podman,
             None,
@@ -234,7 +311,7 @@ impl Store {
         command
             .arg("--dest-shared-blob-dir")
             .arg(stage.shared_blob_path())
-            .arg(storage_argument(if source.digest().is_some() {
+            .arg(context.storage_argument(if source.digest().is_some() {
                 &selected_source
             } else {
                 image_id.as_str()
@@ -312,7 +389,7 @@ impl Store {
             .arg("--src-shared-blob-dir")
             .arg(self.layout.blobs().parent().unwrap())
             .arg(oci_argument(&resolved.raw_image)?)
-            .arg(storage_argument(destination));
+            .arg(context.storage_argument(destination));
         subprocess::run(
             &mut command,
             "export image",
