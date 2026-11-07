@@ -58,7 +58,7 @@ pub use metadata::{Acquisition, ContentMetadata, ImageId, Platform, RefMetadata,
 pub use presentation::format_list_podman;
 pub use pull::{PullContext, PullOptions, PullReport};
 pub use store::{Store, StoreConfig};
-pub use transfer::{ExportReport, ImportOptions, ImportReport, TransferContext};
+pub use transfer::{ExportReport, ImportOptions, ImportReport, OverlayStorage, TransferContext};
 
 #[cfg(test)]
 mod tests;
