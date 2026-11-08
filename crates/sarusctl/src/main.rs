@@ -61,6 +61,9 @@ enum Command {
         /// Append the combined Podman and Parallax image listing
         #[arg(long)]
         all: bool,
+        /// Show digests
+        #[arg(long)]
+        digests: bool,
     },
     /// Pull into the HPC store, resolve and export to Podman, then migrate to Parallax
     Pull { image: String },
@@ -95,7 +98,7 @@ impl From<Command> for CommandSpec {
         match value {
             Command::Validate { filepath, output } => CommandSpec::Validate { filepath, output },
             Command::Render { filepath, output } => CommandSpec::Render { filepath, output },
-            Command::Images { all } => CommandSpec::Images { all },
+            Command::Images { all, digests } => CommandSpec::Images { all, digests },
             Command::Pull { image } => CommandSpec::Pull { image },
             Command::Rmi { image } => CommandSpec::Rmi { image },
             Command::Plx {

@@ -134,8 +134,8 @@ pub fn stop(name: &str, podman_ctx: Option<&PodmanCtx>) -> Result<()> {
     execute::execute_checked(command::stop(name, podman_ctx)).map(|_| ())
 }
 
-pub fn images(podman_ctx: Option<&PodmanCtx>) -> Result<()> {
-    execute::execute_passthrough_checked(command::images(podman_ctx))
+pub fn images(podman_ctx: Option<&PodmanCtx>, digests: bool) -> Result<()> {
+    execute::execute_passthrough_checked(command::images(podman_ctx, digests))
 }
 
 pub fn image_exists(image: &str, podman_ctx: Option<&PodmanCtx>) -> Result<bool> {

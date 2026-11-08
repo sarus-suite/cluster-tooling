@@ -180,9 +180,10 @@ pub(crate) fn image_exists(image: &str, podman_ctx: Option<&PodmanCtx>) -> Comma
     command
 }
 
-pub(crate) fn images(podman_ctx: Option<&PodmanCtx>) -> Command {
+pub(crate) fn images(podman_ctx: Option<&PodmanCtx>, digests: bool) -> Command {
     let mut command = base_with_read_only_store(podman_ctx);
     command.arg("images");
+    cli_flag(&mut command, digests, "--digests");
     command
 }
 

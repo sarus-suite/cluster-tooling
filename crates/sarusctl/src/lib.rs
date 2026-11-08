@@ -67,6 +67,7 @@ pub enum CommandSpec {
     },
     Images {
         all: bool,
+        digests: bool,
     },
     Pull {
         image: String,
@@ -172,7 +173,7 @@ pub trait RasterOps {
 
 pub trait ContainerRuntime {
     fn default_graphroot(&self, ctx: &PodmanCtx) -> Result<PathBuf, AppError>;
-    fn images(&self, ctx: &PodmanCtx) -> Result<(), AppError>;
+    fn images(&self, ctx: &PodmanCtx, digests: bool) -> Result<(), AppError>;
     fn pull(&self, image: &str, ctx: &PodmanCtx, verbose: bool) -> Result<(), AppError>;
     fn image_exists(&self, image: &str, ctx: &PodmanCtx) -> Result<bool, AppError>;
     fn parallax_exist(
@@ -365,8 +366,8 @@ impl ContainerRuntime for RealContainerRuntime {
     }
 
     #[instrument(level = "debug")]
-    fn images(&self, ctx: &PodmanCtx) -> Result<(), AppError> {
-        pmd::images(Some(ctx)).map_err(|error| AppError::Runtime(error.to_string()))
+    fn images(&self, ctx: &PodmanCtx, digests: bool) -> Result<(), AppError> {
+        pmd::images(Some(ctx), digests).map_err(|error| AppError::Runtime(error.to_string()))
     }
 
     #[instrument(level = "debug")]
@@ -826,9 +827,9 @@ pub fn execute_command_with_options(
     match command {
         CommandSpec::Validate { filepath, .. } => validate_command(&filepath, deps),
         CommandSpec::Render { filepath, .. } => render_command(&filepath, deps),
-        CommandSpec::Images { all } => {
+        CommandSpec::Images { all, digests } => {
             let config = load_config_with_options(deps.raster, &options)?;
-            images_command(&config, deps, &options, all)
+            images_command(&config, deps, &options, all, digests)
         }
         CommandSpec::Pull { image } => {
             let config = load_config_with_options(deps.raster, &options)?;
@@ -916,20 +917,23 @@ fn append_listing_diagnostics(output: &mut AppOutput, source: &str, diagnostics:
 }
 
 // FIXME: When raster supports the path for the HPC imagestore it should not be necessary
-// to pass an ExecOptions arg: the override would be resolved in the called and contained
+// to pass an ExecOptions arg: the override would be resolved in the caller and contained
 // in the Config object, as it is for parallax path
 fn images_command(
     config: &Config,
     deps: &AppDeps<'_>,
     options: &ExecOptions,
     all: bool,
+    digests: bool,
 ) -> Result<AppOutput, AppError> {
     // Print the contents of the HPC image store
     let mut output = AppOutput::success(if all { "HPC store:\n" } else { "" });
     let report = hpc_imagestore_path(config, options).and_then(|path| deps.hpc_store.list(&path));
     match report {
         Ok(report) => {
-            output.stdout.push_str(&format_list_podman(&report, false));
+            output
+                .stdout
+                .push_str(&format_list_podman(&report, digests));
             for diagnostic in &report.diagnostics {
                 append_listing_diagnostics(
                     &mut output,
@@ -974,7 +978,7 @@ fn images_command(
         output.stderr.clear();
 
         // Print Podman and Parallax store contents using passthrough command
-        if let Err(error) = podman_parallax_images(config, deps) {
+        if let Err(error) = podman_parallax_images(config, deps, digests) {
             output.return_code = 1;
             append_listing_diagnostics(&mut output, "Podman+Parallax stores", &error.to_string());
         }
@@ -982,7 +986,11 @@ fn images_command(
     Ok(output)
 }
 
-fn podman_parallax_images(config: &Config, deps: &AppDeps<'_>) -> Result<(), AppError> {
+fn podman_parallax_images(
+    config: &Config,
+    deps: &AppDeps<'_>,
+    digests: bool,
+) -> Result<(), AppError> {
     let seed_ctx = build_parallax_seed_ctx(config);
 
     // Use the Parallax seed context to pre-populate the struct with Podman path and additionalimagestore,
@@ -994,7 +1002,7 @@ fn podman_parallax_images(config: &Config, deps: &AppDeps<'_>) -> Result<(), App
     };
 
     setup_imagestore(config)?;
-    deps.runtime.images(&ctx)
+    deps.runtime.images(&ctx, digests)
 }
 
 fn image_selector(image: &str) -> Result<ImageSelector, AppError> {
@@ -1761,7 +1769,7 @@ mod tests {
             self.graphroot.clone()
         }
 
-        fn images(&self, _ctx: &PodmanCtx) -> Result<(), AppError> {
+        fn images(&self, _ctx: &PodmanCtx, _digests: bool) -> Result<(), AppError> {
             self.calls.borrow_mut().push(String::from("images"));
             self.images_result.clone()
         }
@@ -2637,6 +2645,43 @@ spec:
     }
 
     #[test]
+    fn images_shows_full_stored_digest_only_when_requested() {
+        let raster = FakeRasterOps::new(sample_config());
+        let runtime = FakeContainerRuntime::new();
+        let user = FakeUserContext {
+            user: CurrentUser { uid: 1, gid: 1 },
+        };
+        let digest = format!("sha256:{}", "abcdef0123456789".repeat(4));
+        let mut report = hpc_store_inventory(hpc_image_store::ListStatus::Unverified);
+        report.entries[0].stored_root = Some(digest.parse().unwrap());
+        let store = FakeHpcStore {
+            list_report: Ok(report),
+            ..FakeHpcStore::new(&runtime)
+        };
+        let deps = AppDeps {
+            hpc_store: &store,
+            ..mock_deps(&raster, &runtime, &user)
+        };
+        for digests in [false, true] {
+            let output = execute_command(
+                CommandSpec::Images {
+                    all: false,
+                    digests,
+                },
+                &deps,
+            )
+            .unwrap();
+            assert_eq!(output.return_code, 0);
+            assert!(output.stderr.is_empty());
+            assert!(output.stdout.contains("analysis/tool"));
+            assert!(output.stdout.contains("release"));
+            assert_eq!(output.stdout.contains("DIGEST"), digests);
+            assert_eq!(output.stdout.contains(&digest), digests);
+            assert!(runtime.calls().is_empty());
+        }
+    }
+
+    #[test]
     fn images_initializes_only_hpc_store_without_podman_or_parallax_hook() {
         let temp = tempdir().unwrap();
         let mut config = sample_config();
@@ -2648,7 +2693,10 @@ spec:
             user: CurrentUser { uid: 1, gid: 1 },
         };
         let output = execute_command(
-            CommandSpec::Images { all: false },
+            CommandSpec::Images {
+                all: false,
+                digests: false,
+            },
             &mock_deps(&raster, &runtime, &user),
         )
         .unwrap();
@@ -2703,8 +2751,14 @@ spec:
                     hpc_store: &store,
                     ..mock_deps(&raster, &runtime, &user)
                 };
-                let hpc_output =
-                    execute_command(CommandSpec::Images { all: false }, &deps).unwrap();
+                let hpc_output = execute_command(
+                    CommandSpec::Images {
+                        all: false,
+                        digests: false,
+                    },
+                    &deps,
+                )
+                .unwrap();
                 assert_eq!(hpc_output.return_code, i32::from(failed));
                 if report.is_ok() {
                     assert!(hpc_output.stdout.contains("analysis/tool"));
@@ -2713,7 +2767,14 @@ spec:
                 assert!(runtime.calls().is_empty());
                 store.paths.borrow_mut().clear();
 
-                let output = execute_command(CommandSpec::Images { all: true }, &deps).unwrap();
+                let output = execute_command(
+                    CommandSpec::Images {
+                        all: true,
+                        digests: false,
+                    },
+                    &deps,
+                )
+                .unwrap();
                 assert_eq!(output.return_code, i32::from(failed || legacy_failed));
                 assert!(output.stdout.is_empty());
                 assert!(!output.stderr.contains("HPC store:"));
@@ -2758,7 +2819,14 @@ spec:
                 hpc_store: &store,
                 ..mock_deps(&raster, &runtime, &user)
             };
-            let output = execute_command(CommandSpec::Images { all: true }, &deps).unwrap();
+            let output = execute_command(
+                CommandSpec::Images {
+                    all: true,
+                    digests: false,
+                },
+                &deps,
+            )
+            .unwrap();
             assert_eq!(output.return_code, 1);
             assert!(output.stdout.is_empty());
             assert!(
@@ -2785,7 +2853,16 @@ spec:
             hpc_store: &store,
             ..mock_deps(&raster, &runtime, &user)
         };
-        assert!(execute_command(CommandSpec::Images { all: true }, &deps).is_err());
+        assert!(
+            execute_command(
+                CommandSpec::Images {
+                    all: true,
+                    digests: false
+                },
+                &deps
+            )
+            .is_err()
+        );
         assert!(runtime.calls().is_empty());
         assert!(store.paths.borrow().is_empty());
     }
@@ -2804,7 +2881,10 @@ spec:
         };
 
         let output = execute_command(
-            CommandSpec::Images { all: true },
+            CommandSpec::Images {
+                all: true,
+                digests: false,
+            },
             &mock_deps(&raster, &runtime, &user),
         )
         .unwrap();

@@ -98,7 +98,8 @@ fn images_option_placement_and_help() {
         .args(["images", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("--all"));
+        .stdout(predicate::str::contains("--all"))
+        .stdout(predicate::str::contains("--digests"));
     Command::cargo_bin("sarusctl")
         .unwrap()
         .arg("--help")
@@ -108,6 +109,8 @@ fn images_option_placement_and_help() {
     for args in [
         vec!["--all", "images"],
         vec!["validate", "--all"],
+        vec!["--digests", "images"],
+        vec!["validate", "--digests"],
         vec!["images", "--hpc-imagestore", "/tmp/hpc"],
     ] {
         Command::cargo_bin("sarusctl")
@@ -116,6 +119,42 @@ fn images_option_placement_and_help() {
             .assert()
             .code(2)
             .stderr(predicate::str::contains("unexpected argument"));
+    }
+}
+
+#[test]
+fn digests_controls_hpc_column_and_podman_flag() {
+    for all in [false, true] {
+        for digests in [false, true] {
+            let fixture = Fixture::new();
+            let mut command = fixture.command();
+            command.arg("images");
+            if all {
+                command.arg("--all");
+            }
+            if digests {
+                command.arg("--digests");
+            }
+            let result = command.assert().success();
+            let stdout = String::from_utf8_lossy(&result.get_output().stdout);
+            assert_eq!(stdout.contains("DIGEST"), digests);
+            assert_eq!(stdout.contains("LEGACY IMAGE TABLE"), all);
+            if all {
+                let calls = fs::read_to_string(fixture.root().join("calls")).unwrap();
+                let calls: Vec<_> = calls.lines().collect();
+                assert_eq!(calls.len(), 2);
+                assert!(!calls[0].contains("--digests"));
+                assert!(calls[1].ends_with(if digests {
+                    "images --digests"
+                } else {
+                    "images"
+                }));
+            } else {
+                assert!(!fixture.root().join("calls").exists());
+                assert!(!fixture.root().join("hook-calls").exists());
+                result.stderr(predicate::str::is_empty());
+            }
+        }
     }
 }
 
