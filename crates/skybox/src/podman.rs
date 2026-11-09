@@ -264,6 +264,7 @@ where
     }
 }
 
+/*
 pub(crate) fn pmd_get_graphroot(ctx: &PodmanCtx) -> Result<String, Box<dyn Error>> {
     // Debug: Workaround - Decompose function call
     //let info_out = pmd::info(Some("{{.Store.GraphRoot}}"),Some(ctx))?
@@ -383,3 +384,4 @@ pub(crate) fn log_command_error(error: &DriverError) {
         skybox_log_debug!("stderr: {stderr}");
     }
 }
+*/
