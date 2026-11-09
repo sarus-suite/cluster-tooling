@@ -56,7 +56,7 @@ pub(crate) fn run(podman_ctx: Option<&PodmanCtx>) -> Command {
     command
 }
 
-pub(crate) fn run_from_edf<I, S>(
+pub fn run_from_edf<I, S>(
     edf: &EDF,
     podman_ctx: Option<&PodmanCtx>,
     container_ctx: &ContainerCtx,
@@ -200,7 +200,7 @@ pub(crate) fn inspect(
     command
 }
 
-pub(crate) fn info(format: Option<&str>, podman_ctx: Option<&PodmanCtx>) -> Command {
+pub fn info(format: Option<&str>, podman_ctx: Option<&PodmanCtx>) -> Command {
     let mut command = base(podman_ctx);
     command.arg("info");
     if let Some(format) = format {
@@ -261,7 +261,7 @@ pub(crate) fn version(module: Option<&str>) -> Command {
     command
 }
 
-pub(crate) fn parallax(
+pub fn parallax(
     parallax_path: &PathBuf,
     podman_ctx: &PodmanCtx,
     image: &str,
@@ -299,7 +299,7 @@ fn parallax_operation(action: &str) -> &'static str {
     }
 }
 
-fn base_with_read_only_store(podman_ctx: Option<&PodmanCtx>) -> Command {
+pub fn base_with_read_only_store(podman_ctx: Option<&PodmanCtx>) -> Command {
     let mut command = base(podman_ctx);
     if let Some(ctx) = podman_ctx {
         cli_storage_opt(

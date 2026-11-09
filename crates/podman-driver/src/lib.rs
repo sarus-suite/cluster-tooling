@@ -13,6 +13,10 @@ use std::str;
 pub use context::{ContainerCtx, PodmanCtx};
 pub use error::{DriverError, Result};
 
+//Debug: workaround
+pub use command::{base_with_read_only_store, run_from_edf as command_run_from_edf, info as command_info, parallax as command_parallax};
+pub use execute::{command_failed, execute_captured};
+
 pub fn run<I, S>(args: I, podman_ctx: Option<&PodmanCtx>) -> Result<ExitStatus>
 where
     I: IntoIterator<Item = S>,
@@ -266,7 +270,7 @@ pub fn parallax_rmi_streaming(
     execute::execute_passthrough_checked(command)
 }
 
-fn require_graphroot(podman_ctx: &PodmanCtx) -> Result<()> {
+pub fn require_graphroot(podman_ctx: &PodmanCtx) -> Result<()> {
     podman_ctx
         .graphroot
         .as_ref()

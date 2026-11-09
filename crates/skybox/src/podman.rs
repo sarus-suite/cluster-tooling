@@ -1,11 +1,12 @@
 use std::error::Error;
 use std::path::PathBuf;
+use std::process::{Command, Output};
 use std::time::Instant;
 use sysinfo::{Pid, System};
 
 use slurm_spank::{SpankHandle, spank_log_user};
 
-use sarus_suite_podman_driver::{self as pmd, ContainerCtx, PodmanCtx};
+use sarus_suite_podman_driver::{self as pmd, ContainerCtx, DriverError, PodmanCtx, command_failed};
 
 use crate::{SpankSkyBox, get_job_env, plugin_err, skybox_log_debug};
 
@@ -174,7 +175,14 @@ pub(crate) fn podman_stop(
 }
 
 pub(crate) fn pmd_image_exists(image: &str, ctx: &PodmanCtx) -> pmd::Result<bool> {
-    pmd::image_exists(image, Some(ctx))
+    // Debug: Workaround - Decompose function call
+    //pmd::image_exists(image, Some(ctx))
+    let mut command = pmd::base_with_read_only_store(Some(ctx));
+    command.args(["image", "exists", image]);
+    log_command(&command);
+    let result = pmd::execute_captured(command);
+    log_command_result(&result);
+    Ok(result?.status.success())
 }
 
 /*
@@ -194,8 +202,23 @@ pub(crate) fn pmd_parallax_migrate(
     ctx: &PodmanCtx,
     image: &str,
 ) -> Result<(), Box<dyn Error>> {
-    pmd::parallax_migrate(&PathBuf::from(parallax_path), ctx, image)?;
-    Ok(())
+
+    // Debug: Workaround - Decompose function call
+    //pmd::parallax_migrate(&PathBuf::from(parallax_path), ctx, image)?;
+    //Ok(())
+
+    pmd::require_graphroot(ctx)?;
+    let command = pmd::command_parallax(&PathBuf::from(parallax_path), ctx, image, "migrate")?;
+    let rendered = log_command(&command);
+    let result = pmd::execute_captured(command);
+    log_command_result(&result);
+    let output = result?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(Box::new(command_failed(rendered, output)))
+    }
 }
 
 /*
@@ -216,7 +239,13 @@ where
     S: AsRef<std::ffi::OsStr>,
 {
     let t0 = Instant::now();
-    let result = pmd::run_from_edf_output(edf, Some(p_ctx), c_ctx, cmd);
+    
+    // Debug: Workaround - Decompose function call
+    //let result = pmd::run_from_edf_output(edf, Some(p_ctx), c_ctx, cmd);
+    let command = pmd::command_run_from_edf(edf, Some(p_ctx), c_ctx, cmd);
+    let rendered = log_command(&command);
+    let result = pmd::execute_captured(command);
+
     let tend = t0.elapsed();
 
     if config.perfmon {
@@ -225,18 +254,132 @@ where
             tend.as_secs_f64()
         );
     }
+    log_command_result(&result);
+    let output = result?;
 
-    result?;
-    Ok(())
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(Box::new(command_failed(rendered, output)))
+    }
 }
 
 pub(crate) fn pmd_get_graphroot(ctx: &PodmanCtx) -> Result<String, Box<dyn Error>> {
-    let info_out = pmd::info(Some("{{.Store.GraphRoot}}"),Some(ctx))?
-        .stdout;
+    // Debug: Workaround - Decompose function call
+    //let info_out = pmd::info(Some("{{.Store.GraphRoot}}"),Some(ctx))?
+    //    .stdout;
+    let command = pmd::command_info(Some("{{.Store.GraphRoot}}"),Some(ctx));
+    let rendered = log_command(&command);
+    let result = pmd::execute_captured(command);
+    log_command_result(&result);
+    let output = result?;
 
+    /*
     let graphroot = String::from_utf8_lossy(&info_out)
         .trim_end_matches('\n')
         .to_string();
 
     Ok(graphroot)
+    */
+
+    if output.status.success() {
+        let graphroot = String::from_utf8_lossy(&output.stdout)
+            .trim_end_matches('\n')
+            .to_string();
+        Ok(graphroot)
+    } else {
+        Err(Box::new(command_failed(rendered, output)))
+    }
+}
+
+pub(crate) fn log_command(cmd: &Command) -> String {
+    let mut output = String::from("");
+    let envs = cmd.get_envs();
+    for (orig_key, opt_value) in envs {
+        if opt_value.is_some() {
+            let key = orig_key.to_string_lossy().trim_matches('"').to_string();
+            let value = opt_value.unwrap().to_string_lossy().trim_matches('"').to_string();
+            if value.contains(char::is_whitespace) {
+                output = format!("{output}{key}=\"{value}\"; ");
+            } else {
+                output = format!("{output}{key}={value}; ");
+            }
+        }
+    }
+    let program = cmd.get_program().to_string_lossy().trim_matches('"').to_string();
+    output = format!("{output}{program}");
+    let args = cmd.get_args();
+    for orig_arg in args {
+        let arg = orig_arg.to_string_lossy().trim_matches('"').to_string();
+        if arg.contains(char::is_whitespace) {
+            output = format!("{output} \"{arg}\"");
+        } else {
+            output = format!("{output} {arg}");
+        }
+    }
+    skybox_log_debug!("Executing: {output}");
+    output
+}
+
+pub(crate) fn log_command_result(result: &Result<Output, DriverError>) {
+    match result {
+        Ok(o) => log_command_output(&o),
+        Err(e) => log_command_error(&e),
+    }
+}
+
+pub(crate) fn log_command_output(output: &Output) {
+    let rc = match output.status.code() {
+        Some(c) => c.to_string(),
+        None => String::from("Terminated by a signal"),
+    };
+
+    skybox_log_debug!("RC: {rc}");
+    let stdout = String::from_utf8(output.stdout.clone())
+        .unwrap_or(String::from("<cannot parse stdout>"))
+        .trim_end()
+        .to_string();
+    if ! stdout.is_empty() {
+        skybox_log_debug!("stdout: {stdout}");
+    }
+
+    let stderr = String::from_utf8(output.stderr.clone())
+        .unwrap_or(String::from("<cannot parse stderr>"))
+        .trim_end()
+        .to_string();
+    if ! stderr.is_empty() {
+        skybox_log_debug!("stderr: {stderr}");
+    }
+}
+
+pub(crate) fn log_command_error(error: &DriverError) {
+    let status = match error.exit_status() {
+        Some(s) => s,
+        None => {
+            skybox_log_debug!("RC: cannot find exit status");
+            return;
+        },
+    };
+
+    let rc = match status.code() {
+        Some(c) => c.to_string(),
+        None => String::from("Terminated by a signal"),
+    };
+    skybox_log_debug!("RC: {rc}");
+
+    let stdout = match error.stdout() {
+        Some(s) => s.trim_end().to_string(),
+        None => String::from(""),
+    };
+    if ! stdout.is_empty() {
+        skybox_log_debug!("stdout: {stdout}");
+    }
+    
+    let stderr = match error.stderr() {
+        Some(s) => s.trim_end().to_string(),
+        None => String::from(""),
+    };
+    if ! stderr.is_empty() {
+        skybox_log_debug!("stderr: {stderr}");
+    }
 }

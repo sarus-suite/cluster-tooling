@@ -3,7 +3,7 @@ use std::process::{Command, ExitStatus, Output};
 
 use crate::{DriverError, Result};
 
-pub(crate) fn execute_captured(mut command: Command) -> Result<Output> {
+pub fn execute_captured(mut command: Command) -> Result<Output> {
     let rendered = render_command(&command);
     execute_captured_rendered(&mut command, &rendered)
 }
@@ -76,7 +76,7 @@ fn execute_passthrough_rendered(command: &mut Command, rendered: &str) -> Result
     })
 }
 
-fn command_failed(command: String, output: Output) -> DriverError {
+pub fn command_failed(command: String, output: Output) -> DriverError {
     DriverError::CommandFailed {
         command,
         status: output.status,
