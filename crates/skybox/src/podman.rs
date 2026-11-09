@@ -230,6 +230,7 @@ where
     Ok(())
 }
 
+/*
 pub(crate) fn pmd_get_graphroot(ctx: &PodmanCtx) -> Result<String, Box<dyn Error>> {
     let info_out = pmd::info(Some("{{.Store.GraphRoot}}"),Some(ctx))?
         .stdout;
@@ -240,3 +241,4 @@ pub(crate) fn pmd_get_graphroot(ctx: &PodmanCtx) -> Result<String, Box<dyn Error
 
     Ok(graphroot)
 }
+*/
