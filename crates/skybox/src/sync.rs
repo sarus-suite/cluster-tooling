@@ -507,7 +507,7 @@ mod tests {
             pid: usize::MAX,
             podman_tmp_path: directory.to_string_lossy().into_owned(),
             syncfile_path: directory.join("pull.done").to_string_lossy().into_owned(),
-            image_digest: "",
+            image_digest: String::new(),
         }
     }
 
