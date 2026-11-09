@@ -56,4 +56,10 @@ RUN set -eu; \
     cp -a slurm/*.h /usr/include/slurm/; \
     cd "${PREV_FOLDER}"
 
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        python3 \
+        skopeo \
+    && rm -rf /var/lib/apt/lists/*
+
 CMD ["bash"]
