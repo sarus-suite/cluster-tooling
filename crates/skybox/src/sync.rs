@@ -256,8 +256,10 @@ pub(crate) fn sync_store_pull_done(
         result
     );
 
-    let mut file = File::create(run.syncfile_path)?;
-    write!(file, "RESULT: {}\nIMAGE_DIGEST: {}\n", result, run.image_digest)?;
+    let tmp_filename = format!("{}_not_yet", run.syncfile_path);
+    let mut tmp_file = File::create(&tmp_filename)?;
+    write!(tmp_file, "RESULT: {}\nIMAGE_DIGEST: {}\n", result, run.image_digest)?;
+    fs::rename(tmp_filename, run.syncfile_path)?;
 
     Ok(())
 }
