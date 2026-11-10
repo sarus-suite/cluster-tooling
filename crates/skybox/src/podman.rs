@@ -174,6 +174,16 @@ pub(crate) fn podman_stop(
     Ok(())
 }
 
+pub(crate) fn parallax_exists(parallax_path: &str, ctx: &PodmanCtx, image: &str) -> pmd::Result<bool> {
+    pmd::require_graphroot(ctx)?;
+    let command = pmd::command_parallax(&PathBuf::from(parallax_path), ctx, image, "exist")?;
+    log_command(&command);
+    let result = pmd::execute_captured(command);
+    log_command_result(&result);
+    Ok(result?.status.success())
+}
+
+/*
 pub(crate) fn pmd_image_exists(image: &str, ctx: &PodmanCtx) -> pmd::Result<bool> {
     // Debug: Workaround - Decompose function call
     //pmd::image_exists(image, Some(ctx))
@@ -184,6 +194,7 @@ pub(crate) fn pmd_image_exists(image: &str, ctx: &PodmanCtx) -> pmd::Result<bool
     log_command_result(&result);
     Ok(result?.status.success())
 }
+*/
 
 /*
 pub(crate) fn parallax_image_exists(parallax: &PathBuf, image: &str, ctx: &PodmanCtx) -> pmd::Result<bool> {
