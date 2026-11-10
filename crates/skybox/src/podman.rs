@@ -221,11 +221,9 @@ pub(crate) fn pmd_parallax_migrate(
     }
 }
 
-/*
 pub(crate) fn pmd_rmi(image: &str, ctx: &PodmanCtx) -> pmd::Result<()> {
     pmd::rmi(image, Some(ctx))
 }
-*/
 
 pub(crate) fn pmd_run<I, S>(
     edf: &raster::EDF,
