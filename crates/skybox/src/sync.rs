@@ -217,6 +217,7 @@ pub(crate) fn sync_store_pull_wait(
     let result_string = result_captures.get(1).map_or("", |m| m.as_str());
     let result = result_string.parse::<i32>().unwrap();
 
+    line.clear();
     reader.read_line(&mut line)?;
     line = line.trim_end().to_string();
     let image_digest_pattern = Regex::new(r"^IMAGE_DIGEST: (.*)$").unwrap();
