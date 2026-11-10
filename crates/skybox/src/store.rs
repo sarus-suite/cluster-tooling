@@ -9,7 +9,7 @@ use hpc_image_store::{
 };
 
 use crate::config::setup_imagestores;
-use crate::podman::{parallax_exists, /*pmd_image_exists,*/ pmd_parallax_migrate, pmd_rmi};
+use crate::podman::{parallax_exists, pmd_parallax_migrate, pmd_rmi};
 use crate::{SpankSkyBox, plugin_err, skybox_log_debug, skybox_log_error};
 
 pub(crate) fn store_pull(
@@ -45,7 +45,7 @@ pub(crate) fn store_pull(
         runroot: Some(PathBuf::from(&runroot)),
         parallax_mount_program: None,
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
-        mksquashfs_path: None,
+        mksquashfs_path: Some(PathBuf::from(&config.mksquashfs_path)),
         podman_env: None,
     }
     .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
@@ -75,25 +75,6 @@ pub(crate) fn store_pull(
     )
     .with_env("PARALLAX_MP_LOGFILE", config.parallax_mp_logfile.clone());
 
-    let migrate_ctx = PodmanCtx {
-        podman_path: PathBuf::from(&config.podman_path),
-        conmon_path: Some(PathBuf::from(&config.conmon_path)),
-        module: None,
-        graphroot: Some(PathBuf::from(&graphroot)),
-        runroot: Some(PathBuf::from(&runroot)),
-        parallax_mount_program: None,
-        ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
-        mksquashfs_path: Some(PathBuf::from(&config.mksquashfs_path)),
-        podman_env: None,
-    }
-    .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
-    .with_env("PARALLAX_MP_GID", config.parallax_mp_gid.to_string())
-    .with_env(
-        "PARALLAX_MP_SQUASHFUSE_CMD",
-        config.parallax_mp_squashfuse_path.clone(),
-    )
-    .with_env("PARALLAX_MP_LOGFILE", config.parallax_mp_logfile.clone());
-
     let store = Store::new(StoreConfig::new(&config.hpc_image_store)?);
     let selector = ImageSelector::new(&edf.image)?;
 
@@ -111,7 +92,6 @@ pub(crate) fn store_pull(
     skybox_log_debug!("Resolved image digest: \"{image_digest}\"");
     run.image_digest = image_digest.clone();
 
-    //if !pmd_image_exists(&image_digest, &ro_ctx)? {
     if !parallax_exists(parallax_path, &ro_ctx, &image_digest)? {
         let image_digest_selector = ImageSelector::new(&image_digest)?;
         skybox_log_debug!("exporting image \"{image_digest}\" from hpc_image_store");
@@ -126,7 +106,7 @@ pub(crate) fn store_pull(
         store.export(&image_digest_selector, None, &transfer_ctx)?;
 
         skybox_log_debug!("migrating image \"{image_digest}\" to parallax imagestore");
-        pmd_parallax_migrate(parallax_path, &migrate_ctx, &image_digest)?;
+        pmd_parallax_migrate(parallax_path, &ro_ctx, &image_digest)?;
 
         skybox_log_debug!("removing image \"{image_digest}\" from local graphroot");
         if let Err(error) = pmd_rmi(&image_digest, &local_ctx) {
@@ -137,7 +117,6 @@ pub(crate) fn store_pull(
             );
         }
 
-        //if !pmd_image_exists(&image_digest, &ro_ctx)? {
         if !parallax_exists(parallax_path, &ro_ctx, &image_digest)? {
             return plugin_err("couldn't find image on parallax imagestore after migration");
         }
