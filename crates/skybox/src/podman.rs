@@ -57,9 +57,7 @@ pub(crate) fn podman_start(
     let graphroot = format!("{}/graphroot", run.podman_tmp_path);
     let runroot = format!("{}/runroot", run.podman_tmp_path);
     let pidfile = format!("{}/{}", run.podman_tmp_path, PODMAN_PIDFILE_NAME);
-    //let command = vec!["sleep", "infinity"];
     let command = vec!["sh", "-c", "kill -STOP $$ ; exit 0"];
-    //let command = vec!["sh", "-l", "-c", "exec sh -c 'kill -STOP $$ ; exit 0'"];
 
     let mut edf = orig_edf.clone();
     edf.image = image_digest;
@@ -177,24 +175,6 @@ pub(crate) fn parallax_exists(parallax_path: &str, ctx: &PodmanCtx, image: &str)
     pmd::parallax_exist(&PathBuf::from(parallax_path), ctx, image)
 }
 
-/*
-pub(crate) fn pmd_image_exists(image: &str, ctx: &PodmanCtx) -> pmd::Result<bool> {
-    pmd::image_exists(image, Some(ctx))
-}
-*/
-
-/*
-pub(crate) fn parallax_image_exists(parallax: &PathBuf, image: &str, ctx: &PodmanCtx) -> pmd::Result<bool> {
-    pmd::parallax_exist(parallax, ctx, image)
-}
-*/
-
-/*
-pub(crate) fn pmd_pull(image: &str, ctx: &PodmanCtx) -> pmd::Result<()> {
-    pmd::pull(image, Some(ctx))
-}
-*/
-
 pub(crate) fn pmd_parallax_migrate(
     parallax_path: &str,
     ctx: &PodmanCtx,
@@ -233,16 +213,3 @@ where
     result?;
     Ok(())
 }
-
-/*
-pub(crate) fn pmd_get_graphroot(ctx: &PodmanCtx) -> Result<String, Box<dyn Error>> {
-    let info_out = pmd::info(Some("{{.Store.GraphRoot}}"),Some(ctx))?
-        .stdout;
-
-    let graphroot = String::from_utf8_lossy(&info_out)
-        .trim_end_matches('\n')
-        .to_string();
-
-    Ok(graphroot)
-}
-*/
