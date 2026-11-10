@@ -144,7 +144,7 @@ pub(crate) fn pull(image: &str, podman_ctx: Option<&PodmanCtx>) -> Command {
     command
 }
 
-pub(crate) fn rmi(image: &str, podman_ctx: Option<&PodmanCtx>) -> Command {
+pub fn rmi(image: &str, podman_ctx: Option<&PodmanCtx>) -> Command {
     let mut command = base_with_read_only_store(podman_ctx);
     command.args(["rmi", image]);
     command

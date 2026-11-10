@@ -221,8 +221,21 @@ pub(crate) fn pmd_parallax_migrate(
     }
 }
 
-pub(crate) fn pmd_rmi(image: &str, ctx: &PodmanCtx) -> pmd::Result<()> {
-    pmd::rmi(image, Some(ctx))
+pub(crate) fn pmd_rmi(image: &str, ctx: &PodmanCtx) -> Result<(), Box<dyn Error>> {
+    // Debug: Workaround - Decompose function call
+    //pmd::rmi(image, Some(ctx))
+
+    let command = pmd::command_rmi(image, Some(ctx));
+    let rendered = log_command(&command);
+    let result = pmd::execute_captured(command);
+    log_command_result(&result);
+    let output = result?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(Box::new(command_failed(rendered, output)))
+    }
 }
 
 pub(crate) fn pmd_run<I, S>(
@@ -290,6 +303,7 @@ pub(crate) fn pmd_get_graphroot(ctx: &PodmanCtx) -> Result<String, Box<dyn Error
         Err(Box::new(command_failed(rendered, output)))
     }
 }
+*/
 
 pub(crate) fn log_command(cmd: &Command) -> String {
     let mut output = String::from("");
@@ -382,4 +396,3 @@ pub(crate) fn log_command_error(error: &DriverError) {
         skybox_log_debug!("stderr: {stderr}");
     }
 }
-*/

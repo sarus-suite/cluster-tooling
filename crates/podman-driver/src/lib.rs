@@ -14,7 +14,7 @@ pub use context::{ContainerCtx, PodmanCtx};
 pub use error::{DriverError, Result};
 
 //Debug: workaround
-pub use command::{base_with_read_only_store, run_from_edf as command_run_from_edf, info as command_info, parallax as command_parallax};
+pub use command::{base_with_read_only_store, run_from_edf as command_run_from_edf, info as command_info, parallax as command_parallax, rmi as command_rmi};
 pub use execute::{command_failed, execute_captured};
 
 pub fn run<I, S>(args: I, podman_ctx: Option<&PodmanCtx>) -> Result<ExitStatus>
