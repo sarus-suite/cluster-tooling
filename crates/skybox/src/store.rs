@@ -136,7 +136,7 @@ pub(crate) fn store_pull(
             );
         }
 
-        if !pmd_image_exists(&edf.image, &ro_ctx)? {
+        if !pmd_image_exists(&image_digest, &ro_ctx)? {
             return plugin_err("couldn't find image on parallax imagestore after migration");
         }
     }
