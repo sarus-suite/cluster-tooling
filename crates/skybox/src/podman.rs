@@ -173,9 +173,15 @@ pub(crate) fn podman_stop(
     Ok(())
 }
 
+pub(crate) fn parallax_exists(parallax_path: &str, ctx: &PodmanCtx, image: &str) -> pmd::Result<bool> {
+    pmd::parallax_exist(&PathBuf::from(parallax_path), ctx, image)
+}
+
+/*
 pub(crate) fn pmd_image_exists(image: &str, ctx: &PodmanCtx) -> pmd::Result<bool> {
     pmd::image_exists(image, Some(ctx))
 }
+*/
 
 /*
 pub(crate) fn parallax_image_exists(parallax: &PathBuf, image: &str, ctx: &PodmanCtx) -> pmd::Result<bool> {
