@@ -1,4 +1,7 @@
 use crate::common::expand_vars_string;
+use crate::error::{
+    CONFIG_ACCESS_ERROR, CONFIG_VALIDATION_ERROR, FILE_READ_ERROR, TOML_DESERIALIZATION_ERROR,
+};
 use crate::{EDF, SarusError, SarusResult, check_file_path_extension, validate_file};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -427,7 +430,7 @@ fn load_raw_config_from_file(
         Ok(c) => c,
         Err(e) => {
             return Err(SarusError {
-                code: 2,
+                code: FILE_READ_ERROR,
                 file_path: Some(String::from(path_str)),
                 msg: String::from(format!("{}", e)),
             });
@@ -438,7 +441,7 @@ fn load_raw_config_from_file(
         Ok(v) => v,
         Err(e) => {
             return Err(SarusError {
-                code: 3,
+                code: TOML_DESERIALIZATION_ERROR,
                 file_path: Some(String::from(path_str)),
                 msg: String::from(format!("{}", e)),
             });
@@ -459,7 +462,7 @@ fn load_raw_config_from_file(
 fn validate_raw_config_fields(config: &RawConfig, filepath: &str) -> SarusResult<()> {
     if config.mksquashfs_path.as_deref() == Some("") {
         return Err(SarusError {
-            code: 4,
+            code: CONFIG_VALIDATION_ERROR,
             file_path: Some(filepath.to_string()),
             msg: String::from("mksquashfs_path must not be empty"),
         });
@@ -586,7 +589,7 @@ pub fn load_config_xdg(
         xdg_config_dirs.as_deref(),
     );
     let config_dir = resolve_config_dir_from_paths(&paths).map_err(|error| SarusError {
-        code: 23,
+        code: CONFIG_ACCESS_ERROR,
         file_path: None,
         msg: error.to_string(),
     })?;
@@ -712,7 +715,7 @@ fn load_raw_config_from_dir(
         Ok(ok) => ok,
         Err(emsg) => {
             return Err(SarusError {
-                code: 23,
+                code: CONFIG_ACCESS_ERROR,
                 file_path: Some(config_path.to_string_lossy().to_string()),
                 msg: String::from(format!("Cannot find config files, {}", emsg)),
             });
@@ -968,11 +971,12 @@ mod tests {
 
     #[test]
     fn load_config_rejects_empty_mksquashfs_path() {
-        let config_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test/config.empty-mksquashfs");
-        let error = load_config_path(Some(config_dir), VarExpand::Must, &None).unwrap_err();
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("invalid.conf"), "mksquashfs_path = \"\"\n").unwrap();
+        let error =
+            load_config_path(Some(temp.path().to_path_buf()), VarExpand::Must, &None).unwrap_err();
 
-        assert_eq!(error.code, 4);
+        assert_eq!(error.code, CONFIG_VALIDATION_ERROR);
         assert!(error.file_path.is_some());
     }
 

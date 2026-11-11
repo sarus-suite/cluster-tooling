@@ -10,7 +10,7 @@ use toml::map::Map;
 use tracing::instrument;
 
 use crate::common::{expand_vars_hashmap, expand_vars_vec};
-use crate::error::{SarusError, SarusResult};
+use crate::error::{FILE_READ_ERROR, SarusError, SarusResult, TOML_DESERIALIZATION_ERROR};
 use crate::mount::{SarusMounts, sarus_mounts_from_strings};
 use crate::squashfs_mount::{ToString, squashfs_mounts_from_mount_strings};
 
@@ -514,7 +514,7 @@ where
         Ok(c) => c,
         Err(e) => {
             return Err(SarusError {
-                code: 2,
+                code: FILE_READ_ERROR,
                 file_path: Some(String::from(s)),
                 msg: String::from(format!("{}", e)),
             });
@@ -525,7 +525,7 @@ where
         Ok(v) => v,
         Err(e) => {
             return Err(SarusError {
-                code: 3,
+                code: TOML_DESERIALIZATION_ERROR,
                 file_path: Some(String::from(s)),
                 msg: String::from(format!("{}", e)),
             });

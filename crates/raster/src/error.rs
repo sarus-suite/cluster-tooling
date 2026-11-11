@@ -3,6 +3,11 @@ use std::error::Error;
 
 pub type SarusResult<T> = std::result::Result<T, SarusError>;
 
+pub const FILE_READ_ERROR: u64 = 2;
+pub const TOML_DESERIALIZATION_ERROR: u64 = 3;
+pub const CONFIG_VALIDATION_ERROR: u64 = 4;
+pub const CONFIG_ACCESS_ERROR: u64 = 23;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SarusError {
     pub code: u64,
