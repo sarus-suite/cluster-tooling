@@ -914,23 +914,23 @@ pub fn execute_command_with_options(
         CommandSpec::Validate { filepath, .. } => validate_command(&filepath, deps),
         CommandSpec::Render { filepath, .. } => render_command(&filepath, deps),
         CommandSpec::Images { all, digests } => {
-            let config = load_config_with_options(deps.raster, &options)?;
+            let config = load_config_with_overrides(deps.raster, &options, None)?;
             images_command(&config, deps, all, digests)
         }
         CommandSpec::Pull { image } => {
-            let config = load_config_with_options(deps.raster, &options)?;
+            let config = load_config_with_overrides(deps.raster, &options, None)?;
             pull_command(&image, &config, deps, &options)
         }
         CommandSpec::Rmi { image } => {
-            let config = load_config_with_options(deps.raster, &options)?;
+            let config = load_config_with_overrides(deps.raster, &options, None)?;
             rmi_command(&image, &config, deps)
         }
         CommandSpec::PlxMigrate { image } => {
-            let config = load_config_with_options(deps.raster, &options)?;
+            let config = load_config_with_overrides(deps.raster, &options, None)?;
             migrate_command(&image, &config, deps, &options, None)
         }
         CommandSpec::PlxRmi { image } => {
-            let config = load_config_with_options(deps.raster, &options)?;
+            let config = load_config_with_overrides(deps.raster, &options, None)?;
             plx_rmi_command(&image, &config, deps, &options)
         }
         CommandSpec::Run {
@@ -942,11 +942,16 @@ pub fn execute_command_with_options(
 }
 
 #[instrument(level = "debug", skip(raster))]
-fn load_config_with_options(
+fn load_config_with_overrides(
     raster: &dyn RasterOps,
     options: &ExecOptions,
+    edf: Option<&EDF>,
 ) -> Result<Config, AppError> {
     let mut config = raster.load_config_xdg()?;
+    if let Some(edf) = edf {
+        raster::update_config_by_user(&mut config, edf)
+            .map_err(|e| AppError::ConfigLoad(e.to_string()))?;
+    }
     apply_cli_store_overrides(&mut config, options)?;
     Ok(config)
 }
@@ -1288,10 +1293,7 @@ fn run_command(
         Ok(edf) => {
             // Loading config in each branch is a small duplication,
             // but allows to integration test invalid EDF cases without needing a valid config present
-            let mut config = load_config_with_options(deps.raster, options)?;
-            raster::update_config_by_user(&mut config, edf.clone())
-                .map_err(|e| AppError::ConfigLoad(e.to_string()))?;
-            apply_cli_store_overrides(&mut config, options)?;
+            let config = load_config_with_overrides(deps.raster, options, Some(&edf))?;
             setup_imagestore(&config)?;
             run_edf_command(&edf, container_cmd, &config, deps, options)
         }
@@ -1308,7 +1310,7 @@ fn run_command(
                     AppError::UnsupportedInput(message)
                 })?;
 
-            let config = load_config_with_options(deps.raster, options)?;
+            let config = load_config_with_overrides(deps.raster, options, None)?;
             setup_imagestore(&config)?;
             run_yaml_command(&manifest, container_cmd, &config, deps, options)
         }
@@ -2087,7 +2089,7 @@ mod tests {
             ..ExecOptions::default()
         };
 
-        let config = load_config_with_options(&raster, &options).unwrap();
+        let config = load_config_with_overrides(&raster, &options, None).unwrap();
 
         assert_eq!(config.parallax_imagestore, override_path);
     }
@@ -2747,7 +2749,7 @@ spec:
             ..ExecOptions::default()
         };
         assert!(matches!(
-            load_config_with_options(&FakeRasterOps::new(sample_config()), &options),
+            load_config_with_overrides(&FakeRasterOps::new(sample_config()), &options, None),
             Err(AppError::ConfigLoad(_))
         ));
     }

@@ -86,7 +86,7 @@ pub(crate) fn srun_init_post_opt(
 
     load_edf(plugin, spank)?;
 
-    update_config_by_user(&mut plugin.config, plugin.edf.clone().unwrap())?;
+    update_config_by_user(&mut plugin.config, plugin.edf.as_ref().unwrap())?;
     let _ = set_remaining_default_args(plugin)?;
 
     Ok(())

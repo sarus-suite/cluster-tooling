@@ -40,7 +40,7 @@ pub(crate) fn alloc_init_post_opt(
 
     load_edf(plugin, spank)?;
 
-    update_config_by_user(&mut plugin.config, plugin.edf.clone().unwrap())?;
+    update_config_by_user(&mut plugin.config, plugin.edf.as_ref().unwrap())?;
     set_remaining_default_args(plugin)?;
 
     sbatch_warn_msg(plugin, spank);
