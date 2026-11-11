@@ -77,9 +77,18 @@ elif tool == "skopeo":
         assert "--preserve-digests" in arguments
         assert "--all" not in arguments and "--format" not in arguments
         if arguments[-1].startswith("containers-storage:"):
+            specifier, image = arguments[-1].removeprefix("containers-storage:[overlay@").split("]", 1)
+            graphroot, runroot = specifier.split("+", 1)
+            assert image == reference
+            assert pathlib.Path(graphroot).is_absolute()
+            assert pathlib.Path(graphroot).parent == pathlib.Path(runroot).parent
+            pathlib.Path(graphroot).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(runroot).mkdir(parents=True, exist_ok=True)
+            (directory / "export-storage").write_text(json.dumps({
+                "graphroot": graphroot, "runroot": runroot,
+            }))
             fail("export")
             assert "--src-shared-blob-dir" in arguments
-            assert arguments[-1] == "containers-storage:" + reference
             layout = pathlib.Path(arguments[-2][len("oci:"):])
             root = json.loads((layout / "index.json").read_text())["manifests"][0]
             assert root["digest"] == reference.split("@")[1]
@@ -128,12 +137,17 @@ elif tool == "podman":
         assert "image" in arguments and "exists" in arguments
         fail("podman")
         assert arguments[-1] == reference
+        storage = json.loads((directory / "export-storage").read_text())
+        assert arguments[arguments.index("--root") + 1] == storage["graphroot"]
+        assert arguments[arguments.index("--runroot") + 1] == storage["runroot"]
         assert (directory / "exported").read_text() == reference
 elif tool == "parallax":
     assert arguments[arguments.index("--image") + 1] == reference
     migrated = directory / "migrated-references"
     references = json.loads(migrated.read_text()) if migrated.exists() else []
     if "--migrate" in arguments:
+        storage = json.loads((directory / "export-storage").read_text())
+        assert arguments[arguments.index("--podmanRoot") + 1] == storage["graphroot"]
         assert (directory / "exported").read_text() == reference
         fail("migrate")
         (directory / "migrated").write_text(reference)

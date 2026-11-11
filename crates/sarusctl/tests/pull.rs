@@ -28,10 +28,12 @@ impl Fixture {
         let config = fixture.root().join("config/sarus-suite");
         fs::create_dir_all(&config).unwrap();
         fs::write(config.join("pull.conf"), format!(
-            "parallax_imagestore = {:?}\npodman_path = {:?}\nparallax_path = {:?}\nmksquashfs_path = {:?}\n[hooks]\nparallax_imagestore_create = {:?}\n",
+            "hpc_image_store = {:?}\nparallax_imagestore = {:?}\npodman_path = {:?}\nparallax_path = {:?}\nskopeo_path = {:?}\nmksquashfs_path = {:?}\n[hooks]\nparallax_imagestore_create = {:?}\n",
+            fixture.root().join("hpc-imagestore"),
             fixture.root().join("parallax-store"),
             fixture.root().join("bin/podman"),
             fixture.root().join("bin/parallax"),
+            fixture.root().join("bin/skopeo"),
             fixture.root().join("mksquashfs"),
             fixture.root().join("bin/hook"),
         )).unwrap();
@@ -129,12 +131,11 @@ fn pull_refreshes_store_and_exports_resolved_digest_before_migration() {
         assert_eq!(
             actions.iter().map(|(tool, _)| *tool).collect::<Vec<_>>(),
             [
-                "skopeo", "skopeo", "parallax", "skopeo", "podman", "podman", "hook", "parallax",
-                "parallax"
+                "skopeo", "skopeo", "parallax", "skopeo", "podman", "hook", "parallax", "parallax"
             ]
         );
         assert!(
-            actions[6]
+            actions[5]
                 .1
                 .contains(&fixture.root().join("parallax-store").to_str().unwrap())
         );
@@ -163,23 +164,28 @@ fn pull_refreshes_store_and_exports_resolved_digest_before_migration() {
                 .1
                 .contains(&fixture.root().join("mksquashfs").to_str().unwrap())
         );
-        assert!(
-            actions[3]
-                .1
-                .contains(&format!("containers-storage:{resolved}").as_str())
-        );
+        let storage: Value =
+            serde_json::from_slice(&fs::read(fixture.root().join("export-storage")).unwrap())
+                .unwrap();
+        let graphroot = storage["graphroot"].as_str().unwrap();
+        let runroot = storage["runroot"].as_str().unwrap();
+        assert!(actions[3].1.contains(
+            &format!("containers-storage:[overlay@{graphroot}+{runroot}]{resolved}").as_str()
+        ));
+        assert!(actions[4].1.contains(&graphroot));
+        assert!(actions[4].1.contains(&runroot));
+        assert!(!Path::new(graphroot).parent().unwrap().exists());
         assert!(actions[3].1.contains(&"--src-shared-blob-dir"));
         assert!(actions[3].1.contains(&"--preserve-digests"));
         assert_eq!(actions[4].1.last(), Some(&resolved.as_str()));
-        assert!(actions[5].1.contains(&"info"));
-        for (_, arguments) in &actions[7..] {
+        for (_, arguments) in &actions[6..] {
             assert_eq!(arguments.last(), Some(&resolved.as_str()));
-            assert!(arguments.contains(&fixture.root().join("graphroot").to_str().unwrap()));
+            assert!(arguments.contains(&graphroot));
             assert!(arguments.contains(&fixture.root().join("parallax-store").to_str().unwrap()));
             assert!(arguments.contains(&fixture.root().join("mksquashfs").to_str().unwrap()));
         }
-        assert!(actions[7].1.contains(&"--migrate"));
-        assert!(actions[8].1.contains(&"--exist"));
+        assert!(actions[6].1.contains(&"--migrate"));
+        assert!(actions[7].1.contains(&"--exist"));
         for entry in &calls {
             assert_eq!(
                 entry["auth"],
@@ -277,9 +283,9 @@ fn pull_overrides_and_digest_inputs_use_the_selected_store() {
         };
         fixture
             .command()
+            .arg("--hpc-imagestore")
+            .arg(fixture.root().join("selected-hpc"))
             .args([
-                "--hpc-imagestore",
-                "selected-hpc",
                 "--parallax-imagestore",
                 "selected-parallax",
                 "--verbose",
@@ -307,10 +313,9 @@ fn pull_failures_stop_pipeline_and_preserve_completed_acquisitions() {
         ("pull", 2),
         ("export", 4),
         ("podman", 5),
-        ("graphroot", 6),
-        ("hook", 7),
-        ("migrate", 8),
-        ("exist", 9),
+        ("hook", 6),
+        ("migrate", 7),
+        ("exist", 8),
     ] {
         let fixture = Fixture::new();
         let result = fixture
@@ -334,11 +339,14 @@ fn pull_failures_stop_pipeline_and_preserve_completed_acquisitions() {
             .map(|entry| entry["tool"].as_str().unwrap())
             .collect();
         let expected = [
-            "skopeo", "skopeo", "parallax", "skopeo", "podman", "podman", "hook", "parallax",
-            "parallax",
+            "skopeo", "skopeo", "parallax", "skopeo", "podman", "hook", "parallax", "parallax",
         ];
         assert_eq!(tools, expected[..operations], "{stage}");
-        if ["export", "podman", "graphroot", "hook", "migrate", "exist"].contains(&stage) {
+        let runtime_base = fixture.root().join("runtime/sarus-suite");
+        if runtime_base.exists() {
+            assert_eq!(fs::read_dir(runtime_base).unwrap().count(), 0, "{stage}");
+        }
+        if ["export", "podman", "hook", "migrate", "exist"].contains(&stage) {
             assert_eq!(
                 fixture
                     .store("hpc-imagestore")
@@ -350,7 +358,7 @@ fn pull_failures_stop_pipeline_and_preserve_completed_acquisitions() {
         assert_eq!(
             fixture.root().join("parallax-store").exists(),
             ["migrate", "exist"].contains(&stage),
-            "Parallax setup must only happen after graphroot lookup and a successful hook: {stage}"
+            "Parallax setup must only happen after a successful hook: {stage}"
         );
     }
 }
@@ -371,7 +379,9 @@ fn pull_validates_syntax_and_store_paths_without_running_tools() {
 
     fixture
         .command()
-        .args(["--hpc-imagestore", "missing-parent/store", "pull", SOURCE])
+        .arg("--hpc-imagestore")
+        .arg(fixture.root().join("missing-parent/store"))
+        .args(["pull", SOURCE])
         .assert()
         .code(1)
         .stderr(predicate::str::contains("HPC store pull failed"));
@@ -384,7 +394,9 @@ fn pull_validates_syntax_and_store_paths_without_running_tools() {
     fs::write(occupied.join("keep"), "preserved").unwrap();
     fixture
         .command()
-        .args(["--hpc-imagestore", "occupied", "pull", SOURCE])
+        .arg("--hpc-imagestore")
+        .arg(&occupied)
+        .args(["pull", SOURCE])
         .assert()
         .code(1)
         .stderr(predicate::str::contains("HPC store pull failed"));
@@ -642,6 +654,60 @@ fn run_yaml_preserves_octal_numbers_and_other_scalar_spellings() {
 }
 
 #[test]
+fn run_cli_store_overrides_take_precedence_over_edf_annotations() {
+    let fixture = Fixture::new();
+    let input = run_input(&fixture, false);
+    let annotated_hpc = fixture.root().join("annotated-hpc");
+    let annotated_parallax = fixture.root().join("annotated-parallax");
+    fs::write(
+        &input,
+        format!(
+            "image = {SOURCE:?}\n[annotations]\n\"com.sarus.hpc_image_store\" = {annotated_hpc:?}\n\"com.sarus.parallax_imagestore\" = {annotated_parallax:?}\n"
+        ),
+    ).unwrap();
+    let selected_parallax = fixture.root().join("selected-parallax");
+    fixture
+        .command()
+        .arg("--hpc-imagestore")
+        .arg(fixture.root().join("selected-hpc"))
+        .arg("--parallax-imagestore")
+        .arg(&selected_parallax)
+        .arg("run")
+        .arg(&input)
+        .arg("true")
+        .assert()
+        .success();
+
+    let resolved = fixture.resolved();
+    assert_eq!(
+        fixture
+            .store("selected-hpc")
+            .resolve(&ImageSelector::new(SOURCE).unwrap())
+            .unwrap(),
+        Some(resolved.clone())
+    );
+    let calls = fixture.calls();
+    let migration = calls
+        .iter()
+        .find(|entry| entry["tool"] == "parallax" && args(entry).contains(&"--migrate"))
+        .unwrap();
+    let arguments = args(migration);
+    let store_index = arguments
+        .iter()
+        .position(|arg| *arg == "--roStoragePath")
+        .unwrap()
+        + 1;
+    assert_eq!(arguments[store_index], selected_parallax.to_str().unwrap());
+    assert_eq!(
+        fs::read_to_string(fixture.root().join("migrated")).unwrap(),
+        resolved
+    );
+    assert!(selected_parallax.is_dir());
+    assert!(!annotated_hpc.exists());
+    assert!(!annotated_parallax.exists());
+}
+
+#[test]
 fn run_digest_inputs_honor_store_overrides() {
     for yaml in [false, true] {
         let fixture = Fixture::new();
@@ -656,9 +722,9 @@ fn run_digest_inputs_honor_store_overrides() {
         fs::write(&input, &contents).unwrap();
         fixture
             .command()
+            .arg("--hpc-imagestore")
+            .arg(fixture.root().join("selected-hpc"))
             .args([
-                "--hpc-imagestore",
-                "selected-hpc",
                 "--parallax-imagestore",
                 "selected-parallax",
                 "--verbose",
@@ -679,5 +745,64 @@ fn run_digest_inputs_honor_store_overrides() {
         assert!(!fixture.root().join("hpc-imagestore").exists());
         assert!(!fixture.root().join("parallax-store").exists());
         assert_eq!(fs::read_to_string(input).unwrap(), contents);
+    }
+}
+
+#[test]
+fn pull_cleans_runtime_directory_when_storage_path_is_invalid() {
+    let fixture = Fixture::new();
+    let runtime = fixture.root().join("runtime+invalid");
+    fs::create_dir(&runtime).unwrap();
+    fixture
+        .command()
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .args(["pull", SOURCE])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "cannot be represented in a storage specifier",
+        ));
+    assert_eq!(
+        fs::read_dir(runtime.join("sarus-suite")).unwrap().count(),
+        0
+    );
+    assert!(!fixture.root().join("export-storage").exists());
+}
+
+#[test]
+fn relative_hpc_override_rejects_pull_and_run_before_running_tools() {
+    for operation in ["pull", "run-edf", "run-yaml"] {
+        let fixture = Fixture::new();
+        let mut command = fixture.command();
+        command.args(["--hpc-imagestore", "selected-hpc"]);
+        let input = if operation == "pull" {
+            command.args(["pull", SOURCE]);
+            None
+        } else {
+            let path = run_input(&fixture, operation == "run-yaml");
+            let original = fs::read(&path).unwrap();
+            command.arg("run").arg(&path).arg("true");
+            Some((path, original))
+        };
+        command
+            .assert()
+            .code(1)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains(
+                "--hpc-imagestore value must be an absolute path",
+            ));
+        assert!(fixture.calls().is_empty(), "{operation}");
+        assert!(!fixture.root().join("selected-hpc").exists());
+        assert!(!fixture.root().join("hpc-imagestore").exists());
+        assert!(!fixture.root().join("parallax-store").exists());
+        assert_eq!(
+            fs::read_dir(fixture.root().join("runtime"))
+                .unwrap()
+                .count(),
+            0
+        );
+        if let Some((path, original)) = input {
+            assert_eq!(fs::read(path).unwrap(), original);
+        }
     }
 }

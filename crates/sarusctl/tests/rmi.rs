@@ -81,7 +81,7 @@ impl Fixture {
         fs::write(
             config.join("rmi.conf"),
             format!(
-                "parallax_imagestore = {:?}\npodman_path = {:?}\nparallax_path = {:?}\n[hooks]\nparallax_imagestore_create = {:?}\n",
+                "hpc_image_store = \"hpc-imagestore\"\nparallax_imagestore = {:?}\npodman_path = {:?}\nparallax_path = {:?}\n[hooks]\nparallax_imagestore_create = {:?}\n",
                 fixture.root().join("parallax-store"),
                 fixture.root().join("podman"),
                 fixture.root().join("parallax"),
@@ -108,6 +108,7 @@ impl Fixture {
                     podman: self.root().join("producer"),
                     skopeo: self.root().join("producer"),
                     platform: None,
+                    storage: None,
                 },
                 &ImportOptions::default(),
             )
@@ -181,14 +182,9 @@ fn rmi_honors_hpc_override_over_the_effective_parallax_sibling() {
     fixture.seed(&selected, "source:tag", IMAGE);
     fixture
         .command()
-        .args([
-            "--parallax-imagestore",
-            "other/parallax",
-            "--hpc-imagestore",
-            "selected",
-            "rmi",
-            IMAGE,
-        ])
+        .arg("--hpc-imagestore")
+        .arg(fixture.root().join("selected"))
+        .args(["--parallax-imagestore", "other/parallax", "rmi", IMAGE])
         .assert()
         .success()
         .stdout("")
@@ -201,10 +197,10 @@ fn rmi_honors_hpc_override_over_the_effective_parallax_sibling() {
 }
 
 #[test]
-fn rmi_uses_sibling_of_relative_parallax_override() {
+fn rmi_preserves_configured_hpc_store_with_parallax_override() {
     let fixture = Fixture::new();
     fs::create_dir(fixture.root().join("other")).unwrap();
-    let store = fixture.store("other/hpc-imagestore");
+    let store = fixture.store("hpc-imagestore");
     fixture.seed(&store, "source:tag", IMAGE);
     fixture
         .command()
@@ -215,7 +211,7 @@ fn rmi_uses_sibling_of_relative_parallax_override() {
         .stderr("");
     assert!(!store.exists(&ImageSelector::new(IMAGE).unwrap()).unwrap());
     assert!(!fixture.root().join("other/parallax").exists());
-    assert!(!fixture.root().join("hpc-imagestore").exists());
+    assert!(!fixture.root().join("other/hpc-imagestore").exists());
     fixture.assert_no_legacy_calls();
 }
 
@@ -329,15 +325,16 @@ fn plx_rmi_passes_legacy_context_and_leaves_hpc_untouched() {
         if verbose {
             command.arg("-v");
         }
-        command.args([
-            "--parallax-imagestore",
-            selected.to_str().unwrap(),
-            "--hpc-imagestore",
-            "ignored-hpc",
-            "plx",
-            "rmi",
-            IMAGE,
-        ]);
+        command
+            .arg("--hpc-imagestore")
+            .arg(fixture.root().join("ignored-hpc"))
+            .args([
+                "--parallax-imagestore",
+                selected.to_str().unwrap(),
+                "plx",
+                "rmi",
+                IMAGE,
+            ]);
         let output = command.assert().success();
         if verbose {
             output
