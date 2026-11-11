@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import sys
+import subprocess
 
 directory = pathlib.Path(os.environ["PULL_FIXTURE"])
 arguments = sys.argv[1:]
@@ -87,6 +88,10 @@ elif tool == "skopeo":
             (directory / "export-storage").write_text(json.dumps({
                 "graphroot": graphroot, "runroot": runroot,
             }))
+            layer = pathlib.Path(graphroot) / "overlay" / "layer" / "diff"
+            layer.mkdir(parents=True)
+            (layer / "file").write_text("exported layer")
+            layer.chmod(0o555)
             fail("export")
             assert "--src-shared-blob-dir" in arguments
             layout = pathlib.Path(arguments[-2][len("oci:"):])
@@ -108,7 +113,21 @@ elif tool == "skopeo":
         raise AssertionError(arguments)
 elif tool == "podman":
     assert "pull" not in arguments
-    if "run" in arguments:
+    if "unshare" in arguments:
+        graphroot = pathlib.Path(arguments[arguments.index("--root") + 1])
+        runroot = pathlib.Path(arguments[arguments.index("--runroot") + 1])
+        assert "--storage-driver" not in arguments
+        instance = pathlib.Path(arguments[-3])
+        assert graphroot == instance / "graphroot" == pathlib.Path(arguments[-2])
+        assert runroot == instance / "runroot" == pathlib.Path(arguments[-1])
+        assert instance.parent == pathlib.Path(os.environ["XDG_RUNTIME_DIR"]) / "sarus-suite"
+        if os.getenv("FAIL_CLEANUP"):
+            # Restore fixture permissions so TempDir can remove it after the test.
+            subprocess.run(["chmod", "-R", "u+rwX", "--", str(instance)], check=True)
+            sys.stderr.write("cleanup diagnostic\n")
+            sys.exit(19)
+        sys.exit(subprocess.run(arguments[arguments.index("unshare") + 1:]).returncode)
+    elif "run" in arguments:
         fail("run")
         assert reference in arguments
         assert reference in json.loads((directory / "migrated-references").read_text())

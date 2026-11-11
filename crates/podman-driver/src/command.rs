@@ -168,6 +168,16 @@ pub(crate) fn container_cleanup(name: &str, podman_ctx: Option<&PodmanCtx>) -> C
     command
 }
 
+pub(crate) fn podman_unshare<I, S>(args: I, podman_ctx: Option<&PodmanCtx>) -> Command
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut command = base(podman_ctx);
+    command.arg("unshare").args(args);
+    command
+}
+
 pub(crate) fn stop(name: &str, podman_ctx: Option<&PodmanCtx>) -> Command {
     let mut command = base_with_read_only_store(podman_ctx);
     command.args(["stop", name]);
@@ -363,6 +373,37 @@ mod tests {
             mksquashfs_path: Some(PathBuf::from("/usr/bin/mksquashfs")),
             podman_env: None,
         }
+    }
+
+    #[test]
+    fn podman_unshare_forwards_context_and_command() {
+        let ctx = podman_context().with_env("UNSHARE_TEST", "value");
+        let command = podman_unshare(
+            ["/bin/sh", "-c", "printf '%s' \"$1\"", "test", "two words"],
+            Some(&ctx),
+        );
+        assert_eq!(command.get_program(), ctx.podman_path.as_os_str());
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![
+                OsStr::new("--root"),
+                ctx.graphroot.as_ref().unwrap().as_os_str(),
+                OsStr::new("--runroot"),
+                ctx.runroot.as_ref().unwrap().as_os_str(),
+                OsStr::new("--conmon"),
+                ctx.conmon_path.as_ref().unwrap().as_os_str(),
+                OsStr::new("unshare"),
+                OsStr::new("/bin/sh"),
+                OsStr::new("-c"),
+                OsStr::new("printf '%s' \"$1\""),
+                OsStr::new("test"),
+                OsStr::new("two words"),
+            ]
+        );
+        assert_eq!(
+            command.get_envs().collect::<Vec<_>>(),
+            vec![(OsStr::new("UNSHARE_TEST"), Some(OsStr::new("value")))]
+        );
     }
 
     #[test]

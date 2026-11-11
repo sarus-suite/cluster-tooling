@@ -81,7 +81,8 @@ impl Fixture {
             .env("XDG_CONFIG_DIRS", self.root().join("system-config"))
             .env("REGISTRY_AUTH_FILE", self.root().join("auth.json"))
             .env("CONTAINERS_STORAGE_CONF", self.root().join("storage.conf"))
-            .env_remove("FAIL_STAGE");
+            .env_remove("FAIL_STAGE")
+            .env_remove("FAIL_CLEANUP");
         command
     }
 
@@ -131,7 +132,8 @@ fn pull_refreshes_store_and_exports_resolved_digest_before_migration() {
         assert_eq!(
             actions.iter().map(|(tool, _)| *tool).collect::<Vec<_>>(),
             [
-                "skopeo", "skopeo", "parallax", "skopeo", "podman", "hook", "parallax", "parallax"
+                "skopeo", "skopeo", "parallax", "skopeo", "podman", "hook", "parallax", "parallax",
+                "podman"
             ]
         );
         assert!(
@@ -178,7 +180,7 @@ fn pull_refreshes_store_and_exports_resolved_digest_before_migration() {
         assert!(actions[3].1.contains(&"--src-shared-blob-dir"));
         assert!(actions[3].1.contains(&"--preserve-digests"));
         assert_eq!(actions[4].1.last(), Some(&resolved.as_str()));
-        for (_, arguments) in &actions[6..] {
+        for (_, arguments) in &actions[6..8] {
             assert_eq!(arguments.last(), Some(&resolved.as_str()));
             assert!(arguments.contains(&graphroot));
             assert!(arguments.contains(&fixture.root().join("parallax-store").to_str().unwrap()));
@@ -186,6 +188,7 @@ fn pull_refreshes_store_and_exports_resolved_digest_before_migration() {
         }
         assert!(actions[6].1.contains(&"--migrate"));
         assert!(actions[7].1.contains(&"--exist"));
+        assert!(actions[8].1.contains(&"unshare"));
         for entry in &calls {
             assert_eq!(
                 entry["auth"],
@@ -335,13 +338,21 @@ fn pull_failures_stop_pipeline_and_preserve_completed_acquisitions() {
         let calls = fixture.calls();
         let tools: Vec<_> = calls
             .iter()
-            .filter(|entry| !args(entry).contains(&"--help"))
+            .filter(|entry| !args(entry).contains(&"--help") && !args(entry).contains(&"unshare"))
             .map(|entry| entry["tool"].as_str().unwrap())
             .collect();
         let expected = [
             "skopeo", "skopeo", "parallax", "skopeo", "podman", "hook", "parallax", "parallax",
         ];
         assert_eq!(tools, expected[..operations], "{stage}");
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|entry| args(entry).contains(&"unshare"))
+                .count(),
+            usize::from(operations >= 4),
+            "{stage}"
+        );
         let runtime_base = fixture.root().join("runtime/sarus-suite");
         if runtime_base.exists() {
             assert_eq!(fs::read_dir(runtime_base).unwrap().count(), 0, "{stage}");
@@ -805,4 +816,21 @@ fn relative_hpc_override_rejects_pull_and_run_before_running_tools() {
             assert_eq!(fs::read(path).unwrap(), original);
         }
     }
+}
+
+#[test]
+fn migration_error_retains_cleanup_failure_diagnostic() {
+    let fixture = Fixture::new();
+    fixture
+        .command()
+        .env("FAIL_STAGE", "migrate")
+        .env("FAIL_CLEANUP", "1")
+        .args(["pull", SOURCE])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("migrate diagnostic"))
+        .stderr(predicate::str::contains(
+            "failed to clean disposable Podman store",
+        ))
+        .stderr(predicate::str::contains("cleanup diagnostic"));
 }

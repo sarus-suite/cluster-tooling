@@ -10,11 +10,13 @@ use saphyr::{ScalarOwned, YamlOwned};
 use sarus_suite_podman_driver::{self as pmd, ContainerCtx, PodmanCtx};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::Output;
 use std::str;
 use std::time::{Duration, Instant};
 use tracing::instrument;
@@ -212,6 +214,7 @@ pub trait ContainerRuntime {
     fn kube_play(&self, filepath: &str, run_ctx: &PodmanCtx) -> Result<(), AppError>;
     fn kube_down(&self, filepath: &str, force: bool, run_ctx: &PodmanCtx) -> Result<(), AppError>;
     fn cleanup_container(&self, container_name: &str, run_ctx: &PodmanCtx) -> Result<(), AppError>;
+    fn podman_unshare(&self, args: &[&OsStr], ctx: &PodmanCtx) -> Result<Output, AppError>;
 }
 
 pub trait HpcStoreOps {
@@ -491,6 +494,10 @@ impl ContainerRuntime for RealContainerRuntime {
         pmd::container_cleanup(container_name, Some(run_ctx))
             .map_err(|e| AppError::Runtime(e.to_string()))
     }
+
+    fn podman_unshare(&self, args: &[&OsStr], ctx: &PodmanCtx) -> Result<Output, AppError> {
+        pmd::podman_unshare(args, Some(ctx)).map_err(|error| AppError::Runtime(error.to_string()))
+    }
 }
 
 pub struct RealUserContext;
@@ -644,7 +651,86 @@ fn create_private_directory(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
 
-fn cleanup_podman_rootdirs(roots_base: &Path) -> Option<String> {
+fn remove_podman_storage(
+    roots_base: &Path,
+    ctx: &PodmanCtx,
+    runtime: &dyn ContainerRuntime,
+) -> Result<(), AppError> {
+    let graphroot = roots_base.join("graphroot");
+    let runroot = roots_base.join("runroot");
+    if !roots_base.is_absolute()
+        || roots_base.parent().is_none()
+        || roots_base
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        || ctx.graphroot.as_deref() != Some(graphroot.as_path())
+        || ctx.runroot.as_deref() != Some(runroot.as_path())
+    {
+        return Err(AppError::Runtime(
+            "expected an absolute instance directory with matching graphroot and runroot children"
+                .into(),
+        ));
+    }
+    let mut storage_exists = false;
+    for path in [&graphroot, &runroot] {
+        match fs::symlink_metadata(path) {
+            Ok(_) => storage_exists = true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(AppError::Io(format!(
+                    "Cannot inspect {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if !storage_exists {
+        return Ok(());
+    }
+
+    // Recursive chmod ignores symlinks inside the tree. Reject symlinks at
+    // the command-line paths too. Podman may bind-mount the overlay directory
+    // when initializing unshare; release that private mount before deletion.
+    const DELETE_STORAGE: &str = r#"
+for path in "$1" "$2" "$3" "$2/overlay"; do
+    [ ! -L "$path" ] || exit 1
+done
+if mountpoint -q -- "$2/overlay"; then
+    umount -R -- "$2/overlay" || exit 1
+fi
+for path in "$2" "$3"; do
+    if [ -e "$path" ]; then
+        chmod -R u+rwX -- "$path" && rm -rf -- "$path" || exit 1
+    fi
+done
+"#;
+    runtime.podman_unshare(
+        &[
+            OsStr::new("/bin/sh"),
+            OsStr::new("-c"),
+            OsStr::new(DELETE_STORAGE),
+            OsStr::new("sarusctl-cleanup"),
+            roots_base.as_os_str(),
+            graphroot.as_os_str(),
+            runroot.as_os_str(),
+        ],
+        ctx,
+    )?;
+    Ok(())
+}
+
+fn cleanup_podman_rootdirs(
+    roots_base: &Path,
+    ctx: &PodmanCtx,
+    runtime: &dyn ContainerRuntime,
+) -> Option<String> {
+    if let Err(error) = remove_podman_storage(roots_base, ctx, runtime) {
+        return Some(format!(
+            "Warning: failed to clean disposable Podman store {}: {error}",
+            roots_base.display()
+        ));
+    }
+
     const CLEANUP_RETRY_INTERVAL: Duration = Duration::from_millis(100);
     const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1047,6 +1133,11 @@ fn prepare_parallax(
 
     let user = deps.user.current_user()?;
     let (roots_base, _) = create_runtime_instance(user.uid)?;
+    let podman_ctx = PodmanCtx {
+        graphroot: Some(roots_base.join("graphroot")),
+        runroot: Some(roots_base.join("runroot")),
+        ..build_native_ctx(config)
+    };
     let result = (|| {
         let podman_store =
             OverlayStorage::new(roots_base.join("graphroot"), roots_base.join("runroot"))
@@ -1063,11 +1154,6 @@ fn prepare_parallax(
         deps.hpc_store
             .export(hpc_store_path, image, &transfer_context)?;
 
-        let podman_ctx = PodmanCtx {
-            graphroot: Some(podman_store.graphroot().to_path_buf()),
-            runroot: Some(podman_store.runroot().to_path_buf()),
-            ..build_native_ctx(config)
-        };
         if !deps.runtime.image_exists(image.as_str(), &podman_ctx)? {
             return Err(AppError::Runtime(format!(
                 "Image {image} is still missing in Podman after HPC store export"
@@ -1082,7 +1168,7 @@ fn prepare_parallax(
             Some(podman_store.graphroot().to_path_buf()),
         )
     })();
-    let warning = cleanup_podman_rootdirs(&roots_base);
+    let warning = cleanup_podman_rootdirs(&roots_base, &podman_ctx, deps.runtime);
     match (result, warning) {
         (Ok(mut output), Some(warning)) => {
             append_warning(&mut output, warning);
@@ -1259,7 +1345,12 @@ fn run_edf_command(
         .runtime
         .run_from_edf(&edf, &run_ctx, &c_ctx, container_cmd);
     let container_cleanup_result = deps.runtime.cleanup_container(&c_ctx.name, &run_ctx);
-    let cleanup_warning = finalize_podman_cleanup(&roots_base, &container_cleanup_result);
+    let cleanup_warning = finalize_podman_cleanup(
+        &roots_base,
+        &run_ctx,
+        deps.runtime,
+        &container_cleanup_result,
+    );
 
     // Append warning to error in case of run failure
     output.return_code = match run_result {
@@ -1308,7 +1399,8 @@ fn run_yaml_command(
     // To avoid modifying the original file, create an amended runtime-only file in the run-specific
     // directory which will host the podman rootdirs
     let prepared = parsed.render_images(&resolved_images)?;
-    let runtime_manifest = prepare_runtime_manifest(&roots_base, &prepared)?;
+    let runtime_manifest =
+        prepare_runtime_manifest(&roots_base, &prepared, &run_ctx, deps.runtime)?;
 
     // Reuse the runtime manifest through play and teardown
     let play_result = deps.runtime.kube_play(&runtime_manifest, &run_ctx);
@@ -1317,7 +1409,8 @@ fn run_yaml_command(
             .exec_interactive(&join_container, &run_ctx, container_cmd)
     });
     let down_result = deps.runtime.kube_down(&runtime_manifest, true, &run_ctx);
-    let cleanup_warning = finalize_podman_cleanup(&roots_base, &down_result);
+    let cleanup_warning =
+        finalize_podman_cleanup(&roots_base, &run_ctx, deps.runtime, &down_result);
 
     // Append warning to error in case of run failure
     if let Err(err) = play_result {
@@ -1349,7 +1442,12 @@ fn run_yaml_command(
     Ok(output)
 }
 
-fn prepare_runtime_manifest(roots_base: &Path, contents: &str) -> Result<String, AppError> {
+fn prepare_runtime_manifest(
+    roots_base: &Path,
+    contents: &str,
+    ctx: &PodmanCtx,
+    runtime: &dyn ContainerRuntime,
+) -> Result<String, AppError> {
     let path = roots_base.join("manifest.yaml");
     let result = (|| {
         let manifest_path = path.to_str().ok_or_else(|| {
@@ -1378,10 +1476,12 @@ fn prepare_runtime_manifest(roots_base: &Path, contents: &str) -> Result<String,
 
     // The runtime manifest was created in the run-specific base dir for Podman rootdirs,
     // so in case of an error we invoke the related functions to cleanup, even if Podman hasn't run yet
-    result.map_err(|error| match cleanup_podman_rootdirs(roots_base) {
-        Some(warning) => combine_error_with_warning(error, warning),
-        None => error,
-    })
+    result.map_err(
+        |error| match cleanup_podman_rootdirs(roots_base, ctx, runtime) {
+            Some(warning) => combine_error_with_warning(error, warning),
+            None => error,
+        },
+    )
 }
 
 fn merge_output(base: &mut AppOutput, extra: AppOutput) {
@@ -1421,10 +1521,12 @@ fn combine_error_with_warning(err: AppError, warning: String) -> AppError {
 
 fn finalize_podman_cleanup(
     roots_base: &Path,
+    ctx: &PodmanCtx,
+    runtime: &dyn ContainerRuntime,
     podman_cleanup_result: &Result<(), AppError>,
 ) -> Option<String> {
     match podman_cleanup_result {
-        Ok(()) => cleanup_podman_rootdirs(roots_base),
+        Ok(()) => cleanup_podman_rootdirs(roots_base, ctx, runtime),
         Err(err) => Some(format!(
             "Warning: Podman rootdirs retained because workload cleanup failed: {err}"
         )),
@@ -1942,6 +2044,25 @@ mod tests {
                 .push(String::from("cleanup_container"));
             self.cleanup_container_result.clone()
         }
+
+        fn podman_unshare(&self, args: &[&OsStr], ctx: &PodmanCtx) -> Result<Output, AppError> {
+            use std::os::unix::process::ExitStatusExt;
+            let graphroot = ctx.graphroot.as_ref().unwrap();
+            let runroot = ctx.runroot.as_ref().unwrap();
+            assert_eq!(args[args.len() - 2], graphroot.as_os_str());
+            assert_eq!(args[args.len() - 1], runroot.as_os_str());
+            for path in [graphroot, runroot] {
+                if path.exists() {
+                    fs::remove_dir_all(path)
+                        .map_err(|error| AppError::Runtime(error.to_string()))?;
+                }
+            }
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
     }
 
     fn mock_deps<'a>(
@@ -2370,7 +2491,7 @@ spec:
             None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
         }
 
-        let (_, roots_base, _) = result.unwrap();
+        let (ctx, roots_base, _) = result.unwrap();
         assert!(!roots_base.starts_with(temp.path()));
         assert!(
             roots_base
@@ -2379,7 +2500,7 @@ spec:
                 .to_string_lossy()
                 .starts_with("sarusctl-1234-")
         );
-        cleanup_podman_rootdirs(&roots_base);
+        cleanup_podman_rootdirs(&roots_base, &ctx, &FakeContainerRuntime::new());
     }
 
     #[test]
@@ -3706,7 +3827,14 @@ spec:
         let roots = temp.path().join("runtime");
         fs::create_dir(&roots).unwrap();
         fs::write(roots.join("manifest.yaml"), "existing file").unwrap();
-        let error = prepare_runtime_manifest(&roots, "prepared input").unwrap_err();
+        let ctx = PodmanCtx {
+            graphroot: Some(roots.join("graphroot")),
+            runroot: Some(roots.join("runroot")),
+            ..build_native_ctx(&sample_config())
+        };
+        let error =
+            prepare_runtime_manifest(&roots, "prepared input", &ctx, &FakeContainerRuntime::new())
+                .unwrap_err();
         assert!(error.to_string().contains("failed to create"));
         assert!(!roots.exists());
     }
