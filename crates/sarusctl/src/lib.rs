@@ -1010,6 +1010,7 @@ fn images_command(
     all: bool,
     digests: bool,
 ) -> Result<AppOutput, AppError> {
+    setup_imagestores(config)?;
     // Print the contents of the HPC image store
     let mut output = AppOutput::success(if all { "HPC store:\n" } else { "" });
     let report = deps.hpc_store.list(Path::new(&config.hpc_image_store));
@@ -1085,7 +1086,7 @@ fn podman_parallax_images(
         ..seed_ctx
     };
 
-    setup_imagestore(config)?;
+    setup_imagestores(config)?;
     deps.runtime.images(&ctx, digests)
 }
 
@@ -1191,6 +1192,7 @@ fn pull_command(
     options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
     let source = image_selector(image)?;
+    setup_imagestores(config)?;
     let resolved = pull_and_resolve(&source, config, deps)?;
     prepare_parallax(&resolved, config, deps, options)
 }
@@ -1215,7 +1217,7 @@ fn migrate_command(
         ..seed_ctx
     };
     let parallax_path = PathBuf::from(&config.parallax_path);
-    setup_imagestore(config)?;
+    setup_imagestores(config)?;
 
     print_progress_message(&format!("Migrating {image} with Parallax..."));
     deps.runtime
@@ -1234,6 +1236,7 @@ fn rmi_command(image: &str, config: &Config, deps: &AppDeps<'_>) -> Result<AppOu
     let image = LocalRef::new(image).map_err(|error| {
         AppError::UnsupportedInput(format!("Invalid image argument '{image}' for rmi: {error}"))
     })?;
+    setup_imagestores(config)?;
     deps.hpc_store.remove(store_path, &image)?;
     Ok(AppOutput::success(""))
 }
@@ -1254,7 +1257,7 @@ fn plx_rmi_command(
         ..seed_ctx
     };
     let parallax_path = PathBuf::from(&config.parallax_path);
-    setup_imagestore(config)?;
+    setup_imagestores(config)?;
 
     deps.runtime
         .parallax_rmi(&parallax_path, &ctx, image, options.verbose)?;
@@ -1294,7 +1297,7 @@ fn run_command(
             // Loading config in each branch is a small duplication,
             // but allows to integration test invalid EDF cases without needing a valid config present
             let config = load_config_with_overrides(deps.raster, options, Some(&edf))?;
-            setup_imagestore(&config)?;
+            setup_imagestores(&config)?;
             run_edf_command(&edf, container_cmd, &config, deps, options)
         }
         Err(edf_error) => {
@@ -1311,7 +1314,7 @@ fn run_command(
                 })?;
 
             let config = load_config_with_overrides(deps.raster, options, None)?;
-            setup_imagestore(&config)?;
+            setup_imagestores(&config)?;
             run_yaml_command(&manifest, container_cmd, &config, deps, options)
         }
     }
@@ -1536,30 +1539,27 @@ fn finalize_podman_cleanup(
 }
 
 #[instrument(level = "debug")]
-fn setup_imagestore(config: &Config) -> Result<(), AppError> {
-    let imagestore = &config.parallax_imagestore;
-    let imagestore_pb = PathBuf::from(&imagestore);
+fn setup_imagestores(config: &Config) -> Result<(), AppError> {
+    let _ = setup_imagestore(config, &config.parallax_imagestore);
+    let _ = setup_imagestore(config, &config.hpc_image_store);
+    Ok(())
+}
 
-    let opt_ec =
-        hook_run(config, "parallax_imagestore_create", vec![&imagestore]).map_err(|e| {
-            AppError::Io(format!(
-                "Failed to run parallax_imagestore_create hook: {e}"
-            ))
-        })?;
+fn setup_imagestore(config: &Config, path: &String) -> Result<(), AppError> {
+    let opt_ec = hook_run(config, "parallax_imagestore_create", vec![path]).map_err(|e| {
+        AppError::Io(format!(
+            "Failed to run parallax_imagestore_create hook: {e}"
+        ))
+    })?;
 
-    match opt_ec {
-        Some(ec) => log_hook_ec(ec, "parallax_imagestore_create hook")?,
-        None => {}
+    if let Some(ec) = opt_ec {
+        log_hook_ec(ec, "parallax_imagestore_create hook")?;
     }
 
-    if !fs::exists(&imagestore_pb).map_err(|e| {
-        AppError::Io(format!(
-            "Failed to check for existence of Parallax imagestore directory: {e}"
-        ))
-    })? {
-        fs::create_dir_all(&imagestore_pb).map_err(|e| {
+    if !Path::new(path).exists() {
+        std::fs::create_dir_all(path).map_err(|e| {
             AppError::Io(format!(
-                "Failed to create Parallax imagestore directory: {e}"
+                "Failed to create imagestore directory '{path}': {e}"
             ))
         })?;
     }
@@ -3202,7 +3202,7 @@ spec:
             ]
         );
         assert!(store.transfer_contexts.borrow().is_empty());
-        assert!(!parallax.exists());
+        assert!(parallax.is_dir());
     }
 
     #[test]

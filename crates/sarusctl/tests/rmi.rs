@@ -55,6 +55,9 @@ elif tool == 'parallax':
     sys.stderr.write('removal diagnostic\n')
 else:
     assert tool == 'hook'
+    store = pathlib.Path(a[0])
+    store.mkdir(parents=True, exist_ok=True)
+    store.chmod(0o750)
 "#;
 
 struct Fixture {
@@ -134,7 +137,26 @@ impl Fixture {
             .collect()
     }
 
-    fn assert_no_legacy_calls(&self) {
+    fn assert_store_hooks(&self, parallax: &Path, hpc: &Path, runs: usize) {
+        let calls = self.calls();
+        assert_eq!(calls.len(), runs * 2);
+        for pair in calls.chunks_exact(2) {
+            for (call, path) in pair.iter().zip([parallax, hpc]) {
+                assert_eq!(call["tool"], "hook");
+                assert_eq!(call["args"], serde_json::json!([path]));
+                assert_eq!(
+                    fs::metadata(self.root().join(path))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o750
+                );
+            }
+        }
+    }
+
+    fn assert_no_tool_calls(&self) {
         assert!(self.calls().is_empty());
         assert!(!self.root().join("parallax-store").exists());
     }
@@ -170,7 +192,11 @@ fn rmi_removes_only_the_exact_hpc_ref_and_preserves_shared_content() {
         .code(1)
         .stdout("")
         .stderr(predicate::str::contains("reference does not exist"));
-    fixture.assert_no_legacy_calls();
+    fixture.assert_store_hooks(
+        &fixture.root().join("parallax-store"),
+        Path::new("hpc-imagestore"),
+        2,
+    );
 }
 
 #[test]
@@ -192,8 +218,12 @@ fn rmi_honors_hpc_override_over_the_effective_parallax_sibling() {
     let selector = ImageSelector::new(IMAGE).unwrap();
     assert!(default.exists(&selector).unwrap());
     assert!(!selected.exists(&selector).unwrap());
-    assert!(!fixture.root().join("other").exists());
-    fixture.assert_no_legacy_calls();
+    assert!(fixture.root().join("other/parallax").is_dir());
+    fixture.assert_store_hooks(
+        Path::new("other/parallax"),
+        &fixture.root().join("selected"),
+        1,
+    );
 }
 
 #[test]
@@ -210,9 +240,9 @@ fn rmi_preserves_configured_hpc_store_with_parallax_override() {
         .stdout("")
         .stderr("");
     assert!(!store.exists(&ImageSelector::new(IMAGE).unwrap()).unwrap());
-    assert!(!fixture.root().join("other/parallax").exists());
+    assert!(fixture.root().join("other/parallax").is_dir());
     assert!(!fixture.root().join("other/hpc-imagestore").exists());
-    fixture.assert_no_legacy_calls();
+    fixture.assert_store_hooks(Path::new("other/parallax"), Path::new("hpc-imagestore"), 1);
 }
 
 #[test]
@@ -243,11 +273,11 @@ fn rmi_rejects_invalid_inputs_without_store_or_tool_side_effects() {
             "a value is required for '--hpc-imagestore <PATH>'",
         ));
     assert!(!fixture.root().join("hpc-imagestore").exists());
-    fixture.assert_no_legacy_calls();
+    fixture.assert_no_tool_calls();
 }
 
 #[test]
-fn rmi_preserves_missing_and_empty_stores() {
+fn rmi_creates_missing_directories_but_leaves_uninitialized_stores_empty() {
     for empty in [false, true] {
         let fixture = Fixture::new();
         let root = fixture.root().join("hpc-imagestore");
@@ -263,12 +293,13 @@ fn rmi_preserves_missing_and_empty_stores() {
             .stderr(predicate::str::contains("HPC store remove failed"))
             .stderr(predicate::str::contains(root.to_str().unwrap()))
             .stderr(predicate::str::contains(IMAGE));
-        if empty {
-            assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
-        } else {
-            assert!(!root.exists());
-        }
-        fixture.assert_no_legacy_calls();
+        assert!(root.is_dir());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fixture.assert_store_hooks(
+            &fixture.root().join("parallax-store"),
+            Path::new("hpc-imagestore"),
+            1,
+        );
     }
 }
 
@@ -310,11 +341,15 @@ fn rmi_reports_recovery_failure_even_after_the_reference_is_removed() {
         terminal.symlink_metadata().unwrap_err().kind(),
         std::io::ErrorKind::NotFound
     );
-    fixture.assert_no_legacy_calls();
+    fixture.assert_store_hooks(
+        &fixture.root().join("parallax-store"),
+        Path::new("hpc-imagestore"),
+        1,
+    );
 }
 
 #[test]
-fn plx_rmi_passes_legacy_context_and_leaves_hpc_untouched() {
+fn plx_rmi_passes_legacy_context_and_preserves_hpc_contents() {
     for verbose in [false, true] {
         let fixture = Fixture::new();
         let store = fixture.store("hpc-imagestore");
@@ -327,7 +362,7 @@ fn plx_rmi_passes_legacy_context_and_leaves_hpc_untouched() {
         }
         command
             .arg("--hpc-imagestore")
-            .arg(fixture.root().join("ignored-hpc"))
+            .arg(fixture.root().join("selected-hpc"))
             .args([
                 "--parallax-imagestore",
                 selected.to_str().unwrap(),
@@ -349,10 +384,14 @@ fn plx_rmi_passes_legacy_context_and_leaves_hpc_untouched() {
                 .iter()
                 .map(|call| call["tool"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            ["podman", "hook", "parallax"]
+            ["podman", "hook", "hook", "parallax"]
         );
         assert_eq!(calls[1]["args"], serde_json::json!([selected]));
-        let args: Vec<_> = calls[2]["args"]
+        assert_eq!(
+            calls[2]["args"],
+            serde_json::json!([fixture.root().join("selected-hpc")])
+        );
+        let args: Vec<_> = calls[3]["args"]
             .as_array()
             .unwrap()
             .iter()
@@ -374,7 +413,13 @@ fn plx_rmi_passes_legacy_context_and_leaves_hpc_untouched() {
         assert!(args.contains(&"--rmi"));
         assert!(selected.is_dir());
         assert!(!fixture.root().join("parallax-store").exists());
-        assert!(!fixture.root().join("ignored-hpc").exists());
+        assert!(fixture.root().join("selected-hpc").is_dir());
+        assert_eq!(
+            fs::read_dir(fixture.root().join("selected-hpc"))
+                .unwrap()
+                .count(),
+            0
+        );
         assert_eq!(
             store.resolve(&ImageSelector::new(IMAGE).unwrap()).unwrap(),
             before
@@ -386,8 +431,7 @@ fn plx_rmi_passes_legacy_context_and_leaves_hpc_untouched() {
 fn plx_rmi_stops_at_each_legacy_failure() {
     for (stage, count, diagnostic) in [
         ("podman", 1, "podman failure diagnostic"),
-        ("hook", 2, "hook failure diagnostic"),
-        ("parallax", 3, "parallax failure diagnostic"),
+        ("parallax", 4, "parallax failure diagnostic"),
     ] {
         let fixture = Fixture::new();
         fixture
@@ -398,8 +442,34 @@ fn plx_rmi_stops_at_each_legacy_failure() {
             .code(1)
             .stderr(predicate::str::contains(diagnostic));
         assert_eq!(fixture.calls().len(), count);
-        assert!(!fixture.root().join("hpc-imagestore").exists());
+        assert_eq!(
+            fixture.root().join("hpc-imagestore").is_dir(),
+            stage == "parallax"
+        );
     }
+}
+
+#[test]
+fn plx_rmi_continues_when_creation_hooks_fail() {
+    let fixture = Fixture::new();
+    // Store setup currently treats hook failures as best effort.
+    fixture
+        .command()
+        .env("FAIL_STAGE", "hook")
+        .args(["plx", "rmi", IMAGE])
+        .assert()
+        .success()
+        .stderr("hook failure diagnostic\nhook failure diagnostic\n");
+    let calls = fixture.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| call["tool"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["podman", "hook", "hook", "parallax"]
+    );
+    assert!(!fixture.root().join("parallax-store").exists());
+    assert!(!fixture.root().join("hpc-imagestore").exists());
 }
 
 #[test]
@@ -445,7 +515,7 @@ fn plx_is_hidden_until_explicitly_requested() {
         .success()
         .stdout(predicate::str::contains("HPC store"))
         .stdout(predicate::str::contains("name:tag"));
-    fixture.assert_no_legacy_calls();
+    fixture.assert_no_tool_calls();
 }
 
 #[test]
@@ -462,5 +532,5 @@ fn rmi_cli_requires_commands_images_and_top_level_options_in_order() {
     ] {
         fixture.command().args(args).assert().code(2);
     }
-    fixture.assert_no_legacy_calls();
+    fixture.assert_no_tool_calls();
 }

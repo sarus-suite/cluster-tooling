@@ -68,6 +68,9 @@ def fail(stage):
 reference = os.getenv("EXPECTED_REFERENCE", "registry.example/image@" + (directory / "root").read_text())
 if tool == "hook":
     fail("hook")
+    store = pathlib.Path(arguments[0])
+    store.mkdir(parents=True, exist_ok=True)
+    store.chmod(0o750)
 elif tool == "skopeo":
     if "--help" in arguments:
         print("--raw --retry-times --preserve-digests --dest-shared-blob-dir --src-shared-blob-dir")
