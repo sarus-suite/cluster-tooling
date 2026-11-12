@@ -29,7 +29,7 @@ impl Fixture {
         fs::create_dir_all(&config).unwrap();
         fs::write(config.join("pull.conf"), format!(
             "hpc_image_store = {:?}\nparallax_imagestore = {:?}\npodman_path = {:?}\nparallax_path = {:?}\nskopeo_path = {:?}\nmksquashfs_path = {:?}\n[hooks]\nparallax_imagestore_create = {:?}\n",
-            fixture.root().join("hpc-imagestore"),
+            fixture.root().join("hpc-image-store"),
             fixture.root().join("parallax-store"),
             fixture.root().join("bin/podman"),
             fixture.root().join("bin/parallax"),
@@ -113,7 +113,7 @@ fn pull_refreshes_store_and_exports_resolved_digest_before_migration() {
             .success()
             .stdout(predicate::str::contains("captured transfer progress").not());
         let resolved = fixture.resolved();
-        let store = fixture.store("hpc-imagestore");
+        let store = fixture.store("hpc-image-store");
         assert_eq!(
             store.resolve(&ImageSelector::new(SOURCE).unwrap()).unwrap(),
             Some(resolved.clone())
@@ -143,10 +143,10 @@ fn pull_refreshes_store_and_exports_resolved_digest_before_migration() {
             );
             assert_eq!(
                 actions[offset + 1].1,
-                [fixture.root().join("hpc-imagestore").to_str().unwrap()]
+                [fixture.root().join("hpc-image-store").to_str().unwrap()]
             );
         }
-        for store in ["parallax-store", "hpc-imagestore"] {
+        for store in ["parallax-store", "hpc-image-store"] {
             assert_eq!(
                 fs::metadata(fixture.root().join(store))
                     .unwrap()
@@ -218,7 +218,7 @@ fn pull_refreshes_store_and_exports_resolved_digest_before_migration() {
     assert_ne!(fixture.resolved(), first);
     assert!(
         !fixture
-            .store("hpc-imagestore")
+            .store("hpc-image-store")
             .exists(&ImageSelector::new(first).unwrap())
             .unwrap()
     );
@@ -266,7 +266,7 @@ fn repeated_pull_skips_export_and_migration_until_digest_changes() {
     assert!(!fixture.root().join("exported").exists());
     assert_eq!(
         fixture
-            .store("hpc-imagestore")
+            .store("hpc-image-store")
             .resolve(&ImageSelector::new(SOURCE).unwrap())
             .unwrap(),
         Some(first.clone())
@@ -301,7 +301,7 @@ fn pull_overrides_and_digest_inputs_use_the_selected_store() {
         };
         fixture
             .command()
-            .arg("--hpc-imagestore")
+            .arg("--hpc-image-store")
             .arg(fixture.root().join("selected-hpc"))
             .args([
                 "--parallax-imagestore",
@@ -319,7 +319,7 @@ fn pull_overrides_and_digest_inputs_use_the_selected_store() {
                 .unwrap(),
             Some(resolved)
         );
-        assert!(!fixture.root().join("hpc-imagestore").exists());
+        assert!(!fixture.root().join("hpc-image-store").exists());
         assert!(fixture.root().join("selected-parallax").is_dir());
     }
 }
@@ -346,7 +346,7 @@ fn pull_failures_stop_pipeline_and_preserve_completed_acquisitions() {
                 .stderr(predicate::str::contains(format!("{stage} diagnostic")))
                 .stderr(predicate::str::contains("registry.example/image"))
                 .stderr(predicate::str::contains(
-                    fixture.root().join("hpc-imagestore").to_str().unwrap(),
+                    fixture.root().join("hpc-image-store").to_str().unwrap(),
                 ));
         }
         let calls = fixture.calls();
@@ -375,13 +375,13 @@ fn pull_failures_stop_pipeline_and_preserve_completed_acquisitions() {
         if ["export", "podman", "migrate", "exist"].contains(&stage) {
             assert_eq!(
                 fixture
-                    .store("hpc-imagestore")
+                    .store("hpc-image-store")
                     .resolve(&ImageSelector::new(SOURCE).unwrap())
                     .unwrap(),
                 Some(fixture.resolved())
             );
         }
-        for store in ["parallax-store", "hpc-imagestore"] {
+        for store in ["parallax-store", "hpc-image-store"] {
             assert!(fixture.root().join(store).is_dir(), "{stage}: {store}");
         }
     }
@@ -399,7 +399,7 @@ fn pull_continues_when_creation_hooks_fail() {
         .stderr(predicate::str::contains("hook diagnostic"));
     assert_eq!(
         fixture
-            .store("hpc-imagestore")
+            .store("hpc-image-store")
             .resolve(&ImageSelector::new(SOURCE).unwrap())
             .unwrap(),
         Some(fixture.resolved())
@@ -435,7 +435,7 @@ fn pull_validates_syntax_before_setup_and_rejects_invalid_store_paths() {
     fs::write(fixture.root().join("blocked-parent"), "file").unwrap();
     fixture
         .command()
-        .arg("--hpc-imagestore")
+        .arg("--hpc-image-store")
         .arg(fixture.root().join("blocked-parent/store"))
         .args(["pull", SOURCE])
         .assert()
@@ -459,7 +459,7 @@ fn pull_validates_syntax_before_setup_and_rejects_invalid_store_paths() {
     fs::write(occupied.join("keep"), "preserved").unwrap();
     fixture
         .command()
-        .arg("--hpc-imagestore")
+        .arg("--hpc-image-store")
         .arg(&occupied)
         .args(["pull", SOURCE])
         .assert()
@@ -502,11 +502,11 @@ fn run_acquires_images_from_missing_empty_and_pending_stores() {
         for yaml in [false, true] {
             let fixture = Fixture::new();
             match state {
-                "empty" => fs::create_dir(fixture.root().join("hpc-imagestore")).unwrap(),
+                "empty" => fs::create_dir(fixture.root().join("hpc-image-store")).unwrap(),
                 "pending" => {
-                    fixture.store("hpc-imagestore").list().unwrap();
+                    fixture.store("hpc-image-store").list().unwrap();
                     fs::write(
-                        fixture.root().join("hpc-imagestore/.store-init-pending"),
+                        fixture.root().join("hpc-image-store/.store-init-pending"),
                         "",
                     )
                     .unwrap();
@@ -523,7 +523,7 @@ fn run_acquires_images_from_missing_empty_and_pending_stores() {
             assert_eq!(fs::read(&input).unwrap(), original);
             assert_eq!(
                 fixture
-                    .store("hpc-imagestore")
+                    .store("hpc-image-store")
                     .resolve(&ImageSelector::new(SOURCE).unwrap())
                     .unwrap(),
                 Some(fixture.resolved())
@@ -639,12 +639,12 @@ fn run_rejects_damaged_and_inaccessible_stores_without_acquisition() {
         }
         let fixture = Fixture::new();
         let input = run_input(&fixture, false);
-        let root = fixture.root().join("hpc-imagestore");
+        let root = fixture.root().join("hpc-image-store");
         if state == "occupied" {
             fs::create_dir(&root).unwrap();
             fs::write(root.join("keep"), "preserved").unwrap();
         } else {
-            fixture.store("hpc-imagestore").list().unwrap();
+            fixture.store("hpc-image-store").list().unwrap();
             if state == "damaged" {
                 fs::write(root.join("store.json"), "invalid marker").unwrap();
             } else {
@@ -740,7 +740,7 @@ fn run_cli_store_overrides_take_precedence_over_edf_annotations() {
     let selected_parallax = fixture.root().join("selected-parallax");
     fixture
         .command()
-        .arg("--hpc-imagestore")
+        .arg("--hpc-image-store")
         .arg(fixture.root().join("selected-hpc"))
         .arg("--parallax-imagestore")
         .arg(&selected_parallax)
@@ -794,7 +794,7 @@ fn run_digest_inputs_honor_store_overrides() {
         fs::write(&input, &contents).unwrap();
         fixture
             .command()
-            .arg("--hpc-imagestore")
+            .arg("--hpc-image-store")
             .arg(fixture.root().join("selected-hpc"))
             .args([
                 "--parallax-imagestore",
@@ -814,7 +814,7 @@ fn run_digest_inputs_honor_store_overrides() {
             Some(resolved)
         );
         assert!(fixture.root().join("selected-parallax").is_dir());
-        assert!(!fixture.root().join("hpc-imagestore").exists());
+        assert!(!fixture.root().join("hpc-image-store").exists());
         assert!(!fixture.root().join("parallax-store").exists());
         assert_eq!(fs::read_to_string(input).unwrap(), contents);
     }
@@ -846,7 +846,7 @@ fn relative_hpc_override_rejects_pull_and_run_before_running_tools() {
     for operation in ["pull", "run-edf", "run-yaml"] {
         let fixture = Fixture::new();
         let mut command = fixture.command();
-        command.args(["--hpc-imagestore", "selected-hpc"]);
+        command.args(["--hpc-image-store", "selected-hpc"]);
         let input = if operation == "pull" {
             command.args(["pull", SOURCE]);
             None
@@ -861,11 +861,11 @@ fn relative_hpc_override_rejects_pull_and_run_before_running_tools() {
             .code(1)
             .stdout(predicate::str::is_empty())
             .stderr(predicate::str::contains(
-                "--hpc-imagestore value must be an absolute path",
+                "--hpc-image-store value must be an absolute path",
             ));
         assert!(fixture.calls().is_empty(), "{operation}");
         assert!(!fixture.root().join("selected-hpc").exists());
-        assert!(!fixture.root().join("hpc-imagestore").exists());
+        assert!(!fixture.root().join("hpc-image-store").exists());
         assert!(!fixture.root().join("parallax-store").exists());
         assert_eq!(
             fs::read_dir(fixture.root().join("runtime"))

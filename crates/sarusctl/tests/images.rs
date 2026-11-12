@@ -71,7 +71,7 @@ exit "${HOOK_EXIT:-0}"
         fs::write(
             config_dir.join("images.conf"),
             format!(
-                "hpc_image_store = \"hpc-imagestore\"\nparallax_imagestore = {parallax:?}\npodman_path = {podman:?}\n[hooks]\nparallax_imagestore_create = {hook:?}\n",
+                "hpc_image_store = \"hpc-image-store\"\nparallax_imagestore = {parallax:?}\npodman_path = {podman:?}\n[hooks]\nparallax_imagestore_create = {hook:?}\n",
             ),
         ).unwrap();
     }
@@ -114,13 +114,13 @@ fn images_option_placement_and_help() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("--hpc-imagestore"));
+        .stdout(predicate::str::contains("--hpc-image-store"));
     for args in [
         vec!["--all", "images"],
         vec!["validate", "--all"],
         vec!["--digests", "images"],
         vec!["validate", "--digests"],
-        vec!["images", "--hpc-imagestore", "/tmp/hpc"],
+        vec!["images", "--hpc-image-store", "/tmp/hpc"],
     ] {
         Command::cargo_bin("sarusctl")
             .unwrap()
@@ -164,7 +164,7 @@ fn digests_controls_hpc_column_and_podman_flag() {
             }
             let paths = [
                 fixture.root().join("parallax"),
-                PathBuf::from("hpc-imagestore"),
+                PathBuf::from("hpc-image-store"),
             ];
             let expected: Vec<_> = paths
                 .iter()
@@ -195,8 +195,8 @@ fn default_images_initializes_both_stores_through_hook_without_podman() {
         .stdout(predicate::str::contains("IMAGE ID"))
         .stdout(predicate::str::contains("HPC store:").not())
         .stderr("hook stderr\nhook stdout\n".repeat(2));
-    assert!(fixture.root().join("hpc-imagestore/store.json").is_file());
-    for store in ["hpc-imagestore", "parallax"] {
+    assert!(fixture.root().join("hpc-image-store/store.json").is_file());
+    for store in ["hpc-image-store", "parallax"] {
         // The hook applies filesystem tuning before the store is opened.
         let mode = fs::metadata(fixture.root().join(store))
             .unwrap()
@@ -207,7 +207,7 @@ fn default_images_initializes_both_stores_through_hook_without_podman() {
     assert!(!fixture.root().join("calls").exists());
     fixture.assert_hook_paths(&[
         &fixture.root().join("parallax"),
-        Path::new("hpc-imagestore"),
+        Path::new("hpc-image-store"),
     ]);
 }
 
@@ -217,13 +217,13 @@ fn absolute_hpc_override_works_with_empty_parallax() {
     fixture.configure(Path::new(""), &fixture.podman, &fixture.hook);
     fixture
         .command()
-        .arg("--hpc-imagestore")
+        .arg("--hpc-image-store")
         .arg(fixture.root().join("selected-hpc"))
         .arg("images")
         .assert()
         .success();
     assert!(fixture.root().join("selected-hpc/store.json").is_file());
-    assert!(!fixture.root().join("hpc-imagestore").exists());
+    assert!(!fixture.root().join("hpc-image-store").exists());
     fixture.assert_hook_paths(&[Path::new(""), &fixture.root().join("selected-hpc")]);
 }
 
@@ -232,7 +232,7 @@ fn relative_hpc_override_fails_before_listing_or_running_tools() {
     for all in [false, true] {
         let fixture = Fixture::new();
         let mut command = fixture.command();
-        command.args(["--hpc-imagestore", "selected-hpc", "images"]);
+        command.args(["--hpc-image-store", "selected-hpc", "images"]);
         if all {
             command.arg("--all");
         }
@@ -241,10 +241,10 @@ fn relative_hpc_override_fails_before_listing_or_running_tools() {
             .code(1)
             .stdout(predicate::str::is_empty())
             .stderr(predicate::str::contains(
-                "--hpc-imagestore value must be an absolute path",
+                "--hpc-image-store value must be an absolute path",
             ));
         assert!(!fixture.root().join("selected-hpc").exists());
-        assert!(!fixture.root().join("hpc-imagestore").exists());
+        assert!(!fixture.root().join("hpc-image-store").exists());
         assert!(!fixture.root().join("calls").exists());
         assert!(!fixture.root().join("hook-calls").exists());
     }
@@ -259,12 +259,12 @@ fn parallax_override_preserves_configured_hpc_store() {
         .args(["--parallax-imagestore", "other-parent/parallax", "images"])
         .assert()
         .success();
-    assert!(fixture.root().join("hpc-imagestore/store.json").is_file());
-    assert!(!fixture.root().join("other-parent/hpc-imagestore").exists());
+    assert!(fixture.root().join("hpc-image-store/store.json").is_file());
+    assert!(!fixture.root().join("other-parent/hpc-image-store").exists());
     assert!(fixture.root().join("other-parent/parallax").is_dir());
     fixture.assert_hook_paths(&[
         Path::new("other-parent/parallax"),
-        Path::new("hpc-imagestore"),
+        Path::new("hpc-image-store"),
     ]);
 }
 
@@ -273,7 +273,7 @@ fn setup_creates_ancestors_but_does_not_adopt_occupied_store() {
     let fixture = Fixture::new();
     fixture
         .command()
-        .arg("--hpc-imagestore")
+        .arg("--hpc-image-store")
         .arg(fixture.root().join("missing-parent/store"))
         .arg("images")
         .assert()
@@ -290,7 +290,7 @@ fn setup_creates_ancestors_but_does_not_adopt_occupied_store() {
     fs::write(occupied.join("keep"), "original").unwrap();
     fixture
         .command()
-        .arg("--hpc-imagestore")
+        .arg("--hpc-image-store")
         .arg(&occupied)
         .arg("images")
         .assert()
@@ -304,13 +304,13 @@ fn setup_creates_ancestors_but_does_not_adopt_occupied_store() {
 
     fixture
         .command()
-        .args(["--hpc-imagestore", "", "images"])
+        .args(["--hpc-image-store", "", "images"])
         .assert()
         .code(2)
-        .stderr(predicate::str::contains("--hpc-imagestore <PATH>"));
+        .stderr(predicate::str::contains("--hpc-image-store <PATH>"));
     fixture.configure(Path::new(""), &fixture.podman, &fixture.hook);
     fixture.command().arg("images").assert().success();
-    assert!(fixture.root().join("hpc-imagestore/store.json").is_file());
+    assert!(fixture.root().join("hpc-image-store/store.json").is_file());
 }
 
 #[test]
@@ -344,9 +344,9 @@ fn all_orders_sections_and_preserves_legacy_context_and_hook() {
     assert!(lines[1].ends_with("images"));
     fixture.assert_hook_paths(&[
         &fixture.root().join("parallax"),
-        Path::new("hpc-imagestore"),
+        Path::new("hpc-image-store"),
         &fixture.root().join("parallax"),
-        Path::new("hpc-imagestore"),
+        Path::new("hpc-image-store"),
     ]);
     assert!(fixture.root().join("parallax").is_dir());
 }
@@ -358,7 +358,7 @@ fn all_continues_after_hpc_path_failure_and_retains_both_errors() {
     fixture
         .command()
         .env("IMAGES_EXIT", "7")
-        .arg("--hpc-imagestore")
+        .arg("--hpc-image-store")
         .arg(fixture.root().join("blocked-parent/hpc"))
         .args(["images", "--all"])
         .assert()
@@ -423,7 +423,7 @@ fn all_continues_after_hpc_failure_when_podman_succeeds() {
     fs::write(fixture.root().join("blocked-parent"), "file").unwrap();
     fixture
         .command()
-        .arg("--hpc-imagestore")
+        .arg("--hpc-image-store")
         .arg(fixture.root().join("blocked-parent/hpc"))
         .args(["images", "--all"])
         .assert()
@@ -476,6 +476,6 @@ fn all_stops_before_podman_when_printing_fails() {
     assert!(!fixture.root().join("calls").exists());
     fixture.assert_hook_paths(&[
         &fixture.root().join("parallax"),
-        Path::new("hpc-imagestore"),
+        Path::new("hpc-image-store"),
     ]);
 }

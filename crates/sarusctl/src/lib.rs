@@ -963,17 +963,17 @@ fn apply_cli_store_overrides(config: &mut Config, options: &ExecOptions) -> Resu
     if let Some(hpc_image_store) = &options.hpc_imagestore {
         if hpc_image_store.as_os_str().is_empty() {
             return Err(AppError::ConfigLoad(
-                "--hpc-imagestore value must not be empty".into(),
+                "--hpc-image-store value must not be empty".into(),
             ));
         }
         if hpc_image_store.is_relative() {
             return Err(AppError::ConfigLoad(
-                "--hpc-imagestore value must be an absolute path".into(),
+                "--hpc-image-store value must be an absolute path".into(),
             ));
         }
         config.hpc_image_store = hpc_image_store
             .to_str()
-            .ok_or_else(|| AppError::ConfigLoad("--hpc-imagestore must be valid UTF-8".into()))?
+            .ok_or_else(|| AppError::ConfigLoad("--hpc-image-store must be valid UTF-8".into()))?
             .to_owned();
     }
     Ok(())
@@ -1627,7 +1627,7 @@ mod tests {
     fn sample_config() -> Config {
         Config {
             hpc_image_store: std::env::temp_dir()
-                .join("hpc-imagestore")
+                .join("hpc-image-store")
                 .to_string_lossy()
                 .into_owned(),
             parallax_imagestore: std::env::temp_dir()
@@ -2798,7 +2798,7 @@ spec:
         config.parallax_imagestore = temp.path().join("parallax").to_string_lossy().into_owned();
         config.hpc_image_store = temp
             .path()
-            .join("hpc-imagestore")
+            .join("hpc-image-store")
             .to_string_lossy()
             .into_owned();
         config.hooks.parallax_imagestore_create = String::from("/missing/hook");
@@ -2819,7 +2819,7 @@ spec:
         assert!(output.stdout.starts_with("REPOSITORY"));
         assert!(output.stderr.is_empty());
         assert!(runtime.calls().is_empty());
-        assert!(temp.path().join("hpc-imagestore/store.json").is_file());
+        assert!(temp.path().join("hpc-image-store/store.json").is_file());
         assert!(!temp.path().join("parallax").exists());
     }
 
@@ -2852,7 +2852,7 @@ spec:
                     temp.path().join("parallax").to_string_lossy().into_owned();
                 config.hpc_image_store = temp
                     .path()
-                    .join("hpc-imagestore")
+                    .join("hpc-image-store")
                     .to_string_lossy()
                     .into_owned();
                 let raster = FakeRasterOps::new(config);
@@ -2907,7 +2907,7 @@ spec:
                 assert_eq!(runtime.calls(), vec!["default_graphroot", "images"]);
                 assert_eq!(
                     *store.paths.borrow(),
-                    vec![temp.path().join("hpc-imagestore")]
+                    vec![temp.path().join("hpc-image-store")]
                 );
             }
         }
@@ -3065,7 +3065,7 @@ spec:
                     temp.path().join("parallax").to_string_lossy().into_owned();
                 config.hpc_image_store = temp
                     .path()
-                    .join("hpc-imagestore")
+                    .join("hpc-image-store")
                     .to_string_lossy()
                     .into_owned();
                 let configured_podman = temp.path().join("configured-podman");
@@ -3115,7 +3115,7 @@ spec:
                 let expected_path = temp.path().join(if override_path {
                     "selected"
                 } else {
-                    "hpc-imagestore"
+                    "hpc-image-store"
                 });
                 assert_eq!(*store.paths.borrow(), vec![expected_path; 3]);
                 let pull_contexts = store.pull_contexts.borrow();
@@ -3364,14 +3364,14 @@ spec:
         let cases = [
             (
                 ExecOptions::default(),
-                std::env::temp_dir().join("hpc-imagestore"),
+                std::env::temp_dir().join("hpc-image-store"),
             ),
             (
                 ExecOptions {
                     parallax_imagestore: Some("relative/parallax".into()),
                     ..ExecOptions::default()
                 },
-                std::env::temp_dir().join("hpc-imagestore"),
+                std::env::temp_dir().join("hpc-image-store"),
             ),
             (
                 ExecOptions {

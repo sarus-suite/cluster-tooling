@@ -28,7 +28,7 @@ struct Args {
 
     /// Override the HPC imagestore path
     #[arg(long, value_name = "PATH")]
-    hpc_imagestore: Option<PathBuf>,
+    hpc_image_store: Option<PathBuf>,
 
     /// Report elapsed times for instrumented operations
     #[arg(long)]
@@ -139,7 +139,7 @@ fn main() -> ExitCode {
     let options = ExecOptions {
         verbose: args.verbose > 0,
         parallax_imagestore: args.parallax_imagestore,
-        hpc_imagestore: args.hpc_imagestore,
+        hpc_imagestore: args.hpc_image_store,
     };
     drop(_init_span);
 

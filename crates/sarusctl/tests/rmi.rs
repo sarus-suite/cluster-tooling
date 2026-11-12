@@ -84,7 +84,7 @@ impl Fixture {
         fs::write(
             config.join("rmi.conf"),
             format!(
-                "hpc_image_store = \"hpc-imagestore\"\nparallax_imagestore = {:?}\npodman_path = {:?}\nparallax_path = {:?}\n[hooks]\nparallax_imagestore_create = {:?}\n",
+                "hpc_image_store = \"hpc-image-store\"\nparallax_imagestore = {:?}\npodman_path = {:?}\nparallax_path = {:?}\n[hooks]\nparallax_imagestore_create = {:?}\n",
                 fixture.root().join("parallax-store"),
                 fixture.root().join("podman"),
                 fixture.root().join("parallax"),
@@ -165,7 +165,7 @@ impl Fixture {
 #[test]
 fn rmi_removes_only_the_exact_hpc_ref_and_preserves_shared_content() {
     let fixture = Fixture::new();
-    let store = fixture.store("hpc-imagestore");
+    let store = fixture.store("hpc-image-store");
     fixture.seed(&store, "source:tag", IMAGE);
     fixture.seed(&store, "source:tag", KEEPER);
     let keeper = ImageSelector::new(KEEPER).unwrap();
@@ -194,7 +194,7 @@ fn rmi_removes_only_the_exact_hpc_ref_and_preserves_shared_content() {
         .stderr(predicate::str::contains("reference does not exist"));
     fixture.assert_store_hooks(
         &fixture.root().join("parallax-store"),
-        Path::new("hpc-imagestore"),
+        Path::new("hpc-image-store"),
         2,
     );
 }
@@ -202,13 +202,13 @@ fn rmi_removes_only_the_exact_hpc_ref_and_preserves_shared_content() {
 #[test]
 fn rmi_honors_hpc_override_over_the_effective_parallax_sibling() {
     let fixture = Fixture::new();
-    let default = fixture.store("hpc-imagestore");
+    let default = fixture.store("hpc-image-store");
     let selected = fixture.store("selected");
     fixture.seed(&default, "source:tag", IMAGE);
     fixture.seed(&selected, "source:tag", IMAGE);
     fixture
         .command()
-        .arg("--hpc-imagestore")
+        .arg("--hpc-image-store")
         .arg(fixture.root().join("selected"))
         .args(["--parallax-imagestore", "other/parallax", "rmi", IMAGE])
         .assert()
@@ -230,7 +230,7 @@ fn rmi_honors_hpc_override_over_the_effective_parallax_sibling() {
 fn rmi_preserves_configured_hpc_store_with_parallax_override() {
     let fixture = Fixture::new();
     fs::create_dir(fixture.root().join("other")).unwrap();
-    let store = fixture.store("hpc-imagestore");
+    let store = fixture.store("hpc-image-store");
     fixture.seed(&store, "source:tag", IMAGE);
     fixture
         .command()
@@ -241,8 +241,8 @@ fn rmi_preserves_configured_hpc_store_with_parallax_override() {
         .stderr("");
     assert!(!store.exists(&ImageSelector::new(IMAGE).unwrap()).unwrap());
     assert!(fixture.root().join("other/parallax").is_dir());
-    assert!(!fixture.root().join("other/hpc-imagestore").exists());
-    fixture.assert_store_hooks(Path::new("other/parallax"), Path::new("hpc-imagestore"), 1);
+    assert!(!fixture.root().join("other/hpc-image-store").exists());
+    fixture.assert_store_hooks(Path::new("other/parallax"), Path::new("hpc-image-store"), 1);
 }
 
 #[test]
@@ -266,13 +266,13 @@ fn rmi_rejects_invalid_inputs_without_store_or_tool_side_effects() {
     }
     fixture
         .command()
-        .args(["--hpc-imagestore", "", "rmi", IMAGE])
+        .args(["--hpc-image-store", "", "rmi", IMAGE])
         .assert()
         .code(2)
         .stderr(predicate::str::contains(
-            "a value is required for '--hpc-imagestore <PATH>'",
+            "a value is required for '--hpc-image-store <PATH>'",
         ));
-    assert!(!fixture.root().join("hpc-imagestore").exists());
+    assert!(!fixture.root().join("hpc-image-store").exists());
     fixture.assert_no_tool_calls();
 }
 
@@ -280,7 +280,7 @@ fn rmi_rejects_invalid_inputs_without_store_or_tool_side_effects() {
 fn rmi_creates_missing_directories_but_leaves_uninitialized_stores_empty() {
     for empty in [false, true] {
         let fixture = Fixture::new();
-        let root = fixture.root().join("hpc-imagestore");
+        let root = fixture.root().join("hpc-image-store");
         if empty {
             fs::create_dir(&root).unwrap();
         }
@@ -297,7 +297,7 @@ fn rmi_creates_missing_directories_but_leaves_uninitialized_stores_empty() {
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
         fixture.assert_store_hooks(
             &fixture.root().join("parallax-store"),
-            Path::new("hpc-imagestore"),
+            Path::new("hpc-image-store"),
             1,
         );
     }
@@ -306,7 +306,7 @@ fn rmi_creates_missing_directories_but_leaves_uninitialized_stores_empty() {
 #[test]
 fn rmi_reports_recovery_failure_even_after_the_reference_is_removed() {
     let fixture = Fixture::new();
-    let store = fixture.store("hpc-imagestore");
+    let store = fixture.store("hpc-image-store");
     fixture.seed(&store, "source:tag", IMAGE);
     fixture.seed(&store, "other:tag", KEEPER);
     let keeper = store
@@ -343,7 +343,7 @@ fn rmi_reports_recovery_failure_even_after_the_reference_is_removed() {
     );
     fixture.assert_store_hooks(
         &fixture.root().join("parallax-store"),
-        Path::new("hpc-imagestore"),
+        Path::new("hpc-image-store"),
         1,
     );
 }
@@ -352,7 +352,7 @@ fn rmi_reports_recovery_failure_even_after_the_reference_is_removed() {
 fn plx_rmi_passes_legacy_context_and_preserves_hpc_contents() {
     for verbose in [false, true] {
         let fixture = Fixture::new();
-        let store = fixture.store("hpc-imagestore");
+        let store = fixture.store("hpc-image-store");
         fixture.seed(&store, "source:tag", IMAGE);
         let before = store.resolve(&ImageSelector::new(IMAGE).unwrap()).unwrap();
         let selected = fixture.root().join("selected-parallax");
@@ -361,7 +361,7 @@ fn plx_rmi_passes_legacy_context_and_preserves_hpc_contents() {
             command.arg("-v");
         }
         command
-            .arg("--hpc-imagestore")
+            .arg("--hpc-image-store")
             .arg(fixture.root().join("selected-hpc"))
             .args([
                 "--parallax-imagestore",
@@ -443,7 +443,7 @@ fn plx_rmi_stops_at_each_legacy_failure() {
             .stderr(predicate::str::contains(diagnostic));
         assert_eq!(fixture.calls().len(), count);
         assert_eq!(
-            fixture.root().join("hpc-imagestore").is_dir(),
+            fixture.root().join("hpc-image-store").is_dir(),
             stage == "parallax"
         );
     }
@@ -469,7 +469,7 @@ fn plx_rmi_continues_when_creation_hooks_fail() {
         ["podman", "hook", "hook", "parallax"]
     );
     assert!(!fixture.root().join("parallax-store").exists());
-    assert!(!fixture.root().join("hpc-imagestore").exists());
+    assert!(!fixture.root().join("hpc-image-store").exists());
 }
 
 #[test]
@@ -527,8 +527,8 @@ fn rmi_cli_requires_commands_images_and_top_level_options_in_order() {
         vec!["rmi"],
         vec!["plx", "--verbose", "rmi", IMAGE],
         vec!["plx", "rmi", IMAGE, "--parallax-imagestore", "other"],
-        vec!["plx", "--hpc-imagestore", "other", "rmi", IMAGE],
-        vec!["rmi", IMAGE, "--hpc-imagestore", "other"],
+        vec!["plx", "--hpc-image-store", "other", "rmi", IMAGE],
+        vec!["rmi", IMAGE, "--hpc-image-store", "other"],
     ] {
         fixture.command().args(args).assert().code(2);
     }
