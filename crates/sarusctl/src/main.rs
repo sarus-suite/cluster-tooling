@@ -2,9 +2,10 @@ mod logging;
 
 use clap::{ArgAction, Parser, Subcommand};
 use sarusctl::{
-    AppDeps, CommandSpec, ExecOptions, FormatOutput, RealContainerRuntime, RealRasterOps,
-    RealUserContext, execute_command_with_options, format_output,
+    AppDeps, CommandSpec, ExecOptions, FormatOutput, RealContainerRuntime, RealHpcStoreOps,
+    RealRasterOps, RealUserContext, execute_command_with_options, format_output,
 };
+use std::path::PathBuf;
 use std::process::ExitCode;
 use tracing::{self, Level, span};
 
@@ -20,8 +21,14 @@ const SARUSCTL_VERSION: &str = match option_env!("SARUSCTL_VERSION") {
 #[command(version = SARUSCTL_VERSION, about)]
 struct Args {
     /// Override the Parallax imagestore path from the configuration
+    // TODO: This arg would make more sense as a PathBuf, but the
+    // corresponding parameter in raster is a String.
     #[arg(long, value_name = "PATH")]
     parallax_imagestore: Option<String>,
+
+    /// Override the HPC imagestore path
+    #[arg(long, value_name = "PATH")]
+    hpc_image_store: Option<PathBuf>,
 
     /// Report elapsed times for instrumented operations
     #[arg(long)]
@@ -49,14 +56,28 @@ enum Command {
         #[arg(long, short, value_enum, default_value_t = FormatOutput::Text)]
         output: FormatOutput,
     },
-    /// List images including Parallax storage
-    Images {},
-    /// Pull image with Podman and migrate to Parallax storage
+    /// List HPC store images
+    Images {
+        /// Append the combined Podman and Parallax image listing
+        #[arg(long)]
+        all: bool,
+        /// Show digests
+        #[arg(long)]
+        digests: bool,
+    },
+    /// Pull into the HPC store, resolve and export to Podman, then migrate to Parallax
     Pull { image: String },
-    /// Migrate image to Parallax storage
-    Migrate { image: String },
-    /// Remove image from Parallax storage
-    Rmi { image: String },
+    /// Remove an explicitly tagged image from the HPC store
+    Rmi {
+        /// Exact local reference (name:tag)
+        image: String,
+    },
+    /// Advanced, low-level Parallax operations
+    #[command(hide = true)]
+    Plx {
+        #[command(subcommand)]
+        command: PlxCommand,
+    },
     /// Run container from EDF file
     Run {
         filepath: String,
@@ -64,15 +85,28 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum PlxCommand {
+    /// Migrate an image from Podman to Parallax storage
+    Migrate { image: String },
+    /// Remove an image directly from Parallax storage
+    Rmi { image: String },
+}
+
 impl From<Command> for CommandSpec {
     fn from(value: Command) -> Self {
         match value {
             Command::Validate { filepath, output } => CommandSpec::Validate { filepath, output },
             Command::Render { filepath, output } => CommandSpec::Render { filepath, output },
-            Command::Images {} => CommandSpec::Images,
+            Command::Images { all, digests } => CommandSpec::Images { all, digests },
             Command::Pull { image } => CommandSpec::Pull { image },
-            Command::Migrate { image } => CommandSpec::Migrate { image },
             Command::Rmi { image } => CommandSpec::Rmi { image },
+            Command::Plx {
+                command: PlxCommand::Migrate { image },
+            } => CommandSpec::PlxMigrate { image },
+            Command::Plx {
+                command: PlxCommand::Rmi { image },
+            } => CommandSpec::PlxRmi { image },
             Command::Run {
                 filepath,
                 container_cmd,
@@ -95,14 +129,17 @@ fn main() -> ExitCode {
     let raster = RealRasterOps;
     let runtime = RealContainerRuntime;
     let user = RealUserContext;
+    let hpc_store = RealHpcStoreOps;
     let deps = AppDeps {
         raster: &raster,
         runtime: &runtime,
         user: &user,
+        hpc_store: &hpc_store,
     };
     let options = ExecOptions {
         verbose: args.verbose > 0,
         parallax_imagestore: args.parallax_imagestore,
+        hpc_imagestore: args.hpc_image_store,
     };
     drop(_init_span);
 

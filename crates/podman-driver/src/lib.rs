@@ -130,12 +130,21 @@ pub fn container_cleanup(name: &str, podman_ctx: Option<&PodmanCtx>) -> Result<(
     execute::execute_checked(command::container_cleanup(name, podman_ctx)).map(|_| ())
 }
 
+/// Run a command in Podman's user namespace, capturing output and checking its exit status.
+pub fn podman_unshare<I, S>(args: I, podman_ctx: Option<&PodmanCtx>) -> Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    execute::execute_checked(command::podman_unshare(args, podman_ctx))
+}
+
 pub fn stop(name: &str, podman_ctx: Option<&PodmanCtx>) -> Result<()> {
     execute::execute_checked(command::stop(name, podman_ctx)).map(|_| ())
 }
 
-pub fn images(podman_ctx: Option<&PodmanCtx>) -> Result<()> {
-    execute::execute_passthrough_checked(command::images(podman_ctx))
+pub fn images(podman_ctx: Option<&PodmanCtx>, digests: bool) -> Result<()> {
+    execute::execute_passthrough_checked(command::images(podman_ctx, digests))
 }
 
 pub fn image_exists(image: &str, podman_ctx: Option<&PodmanCtx>) -> Result<bool> {

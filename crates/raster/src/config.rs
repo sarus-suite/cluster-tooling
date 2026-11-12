@@ -739,7 +739,7 @@ fn load_raw_config_from_dir(
 }
 
 #[instrument(level = "debug")]
-pub fn update_config_by_user(config: &mut Config, edf: EDF) -> SarusResult<()> {
+pub fn update_config_by_user(config: &mut Config, edf: &EDF) -> SarusResult<()> {
     let parallax_imagestore_create = edf
         .annotations
         .get("com.sarus.hooks.parallax_imagestore_create");
@@ -1300,7 +1300,7 @@ mod tests {
         let pwd = std::env::var("PWD").unwrap();
         let expected_tracking_tool = format!("{pwd}/tracking_tool_edf");
 
-        let _ = update_config_by_user(&mut cfg, edf);
+        let _ = update_config_by_user(&mut cfg, &edf);
         assert!(cfg.parallax_imagestore == "parallax_imagestore_edf");
         assert!(cfg.parallax_mount_program == "parallax_mount_program_edf");
         assert!(cfg.parallax_path == "parallax_path_edf");
