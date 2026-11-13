@@ -78,7 +78,9 @@ elif tool == "skopeo":
         fail("inspect")
         sys.stdout.buffer.write((directory / "manifest").read_bytes())
     elif arguments[0] == "copy":
-        assert "--preserve-digests" in arguments
+        importing = arguments[-2].startswith("containers-storage:")
+        if not importing:
+            assert "--preserve-digests" in arguments
         assert "--all" not in arguments and "--format" not in arguments
         if arguments[-1].startswith("containers-storage:"):
             specifier, image = arguments[-1].removeprefix("containers-storage:[overlay@").split("]", 1)
@@ -102,8 +104,13 @@ elif tool == "skopeo":
             assert root["digest"] == reference.split("@")[1]
             (directory / "exported").write_text(reference)
         else:
-            fail("pull")
-            assert arguments[-2] == "docker://" + reference
+            if importing:
+                fail("import")
+                expected = os.getenv("PODMAN_SOURCE", "b" * 64)
+                assert arguments[-2] == "containers-storage:" + expected
+            else:
+                fail("pull")
+                assert arguments[-2] == "docker://" + reference
             layout = pathlib.Path(arguments[-1][len("oci:"):])
             producer = directory / "producer"
             for name in ["oci-layout", "index.json"]:
@@ -152,6 +159,9 @@ elif tool == "podman":
         sys.exit(int(os.getenv("WORKLOAD_EXIT_CODE", "0")))
     elif "container" in arguments:
         assert "exists" in arguments or "cleanup" in arguments
+    elif "inspect" in arguments:
+        assert arguments == ["image", "inspect", "--format", "{{.Id}}", "--", os.getenv("PODMAN_SOURCE", "registry.example/image:release")]
+        print("b" * 64)
     elif "info" in arguments:
         fail("graphroot")
         print(directory / "graphroot")
