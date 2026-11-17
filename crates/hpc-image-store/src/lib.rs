@@ -42,6 +42,7 @@ mod locks;
 mod metadata;
 #[allow(dead_code)]
 mod mutation;
+mod provisioner;
 mod pull;
 mod recovery;
 mod store;
@@ -56,6 +57,7 @@ pub use inventory::{
 };
 pub use metadata::{Acquisition, ContentMetadata, ImageId, Platform, RefMetadata, StoreMetadata};
 pub use presentation::format_list_podman;
+pub use provisioner::{ImageProvisioner, ProvisionError, ProvisionResult};
 pub use pull::{PullContext, PullOptions, PullReport};
 pub use store::{Store, StoreConfig};
 pub use transfer::{ExportReport, ImportOptions, ImportReport, OverlayStorage, TransferContext};

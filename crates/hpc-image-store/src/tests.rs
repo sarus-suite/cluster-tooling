@@ -440,6 +440,22 @@ fn operation_matrix_is_explicit() {
     assert!(!Operation::Remove.initializes());
 }
 
+#[test]
+fn explicit_store_initialization_is_idempotent_and_separate_from_validation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("store");
+    let handle = store(&root);
+
+    assert!(matches!(
+        handle.require_initialized(),
+        Err(Error::MissingStore(path)) if path == root
+    ));
+    handle.initialize().unwrap();
+    handle.require_initialized().unwrap();
+    handle.initialize().unwrap();
+    handle.require_initialized().unwrap();
+}
+
 // Exercise the actual internal API in a fresh process, without exposing a
 // testing command in the development executable.
 #[test]

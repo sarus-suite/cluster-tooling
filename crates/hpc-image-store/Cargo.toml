@@ -13,3 +13,5 @@ tempfile = "3"
 clap = { version = "4.5.48", features = ["derive"] }
 time = { version = "0.3", features = ["parsing", "formatting"] }
 sha2 = "0.10"
+raster = { path = "../raster" }
+sarus-suite-podman-driver = { path = "../podman-driver" }

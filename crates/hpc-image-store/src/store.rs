@@ -51,6 +51,21 @@ impl Store {
         &self.config
     }
 
+    /// Verify that the store is completely initialized without creating or
+    /// recovering it.
+    pub fn require_initialized(&self) -> Result<()> {
+        let _guard = self.prepare_initialized(Operation::Check)?;
+        Ok(())
+    }
+
+    /// Initialize a missing or pristine empty store.
+    ///
+    /// Initialization is idempotent and retains the store's crash-recovery and
+    /// durability protocol when another process initializes concurrently.
+    pub fn initialize(&self) -> Result<()> {
+        initialization::initialize(&self.layout)
+    }
+
     // Image operations keep this guard until their entire operation finishes.
     #[allow(dead_code)]
     pub(crate) fn prepare(&self, operation: Operation) -> Result<StoreGuard<'_>> {

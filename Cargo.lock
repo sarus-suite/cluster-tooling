@@ -653,6 +653,8 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "libc",
+ "raster",
+ "sarus-suite-podman-driver",
  "serde",
  "serde_json",
  "sha2",

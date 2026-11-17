@@ -171,23 +171,6 @@ pub(crate) fn podman_stop(
     Ok(())
 }
 
-pub(crate) fn parallax_exists(parallax_path: &str, ctx: &PodmanCtx, image: &str) -> pmd::Result<bool> {
-    pmd::parallax_exist(&PathBuf::from(parallax_path), ctx, image)
-}
-
-pub(crate) fn pmd_parallax_migrate(
-    parallax_path: &str,
-    ctx: &PodmanCtx,
-    image: &str,
-) -> Result<(), Box<dyn Error>> {
-    pmd::parallax_migrate(&PathBuf::from(parallax_path), ctx, image)?;
-    Ok(())
-}
-
-pub(crate) fn pmd_rmi(image: &str, ctx: &PodmanCtx) -> pmd::Result<()> {
-    pmd::rmi(image, Some(ctx))
-}
-
 pub(crate) fn pmd_run<I, S>(
     edf: &raster::EDF,
     config: &raster::Config,
