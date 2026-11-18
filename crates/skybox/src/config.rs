@@ -2,13 +2,13 @@ use std::error::Error;
 use std::path::Path;
 use std::path::PathBuf;
 
-use slurm_spank::{SpankHandle, spank_log_user, spank_log_error};
+use slurm_spank::{SpankHandle, spank_log_error, spank_log_user};
 
 use raster::config::remove_sarus_annotations;
 use raster::hook_run;
 use raster::*;
 
-use crate::{SpankSkyBox, get_job_env, plugin_err, skybox_log_error, skybox_log_debug};
+use crate::{SpankSkyBox, get_job_env, plugin_err, skybox_log_debug, skybox_log_error};
 
 pub(crate) fn resolve_config_path(spank: &mut SpankHandle) -> Option<PathBuf> {
     let plugin_argv = spank.plugin_argv();
@@ -71,12 +71,11 @@ pub(crate) fn load_config(
 */
 
 pub(crate) fn setup_imagestores(config: &Config) -> Result<(), Box<dyn Error>> {
-    
     let imagestore = &config.parallax_imagestore;
 
     match hook_run(config, "parallax_imagestore_create", vec![imagestore])? {
         Some(ec) => log_hook_ec(ec, "parallax_imagestore_create hook"),
-        None => {},
+        None => {}
     }
 
     if !Path::new(imagestore).exists() {
@@ -85,12 +84,12 @@ pub(crate) fn setup_imagestores(config: &Config) -> Result<(), Box<dyn Error>> {
             return plugin_err(&format!("cannot create parallax_imagestore: {e}"));
         }
     }
-    
+
     let hpc_image_store = &config.hpc_image_store;
-    
+
     match hook_run(config, "parallax_imagestore_create", vec![hpc_image_store])? {
         Some(ec) => log_hook_ec(ec, "parallax_imagestore_create hook"),
-        None => {},
+        None => {}
     }
 
     if !Path::new(hpc_image_store).exists() {
@@ -174,7 +173,7 @@ pub(crate) fn render_user_job_config(
             return plugin_err("plugin is disabled");
         }
     };
-    update_config_by_user(&mut job_config, edf.clone())?;
+    update_config_by_user(&mut job_config, &edf)?;
     remove_sarus_annotations(&mut edf)?;
     plugin.edf = Some(edf);
 
@@ -191,7 +190,6 @@ pub(crate) fn render_user_job_config(
 }
 
 pub(crate) fn log_hook_ec(ec: ExecutedCommand, prefix: &str) {
-
     let rc = match ec.output.status.code() {
         Some(ok) => format!("{ok}"),
         None => {

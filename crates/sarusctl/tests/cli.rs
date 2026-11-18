@@ -145,5 +145,6 @@ fn run_invalid_input_returns_readable_error() {
     cmd.args(["run", &fixture("not-edf-not-yaml.txt")])
         .assert()
         .code(1)
-        .stderr(predicate::str::contains("is not valid EDF nor YAML"));
+        .stderr(predicate::str::contains("Error 022"))
+        .stderr(predicate::str::contains("doesn't end with .toml"));
 }
