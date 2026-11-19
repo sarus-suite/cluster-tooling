@@ -101,6 +101,9 @@ impl<'a> ImageProvisioner<'a> {
             return Ok(digest_reference);
         }
 
+        let local_context = self.local_context(temporary_directory);
+        let _staging_cleanup = StagingImageCleanup::new(digest_reference.clone(), local_context);
+
         self.export_to_job_storage(&digest_reference, temporary_directory)?;
 
         let migration_error =
@@ -115,14 +118,6 @@ impl<'a> ImageProvisioner<'a> {
                     reference: digest_reference,
                 }),
             };
-        }
-
-        // Cleanup of podman staging store after migration
-        let local_context = self.local_context(temporary_directory);
-        if let Err(error) = podman_driver::rmi(&digest_reference, Some(&local_context)) {
-            eprintln!(
-                "hpc-image-store: warning: failed to remove provisioned image {digest_reference} from temporary Podman storage: {error}"
-            );
         }
 
         Ok(digest_reference)
@@ -319,6 +314,32 @@ impl<'a> ImageProvisioner<'a> {
 enum StoreState {
     Ready,
     Missing,
+}
+
+/// Removes the image exported to the job's temporary Podman storage when provisioning ends.
+///
+/// The guard is created before export so cleanup also runs when export only partially completes,
+/// or when migration or Parallax verification fails afterwards.
+struct StagingImageCleanup {
+    image: String,
+    context: PodmanCtx,
+}
+
+impl StagingImageCleanup {
+    fn new(image: String, context: PodmanCtx) -> Self {
+        Self { image, context }
+    }
+}
+
+impl Drop for StagingImageCleanup {
+    fn drop(&mut self) {
+        if let Err(error) = podman_driver::rmi(&self.image, Some(&self.context)) {
+            eprintln!(
+                "hpc-image-store: warning: failed to remove provisioned image {} from temporary Podman storage: {error}",
+                self.image
+            );
+        }
+    }
 }
 
 fn provision_lock_path(store_root: &Path) -> ProvisionResult<PathBuf> {
