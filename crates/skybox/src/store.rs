@@ -26,7 +26,7 @@ pub(crate) fn store_pull(
     };
 
     let provisioner = ImageProvisioner::new(&ssb.config)?;
-    let image_digest = provisioner.provision_image(&edf.image, Path::new(&run.podman_tmp_path))?;
+    let image_digest = provisioner.ensure_image(&edf.image, Path::new(&run.podman_tmp_path))?;
     skybox_log_debug!("Resolved image digest: \"{image_digest}\"");
     run.image_digest = image_digest;
 

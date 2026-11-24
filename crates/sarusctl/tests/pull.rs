@@ -129,55 +129,61 @@ fn pull_refreshes_store_and_exports_resolved_digest_before_migration() {
             .filter(|entry| !args(entry).contains(&"--help"))
             .map(|entry| (entry["tool"].as_str().unwrap(), args(entry)))
             .collect();
+        let setup_calls = usize::from(actions.first().is_some_and(|action| action.0 == "hook"));
         assert_eq!(
-            actions.iter().map(|(tool, _)| *tool).collect::<Vec<_>>(),
+            actions[setup_calls..]
+                .iter()
+                .map(|(tool, _)| *tool)
+                .collect::<Vec<_>>(),
             [
-                "hook", "hook", "skopeo", "skopeo", "parallax", "skopeo", "podman", "hook", "hook",
-                "parallax", "parallax", "podman"
+                "skopeo", "skopeo", "parallax", "skopeo", "parallax", "parallax", "podman",
+                "podman"
             ]
         );
-        for offset in [0, 7] {
+        if setup_calls == 1 {
             assert_eq!(
-                actions[offset].1,
+                actions[0].1,
                 [fixture.root().join("parallax-store").to_str().unwrap()]
             );
-            assert_eq!(
-                actions[offset + 1].1,
-                [fixture.root().join("hpc-image-store").to_str().unwrap()]
-            );
         }
-        for store in ["parallax-store", "hpc-image-store"] {
-            assert_eq!(
-                fs::metadata(fixture.root().join(store))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o750
-            );
-        }
+        let actions = &actions[setup_calls..];
+        assert_eq!(
+            fs::metadata(fixture.root().join("parallax-store"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o750
+        );
+        assert_eq!(
+            fs::metadata(fixture.root().join("hpc-image-store"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
         assert!(
-            actions[2]
+            actions[0]
                 .1
                 .contains(&format!("docker://{SOURCE}").as_str())
         );
         assert!(
-            actions[3]
+            actions[1]
                 .1
                 .contains(&format!("docker://{resolved}").as_str())
         );
-        assert!(actions[3].1.contains(&"--dest-shared-blob-dir"));
-        assert!(actions[3].1.contains(&"--preserve-digests"));
-        assert!(actions[4].1.contains(&"--exist"));
-        assert_eq!(actions[4].1.last(), Some(&resolved.as_str()));
-        assert!(!actions[4].1.contains(&"--podmanRoot"));
+        assert!(actions[1].1.contains(&"--dest-shared-blob-dir"));
+        assert!(actions[1].1.contains(&"--preserve-digests"));
+        assert!(actions[2].1.contains(&"--exist"));
+        assert_eq!(actions[2].1.last(), Some(&resolved.as_str()));
         assert!(
-            actions[4]
+            actions[2]
                 .1
                 .contains(&fixture.root().join("parallax-store").to_str().unwrap())
         );
         assert!(
-            actions[4]
+            actions[2]
                 .1
                 .contains(&fixture.root().join("mksquashfs").to_str().unwrap())
         );
@@ -186,24 +192,22 @@ fn pull_refreshes_store_and_exports_resolved_digest_before_migration() {
                 .unwrap();
         let graphroot = storage["graphroot"].as_str().unwrap();
         let runroot = storage["runroot"].as_str().unwrap();
-        assert!(actions[5].1.contains(
+        assert!(actions[3].1.contains(
             &format!("containers-storage:[overlay@{graphroot}+{runroot}]{resolved}").as_str()
         ));
-        assert!(actions[6].1.contains(&graphroot));
-        assert!(actions[6].1.contains(&runroot));
         assert!(!Path::new(graphroot).parent().unwrap().exists());
-        assert!(actions[5].1.contains(&"--src-shared-blob-dir"));
-        assert!(actions[5].1.contains(&"--preserve-digests"));
-        assert_eq!(actions[6].1.last(), Some(&resolved.as_str()));
-        for (_, arguments) in &actions[9..11] {
+        assert!(actions[3].1.contains(&"--src-shared-blob-dir"));
+        assert!(actions[3].1.contains(&"--preserve-digests"));
+        for (_, arguments) in &actions[4..6] {
             assert_eq!(arguments.last(), Some(&resolved.as_str()));
             assert!(arguments.contains(&graphroot));
             assert!(arguments.contains(&fixture.root().join("parallax-store").to_str().unwrap()));
             assert!(arguments.contains(&fixture.root().join("mksquashfs").to_str().unwrap()));
         }
-        assert!(actions[9].1.contains(&"--migrate"));
-        assert!(actions[10].1.contains(&"--exist"));
-        assert!(actions[11].1.contains(&"unshare"));
+        assert!(actions[4].1.contains(&"--migrate"));
+        assert!(actions[5].1.contains(&"--exist"));
+        assert_eq!(actions[6].1.last(), Some(&resolved.as_str()));
+        assert!(actions[7].1.contains(&"unshare"));
         for entry in &calls {
             assert_eq!(
                 entry["auth"],
@@ -259,10 +263,10 @@ fn repeated_pull_skips_export_and_migration_until_digest_changes() {
             .iter()
             .map(|entry| entry["tool"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["hook", "hook", "skopeo", "skopeo", "parallax"]
+        ["skopeo", "skopeo", "parallax"]
     );
-    assert!(args(actions[4]).contains(&"--exist"));
-    assert_eq!(args(actions[4]).last(), Some(&first.as_str()));
+    assert!(args(actions[2]).contains(&"--exist"));
+    assert_eq!(args(actions[2]).last(), Some(&first.as_str()));
     assert!(!fixture.root().join("exported").exists());
     assert_eq!(
         fixture
@@ -326,14 +330,7 @@ fn pull_overrides_and_digest_inputs_use_the_selected_store() {
 
 #[test]
 fn pull_failures_stop_pipeline_and_preserve_completed_acquisitions() {
-    for (stage, operations) in [
-        ("inspect", 3),
-        ("pull", 4),
-        ("export", 6),
-        ("podman", 7),
-        ("migrate", 10),
-        ("exist", 11),
-    ] {
+    for stage in ["inspect", "pull", "export", "migrate", "exist"] {
         let fixture = Fixture::new();
         let result = fixture
             .command()
@@ -344,28 +341,30 @@ fn pull_failures_stop_pipeline_and_preserve_completed_acquisitions() {
         if ["inspect", "pull", "export"].contains(&stage) {
             result
                 .stderr(predicate::str::contains(format!("{stage} diagnostic")))
-                .stderr(predicate::str::contains("registry.example/image"))
-                .stderr(predicate::str::contains(
-                    fixture.root().join("hpc-image-store").to_str().unwrap(),
-                ));
+                .stderr(predicate::str::contains("registry.example/image"));
         }
         let calls = fixture.calls();
-        let tools: Vec<_> = calls
+        let migrated = calls.iter().any(|entry| args(entry).contains(&"--migrate"));
+        let exist_checks = calls
             .iter()
-            .filter(|entry| !args(entry).contains(&"--help") && !args(entry).contains(&"unshare"))
-            .map(|entry| entry["tool"].as_str().unwrap())
-            .collect();
-        let expected = [
-            "hook", "hook", "skopeo", "skopeo", "parallax", "skopeo", "podman", "hook", "hook",
-            "parallax", "parallax",
-        ];
-        assert_eq!(tools, expected[..operations], "{stage}");
+            .filter(|entry| entry["tool"] == "parallax" && args(entry).contains(&"--exist"))
+            .count();
+        assert_eq!(migrated, matches!(stage, "migrate" | "exist"), "{stage}");
+        assert_eq!(
+            exist_checks,
+            match stage {
+                "export" => 1,
+                "migrate" | "exist" => 2,
+                _ => 0,
+            },
+            "{stage}"
+        );
         assert_eq!(
             calls
                 .iter()
                 .filter(|entry| args(entry).contains(&"unshare"))
                 .count(),
-            usize::from(operations >= 6),
+            usize::from(matches!(stage, "export" | "migrate" | "exist")),
             "{stage}"
         );
         let runtime_base = fixture.root().join("runtime/sarus-suite");
@@ -381,32 +380,27 @@ fn pull_failures_stop_pipeline_and_preserve_completed_acquisitions() {
                 Some(fixture.resolved())
             );
         }
-        for store in ["parallax-store", "hpc-image-store"] {
-            assert!(fixture.root().join(store).is_dir(), "{stage}: {store}");
-        }
+        assert!(fixture.root().join("parallax-store").is_dir(), "{stage}");
+        assert!(fixture.root().join("hpc-image-store").is_dir(), "{stage}");
     }
 }
 
 #[test]
-fn pull_continues_when_creation_hooks_fail() {
+fn pull_reports_creation_hook_failures_before_acquisition() {
     let fixture = Fixture::new();
     fixture
         .command()
         .env("FAIL_STAGE", "hook")
         .args(["pull", SOURCE])
         .assert()
-        .success()
+        .code(1)
         .stderr(predicate::str::contains("hook diagnostic"));
     assert_eq!(
         fixture
             .store("hpc-image-store")
             .resolve(&ImageSelector::new(SOURCE).unwrap())
             .unwrap(),
-        Some(fixture.resolved())
-    );
-    assert_eq!(
-        fs::read_to_string(fixture.root().join("migrated")).unwrap(),
-        fixture.resolved()
+        None
     );
     assert_eq!(
         fixture
@@ -414,7 +408,7 @@ fn pull_continues_when_creation_hooks_fail() {
             .iter()
             .filter(|entry| entry["tool"] == "hook")
             .count(),
-        4
+        1
     );
 }
 
@@ -440,18 +434,11 @@ fn pull_validates_syntax_before_setup_and_rejects_invalid_store_paths() {
         .args(["pull", SOURCE])
         .assert()
         .code(1)
-        .stderr(predicate::str::contains("HPC store pull failed"));
+        .stderr(predicate::str::contains("failed to open provisioner lock"));
     assert!(fixture.root().join("blocked-parent").is_file());
     assert!(!fixture.root().join("blocked-parent/store").exists());
-    assert_eq!(
-        fixture
-            .calls()
-            .iter()
-            .map(|entry| entry["tool"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        ["hook", "hook"]
-    );
-    assert!(fixture.root().join("parallax-store").is_dir());
+    assert!(fixture.calls().is_empty());
+    assert!(!fixture.root().join("parallax-store").exists());
     fs::write(fixture.root().join("calls"), "").unwrap();
 
     let occupied: PathBuf = fixture.root().join("occupied");
@@ -464,21 +451,14 @@ fn pull_validates_syntax_before_setup_and_rejects_invalid_store_paths() {
         .args(["pull", SOURCE])
         .assert()
         .code(1)
-        .stderr(predicate::str::contains("HPC store pull failed"));
+        .stderr(predicate::str::contains("invalid store entry"));
     assert_eq!(
         fs::read_to_string(occupied.join("keep")).unwrap(),
         "preserved"
     );
     assert!(!occupied.join("store.json").exists());
-    assert_eq!(
-        fixture
-            .calls()
-            .iter()
-            .map(|entry| entry["tool"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        ["hook", "hook"]
-    );
-    assert!(fixture.root().join("parallax-store").is_dir());
+    assert!(fixture.calls().is_empty());
+    assert!(!fixture.root().join("parallax-store").exists());
 }
 
 fn run_input(fixture: &Fixture, yaml: bool) -> PathBuf {
@@ -660,7 +640,11 @@ fn run_rejects_damaged_and_inaccessible_stores_without_acquisition() {
             .args(["run", input.to_str().unwrap()])
             .assert()
             .code(1)
-            .stderr(predicate::str::contains("HPC store"));
+            .stderr(predicate::str::contains(match state {
+                "damaged" => "invalid store metadata",
+                "inaccessible" => "Permission denied",
+                _ => "invalid store entry",
+            }));
         if state == "inaccessible" {
             fs::set_permissions(
                 root.join("locks/store.lock"),

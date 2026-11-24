@@ -54,16 +54,12 @@ pub enum ProvisionError {
     ImageUnavailable { reference: String },
 }
 
-/// Ensures that registry references are durably stored and available to Parallax.
-///
-/// The provisioner intentionally serializes all state-changing work with one
-/// filesystem lock. The underlying image store retains its own integrity and
-/// recovery protocol; this outer lock coordinates the complete pull, export,
-/// and migration workflow across cooperating provisioner processes.
+/// Ensures that registry references are stored and available to Parallax
 pub struct ImageProvisioner<'a> {
     config: &'a Config,
     store: Store,
     lock_path: PathBuf,
+    stream_output: bool,
 }
 
 impl<'a> ImageProvisioner<'a> {
@@ -74,25 +70,49 @@ impl<'a> ImageProvisioner<'a> {
             config,
             store: Store::new(store_config),
             lock_path,
+            stream_output: false,
         })
     }
 
-    /// Provision an image from a registry or stored reference.
-    ///
-    /// Postcondition: on successful return, the returned immutable
-    /// `repository@sha256:...` reference exists in the HPC image store and its
-    /// image is available in the configured Parallax store.
-    pub fn provision_image(
+    /// Stream Parallax migration output to the caller's terminal
+    pub fn with_streaming_output(mut self, enabled: bool) -> Self {
+        self.stream_output = enabled;
+        self
+    }
+
+    /// Ensure that an image is available to the configured Parallax runtime store
+    pub fn ensure_image(
         &self,
         reference: &str,
         temporary_directory: &Path,
+    ) -> ProvisionResult<String> {
+        self.provision_image(reference, temporary_directory, Acquisition::CachedOrPull)
+    }
+
+    /// Refresh an image from its registry
+    pub fn refresh_image(
+        &self,
+        reference: &str,
+        temporary_directory: &Path,
+    ) -> ProvisionResult<String> {
+        self.provision_image(reference, temporary_directory, Acquisition::Refresh)
+    }
+
+    fn provision_image(
+        &self,
+        reference: &str,
+        temporary_directory: &Path,
+        acquisition: Acquisition,
     ) -> ProvisionResult<String> {
         let selector = ImageSelector::new(reference)?;
         // TODO: future optimization to more narrowly scope to only when we need exclusive locks
         let _mutation_lock = ProvisionLock::acquire(&self.lock_path)?;
 
         self.ensure_store_locations()?;
-        let digest_reference = self.resolve_or_pull(&selector)?;
+        let digest_reference = match acquisition {
+            Acquisition::CachedOrPull => self.resolve_or_pull(&selector)?,
+            Acquisition::Refresh => self.pull(&selector, true)?,
+        };
         let parallax_context = self.parallax_context(temporary_directory);
         let parallax_path = PathBuf::from(&self.config.parallax_path);
 
@@ -106,9 +126,17 @@ impl<'a> ImageProvisioner<'a> {
 
         self.export_to_job_storage(&digest_reference, temporary_directory)?;
 
-        let migration_error =
+        let migration_error = if self.stream_output {
+            podman_driver::parallax_migrate_streaming(
+                &parallax_path,
+                &parallax_context,
+                &digest_reference,
+            )
+            .err()
+        } else {
             podman_driver::parallax_migrate(&parallax_path, &parallax_context, &digest_reference)
-                .err();
+                .err()
+        };
 
         // As we migrated, image should now be present or we return an error
         if !podman_driver::parallax_exist(&parallax_path, &parallax_context, &digest_reference)? {
@@ -126,19 +154,24 @@ impl<'a> ImageProvisioner<'a> {
     fn resolve_or_pull(&self, selector: &ImageSelector) -> ProvisionResult<String> {
         match self.store.resolve(selector)? {
             Some(reference) => Ok(reference),
-            None => self.pull(selector),
+            None => self.pull(selector, false),
         }
     }
 
-    fn pull(&self, selector: &ImageSelector) -> ProvisionResult<String> {
+    fn pull(&self, selector: &ImageSelector, replace: bool) -> ProvisionResult<String> {
         let context = PullContext {
             skopeo: PathBuf::from(&self.config.skopeo_path),
             ..PullContext::default()
         };
-        match self
-            .store
-            .pull(selector, None, &context, &PullOptions::default())
-        {
+        match self.store.pull(
+            selector,
+            None,
+            &context,
+            &PullOptions {
+                replace,
+                ..PullOptions::default()
+            },
+        ) {
             Ok(report) => Ok(format!(
                 "{}@{}",
                 report.local_ref.name(),
@@ -177,10 +210,10 @@ impl<'a> ImageProvisioner<'a> {
         let parallax_state = self.inspect_parallax_store()?;
         let hpc_state = self.inspect_hpc_store()?;
 
-        // Initialize missing stores
+        // Initialize missing stores and resume interrupted initialization.
         match hpc_state {
             StoreState::Ready => {}
-            StoreState::Missing => {
+            StoreState::NeedsInitialization => {
                 self.store.initialize()?;
                 self.store.require_initialized()?;
             }
@@ -188,7 +221,7 @@ impl<'a> ImageProvisioner<'a> {
 
         match parallax_state {
             StoreState::Ready => {}
-            StoreState::Missing => {
+            StoreState::NeedsInitialization => {
                 self.initialize_parallax_store()?;
             }
         }
@@ -213,7 +246,9 @@ impl<'a> ImageProvisioner<'a> {
                 path: path.to_owned(),
                 reason: "location exists but is not a directory",
             }),
-            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(StoreState::Missing),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                Ok(StoreState::NeedsInitialization)
+            }
             Err(source) => Err(ProvisionError::Io {
                 operation: "inspect Parallax image store",
                 path: path.to_owned(),
@@ -226,7 +261,9 @@ impl<'a> ImageProvisioner<'a> {
     fn inspect_hpc_store(&self) -> ProvisionResult<StoreState> {
         match self.store.require_initialized() {
             Ok(()) => Ok(StoreState::Ready),
-            Err(Error::MissingStore(_)) => Ok(StoreState::Missing),
+            Err(Error::MissingStore(_) | Error::InitializationIncomplete { .. }) => {
+                Ok(StoreState::NeedsInitialization)
+            }
             Err(error) => Err(error.into()),
         }
     }
@@ -311,9 +348,15 @@ impl<'a> ImageProvisioner<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Acquisition {
+    CachedOrPull,
+    Refresh,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StoreState {
     Ready,
-    Missing,
+    NeedsInitialization,
 }
 
 /// Removes the image exported to the job's temporary Podman storage when provisioning ends.
@@ -535,6 +578,24 @@ mod tests {
         // Once both stores are ready, even a failing hook is not invoked.
         write_hook(&hook, "exit 97");
         provisioner.ensure_store_locations().unwrap();
+    }
+
+    #[test]
+    fn interrupted_hpc_store_initialization_is_resumed() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = provisioner_config(directory.path());
+        std::fs::create_dir(&config.parallax_imagestore).unwrap();
+        let store = Store::new(StoreConfig::new(&config.hpc_image_store).unwrap());
+        store.initialize().unwrap();
+        File::create(Path::new(&config.hpc_image_store).join(crate::layout::INIT_PENDING)).unwrap();
+        assert!(matches!(
+            store.require_initialized(),
+            Err(Error::InitializationIncomplete { .. })
+        ));
+
+        let provisioner = ImageProvisioner::new(&config).unwrap();
+        provisioner.ensure_store_locations().unwrap();
+        provisioner.store.require_initialized().unwrap();
     }
 
     #[test]
