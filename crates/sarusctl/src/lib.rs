@@ -2,8 +2,9 @@ mod yaml_images;
 
 use clap::ValueEnum;
 use hpc_image_store::{
-    ExportReport, ImageSelector, ListReport, LocalRef, OverlayStorage, PullContext, PullOptions,
-    PullReport, RemoveReport, Store, StoreConfig, TransferContext, format_list_podman,
+    ExportReport, ImageSelector, ImportOptions, ImportReport, ListReport, LocalRef, OverlayStorage,
+    PullContext, PullOptions, PullReport, RemoveReport, Store, StoreConfig, TransferContext,
+    format_list_podman,
 };
 use raster::{self, EDF, ExecutedCommand, config::Config, hook_run};
 use saphyr::{ScalarOwned, YamlOwned};
@@ -218,6 +219,12 @@ pub trait ContainerRuntime {
 }
 
 pub trait HpcStoreOps {
+    fn import(
+        &self,
+        path: &Path,
+        image: &ImageSelector,
+        context: &TransferContext,
+    ) -> Result<ImportReport, AppError>;
     fn export(
         &self,
         path: &Path,
@@ -238,6 +245,28 @@ pub trait HpcStoreOps {
 pub struct RealHpcStoreOps;
 
 impl HpcStoreOps for RealHpcStoreOps {
+    fn import(
+        &self,
+        path: &Path,
+        image: &ImageSelector,
+        context: &TransferContext,
+    ) -> Result<ImportReport, AppError> {
+        StoreConfig::new(path)
+            .map(Store::new)
+            .and_then(|store| {
+                store.import(
+                    image,
+                    None,
+                    context,
+                    &ImportOptions {
+                        replace: true,
+                        notes: None,
+                    },
+                )
+            })
+            .map_err(|error| hpc_operation_error("import", path, image, error))
+    }
+
     fn export(
         &self,
         path: &Path,
@@ -1098,6 +1127,47 @@ fn image_selector(image: &str) -> Result<ImageSelector, AppError> {
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum PullSource {
+    Registry(ImageSelector),
+    Podman(ImageSelector),
+}
+
+impl PullSource {
+    fn parse(image: &str) -> Result<Self, AppError> {
+        match image.strip_prefix("podman:") {
+            Some(source) => image_selector(source).map(Self::Podman),
+            None => image_selector(image).map(Self::Registry),
+        }
+    }
+}
+
+fn import_and_resolve(
+    image: &ImageSelector,
+    config: &Config,
+    deps: &AppDeps<'_>,
+) -> Result<ImageSelector, AppError> {
+    let store_path = Path::new(&config.hpc_image_store);
+    let context = TransferContext {
+        podman: PathBuf::from(&config.podman_path),
+        skopeo: PathBuf::from(&config.skopeo_path),
+        platform: None,
+        storage: None,
+    };
+    print_progress_message(&format!(
+        "Pulling {image} from Podman into the HPC image store..."
+    ));
+    let report = deps.hpc_store.import(store_path, image, &context)?;
+
+    // Import can change the manifest digest, so look up the committed local ref.
+    let local = ImageSelector::from(report.local_ref);
+    let resolved = deps.hpc_store.resolve(store_path, &local)?.ok_or_else(|| {
+        hpc_operation_error("resolve", store_path, &local, "image is missing after pull")
+    })?;
+
+    image_selector(&resolved)
+}
+
 fn pull_and_resolve(
     image: &ImageSelector,
     config: &Config,
@@ -1191,9 +1261,12 @@ fn pull_command(
     deps: &AppDeps<'_>,
     options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
-    let source = image_selector(image)?;
+    let source = PullSource::parse(image)?;
     setup_imagestores(config)?;
-    let resolved = pull_and_resolve(&source, config, deps)?;
+    let resolved = match source {
+        PullSource::Registry(source) => pull_and_resolve(&source, config, deps)?,
+        PullSource::Podman(source) => import_and_resolve(&source, config, deps)?,
+    };
     prepare_parallax(&resolved, config, deps, options)
 }
 
@@ -2660,6 +2733,37 @@ spec:
     }
 
     impl HpcStoreOps for FakeHpcStore {
+        fn import(
+            &self,
+            path: &Path,
+            image: &ImageSelector,
+            context: &TransferContext,
+        ) -> Result<ImportReport, AppError> {
+            self.record("import", path, image)?;
+            self.transfer_contexts.borrow_mut().push(context.clone());
+            let root =
+                hpc_image_store::Sha256Digest::new(format!("sha256:{}", "a".repeat(64))).unwrap();
+            let tag = image
+                .tag()
+                .unwrap_or_else(|| &image.digest().unwrap().hex()[..12]);
+            Ok(ImportReport {
+                local_ref: LocalRef::new(format!("{}:{tag}", image.name())).unwrap(),
+                stored_root: root.clone(),
+                image_id: hpc_image_store::ImageId::new("b".repeat(64)).unwrap(),
+                content: hpc_image_store::ContentMetadata {
+                    config_digest: root,
+                    platform: hpc_image_store::Platform {
+                        os: "linux".into(),
+                        architecture: "amd64".into(),
+                        variant: None,
+                    },
+                    created: None,
+                    size_bytes: 0,
+                },
+                ignored_destination_digest: None,
+            })
+        }
+
         fn remove(&self, path: &Path, image: &LocalRef) -> Result<RemoveReport, AppError> {
             self.record("remove", path, image)?;
             if let Some(error) = &self.remove_error {
@@ -3270,6 +3374,35 @@ spec:
             ];
             assert_eq!(runtime.calls(), expected[..calls], "{failure}");
             assert!(runtime.pull_verbose().is_empty());
+        }
+    }
+
+    #[test]
+    fn pull_source_selects_transport_and_validates_payload() {
+        for image in [
+            "alpine:3.22",
+            "oci:latest",
+            "registry.example:5000/tool:release",
+        ] {
+            assert_eq!(
+                PullSource::parse(image).unwrap(),
+                PullSource::Registry(image_selector(image).unwrap())
+            );
+            assert_eq!(
+                PullSource::parse(&format!("podman:{image}")).unwrap(),
+                PullSource::Podman(image_selector(image).unwrap())
+            );
+        }
+        let digest = format!("localhost/tool@sha256:{}", "a".repeat(64));
+        assert_eq!(
+            PullSource::parse(&format!("podman:{digest}")).unwrap(),
+            PullSource::Podman(image_selector(&digest).unwrap())
+        );
+        for image in ["podman:", "podman:alpine", "podman://alpine:3.22"] {
+            assert!(matches!(
+                PullSource::parse(image),
+                Err(AppError::UnsupportedInput(_))
+            ));
         }
     }
 

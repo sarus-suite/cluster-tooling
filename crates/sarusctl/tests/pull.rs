@@ -895,3 +895,97 @@ fn migration_error_retains_cleanup_failure_diagnostic() {
         ))
         .stderr(predicate::str::contains("cleanup diagnostic"));
 }
+
+#[test]
+fn podman_pull_imports_and_refreshes_before_preparing_parallax() {
+    let fixture = Fixture::new();
+    for revision in ["first", "second"] {
+        fixture.select_image(revision);
+        fs::write(fixture.root().join("calls"), "").unwrap();
+        fixture
+            .command()
+            .args(["pull", &format!("podman:{SOURCE}")])
+            .assert()
+            .success();
+        let resolved = fixture.resolved();
+        assert_eq!(
+            fixture
+                .store("hpc-image-store")
+                .resolve(&ImageSelector::new(SOURCE).unwrap())
+                .unwrap(),
+            Some(resolved.clone())
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.root().join("migrated")).unwrap(),
+            resolved
+        );
+        let calls = fixture.calls();
+        assert!(
+            !calls
+                .iter()
+                .any(|entry| args(entry).iter().any(|arg| arg.starts_with("docker://")))
+        );
+        let inspect = calls
+            .iter()
+            .find(|entry| entry["tool"] == "podman" && args(entry).contains(&"inspect"))
+            .unwrap();
+        assert_eq!(
+            inspect["storage"],
+            fixture.root().join("storage.conf").to_str().unwrap()
+        );
+        let import = calls
+            .iter()
+            .find(|entry| {
+                entry["tool"] == "skopeo"
+                    && args(entry)
+                        .contains(&format!("containers-storage:{}", "b".repeat(64)).as_str())
+            })
+            .unwrap();
+        assert_eq!(import["storage"], inspect["storage"]);
+    }
+}
+
+#[test]
+fn podman_import_failure_stops_before_export_and_migration() {
+    let fixture = Fixture::new();
+    fixture
+        .command()
+        .env("FAIL_STAGE", "import")
+        .args(["pull", &format!("podman:{SOURCE}")])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("HPC store import failed"));
+    assert!(
+        !fixture
+            .calls()
+            .iter()
+            .any(|entry| entry["tool"] == "parallax")
+    );
+    assert!(!fixture.root().join("export-storage").exists());
+}
+
+#[test]
+fn podman_digest_import_resolves_the_local_ref_when_digest_changes() {
+    let fixture = Fixture::new();
+    let source = format!("registry.example/image@sha256:{}", "c".repeat(64));
+    fixture
+        .command()
+        .env("PODMAN_SOURCE", &source)
+        .args(["pull", &format!("podman:{source}")])
+        .assert()
+        .success();
+    // The source digest differs from the completed synthetic OCI manifest.
+    assert_eq!(
+        fixture
+            .store("hpc-image-store")
+            .resolve(
+                &ImageSelector::new(format!("registry.example/image:{}", "c".repeat(12))).unwrap()
+            )
+            .unwrap(),
+        Some(fixture.resolved())
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.root().join("migrated")).unwrap(),
+        fixture.resolved()
+    );
+}
