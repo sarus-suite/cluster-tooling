@@ -1083,40 +1083,69 @@ fn images_command(
             let mut stderr = io::stderr().lock();
             stdout.write_all(output.stdout.as_bytes())?;
             stderr.write_all(output.stderr.as_bytes())?;
-            stdout.write_all(b"\nPodman+Parallax stores:\n")?;
+            stdout.write_all(b"\nPodman store:\n")?;
             stdout.flush()?;
             stderr.flush()
         })()
-        .map_err(|error| AppError::Io(format!("Failed to print image listing: {error}")))?;
+        .map_err(|error| AppError::Io(format!("Failed to print Podman images: {error}")))?;
         output.stdout.clear();
         output.stderr.clear();
 
-        // Print Podman and Parallax store contents using passthrough command
-        if let Err(error) = podman_parallax_images(config, deps, digests) {
+        // Print Podman store contents using passthrough command
+        if let Err(error) = podman_images(config, deps, digests) {
             output.return_code = 1;
-            append_listing_diagnostics(&mut output, "Podman+Parallax stores", &error.to_string());
+            append_listing_diagnostics(&mut output, "Podman store", &error.to_string());
+        }
+
+        if !output.stdout.ends_with('\n') {
+            output.stdout.push('\n');
+        }
+        // Release the stream locks before Podman inherits stdout and stderr.
+        (|| -> io::Result<()> {
+            let mut stdout = io::stdout().lock();
+            let mut stderr = io::stderr().lock();
+            stdout.write_all(output.stdout.as_bytes())?;
+            stderr.write_all(output.stderr.as_bytes())?;
+            stdout.write_all(b"\nParallax store:\n")?;
+            stdout.flush()?;
+            stderr.flush()
+        })()
+        .map_err(|error| AppError::Io(format!("Failed to print Parallax images: {error}")))?;
+        output.stdout.clear();
+        output.stderr.clear();
+
+        // Print Parallax store contents using passthrough command
+        if let Err(error) = parallax_images(config, deps, digests) {
+            output.return_code = 1;
+            append_listing_diagnostics(&mut output, "Podman store", &error.to_string());
         }
     }
     Ok(output)
 }
 
-fn podman_parallax_images(
-    config: &Config,
-    deps: &AppDeps<'_>,
-    digests: bool,
-) -> Result<(), AppError> {
-    let seed_ctx = build_parallax_seed_ctx(config);
+fn podman_images(config: &Config, deps: &AppDeps<'_>, digests: bool) -> Result<(), AppError> {
+    setup_imagestores(config)?;
+    deps.runtime.images(&build_native_ctx(config), digests)
+}
 
-    // Use the Parallax seed context to pre-populate the struct with Podman path and additionalimagestore,
-    // then add the default graphroot
-    let graphroot = deps.runtime.default_graphroot(&seed_ctx)?;
+fn parallax_images(config: &Config, deps: &AppDeps<'_>, digests: bool) -> Result<(), AppError> {
+    let user = deps.user.current_user()?;
+    let (roots_base, _) = create_runtime_instance(user.uid)?;
     let ctx = PodmanCtx {
-        graphroot: Some(graphroot),
-        ..seed_ctx
+        graphroot: Some(roots_base.join("graphroot")),
+        runroot: Some(roots_base.join("runroot")),
+        ..build_parallax_seed_ctx(config)
     };
 
     setup_imagestores(config)?;
-    deps.runtime.images(&ctx, digests)
+    let result = deps.runtime.images(&ctx, digests);
+
+    let warning = cleanup_podman_rootdirs(&roots_base, &ctx, deps.runtime);
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
+
+    result
 }
 
 fn image_selector(image: &str) -> Result<ImageSelector, AppError> {
