@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Controlled transfer tools for sarusctl tests; no network or real storage."""
+"""Controlled image-service tools for tests; no network or real storage."""
 import hashlib
 import json
 import os

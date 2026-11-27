@@ -3,7 +3,7 @@ use std::path::Path;
 
 use slurm_spank::SpankHandle;
 
-use hpc_image_store::ImageProvisioner;
+use hpc_image_store::ImageService;
 
 use crate::{SpankSkyBox, plugin_err, skybox_log_debug};
 
@@ -25,10 +25,10 @@ pub(crate) fn store_pull(
         }
     };
 
-    let provisioner = ImageProvisioner::new(&ssb.config)?;
-    let image_digest = provisioner.ensure_image(&edf.image, Path::new(&run.podman_tmp_path))?;
+    let image_service = ImageService::new(&ssb.config)?;
+    let image_digest = image_service.ensure_image(&edf.image, Path::new(&run.podman_tmp_path))?;
     skybox_log_debug!("Resolved image digest: \"{image_digest}\"");
-    run.image_digest = image_digest;
+    run.image_digest = image_digest.to_string();
 
     Ok(())
 }

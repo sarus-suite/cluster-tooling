@@ -2,10 +2,10 @@ mod yaml_images;
 
 use clap::ValueEnum;
 use hpc_image_store::{
-    ImageProvisioner, ImageSelector, ListReport, LocalRef, RemoveReport, Store, StoreConfig,
-    format_list_podman,
+    Error as ImageStoreError, ImageSelector, ImageService, ListReport, ProvisionError,
+    RemoveReport, format_list_podman,
 };
-use raster::{self, EDF, ExecutedCommand, config::Config, hook_run};
+use raster::{self, EDF, config::Config};
 use saphyr::{ScalarOwned, YamlOwned};
 use sarus_suite_podman_driver::{self as pmd, ContainerCtx, PodmanCtx};
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,6 @@ use std::io::{self, IsTerminal, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Output;
-use std::str;
 use std::time::{Duration, Instant};
 use tracing::instrument;
 use uuid::Uuid;
@@ -68,19 +67,12 @@ pub enum CommandSpec {
         output: FormatOutput,
     },
     Images {
-        all: bool,
         digests: bool,
     },
     Pull {
         image: String,
     },
     Rmi {
-        image: String,
-    },
-    PlxMigrate {
-        image: String,
-    },
-    PlxRmi {
         image: String,
     },
     Run {
@@ -171,28 +163,6 @@ pub trait RasterOps {
 }
 
 pub trait ContainerRuntime {
-    fn default_graphroot(&self, ctx: &PodmanCtx) -> Result<PathBuf, AppError>;
-    fn images(&self, ctx: &PodmanCtx, digests: bool) -> Result<(), AppError>;
-    fn parallax_exist(
-        &self,
-        parallax_path: &Path,
-        ctx: &PodmanCtx,
-        image: &str,
-    ) -> Result<bool, AppError>;
-    fn parallax_migrate(
-        &self,
-        parallax_path: &Path,
-        ctx: &PodmanCtx,
-        image: &str,
-        verbose: bool,
-    ) -> Result<(), AppError>;
-    fn parallax_rmi(
-        &self,
-        parallax_path: &Path,
-        ctx: &PodmanCtx,
-        image: &str,
-        verbose: bool,
-    ) -> Result<(), AppError>;
     fn run_from_edf(
         &self,
         edf: &EDF,
@@ -212,74 +182,90 @@ pub trait ContainerRuntime {
     fn podman_unshare(&self, args: &[&OsStr], ctx: &PodmanCtx) -> Result<Output, AppError>;
 }
 
-pub trait HpcStoreOps {
+pub trait ImageServiceOps {
     fn ensure_image(
         &self,
         config: &Config,
         image: &str,
         temporary_directory: &Path,
         verbose: bool,
-    ) -> Result<String, AppError>;
-    fn refresh_image(
+    ) -> Result<ImageSelector, AppError>;
+    fn pull_image(
         &self,
         config: &Config,
         image: &str,
         temporary_directory: &Path,
         verbose: bool,
-    ) -> Result<String, AppError>;
-    fn list(&self, path: &Path) -> Result<ListReport, AppError>;
-    fn remove(&self, path: &Path, image: &LocalRef) -> Result<RemoveReport, AppError>;
+    ) -> Result<ImageSelector, AppError>;
+    fn list_images(&self, config: &Config) -> Result<ListReport, AppError>;
+    fn remove_image(&self, config: &Config, image: &str) -> Result<RemoveReport, AppError>;
 }
 
-pub struct RealHpcStoreOps;
+pub struct RealImageServiceOps;
 
-impl HpcStoreOps for RealHpcStoreOps {
+impl ImageServiceOps for RealImageServiceOps {
     fn ensure_image(
         &self,
         config: &Config,
         image: &str,
         temporary_directory: &Path,
         verbose: bool,
-    ) -> Result<String, AppError> {
-        ImageProvisioner::new(config)
-            .map(|provisioner| provisioner.with_streaming_output(verbose))
-            .and_then(|provisioner| provisioner.ensure_image(image, temporary_directory))
-            .map_err(|error| AppError::Runtime(error.to_string()))
+    ) -> Result<ImageSelector, AppError> {
+        ImageService::new(config)
+            .map(|service| service.with_streaming_output(verbose))
+            .and_then(|service| service.ensure_image(image, temporary_directory))
+            .map_err(|error| image_provision_error(image, error))
     }
 
-    fn refresh_image(
+    fn pull_image(
         &self,
         config: &Config,
         image: &str,
         temporary_directory: &Path,
         verbose: bool,
-    ) -> Result<String, AppError> {
-        ImageProvisioner::new(config)
-            .map(|provisioner| provisioner.with_streaming_output(verbose))
-            .and_then(|provisioner| provisioner.refresh_image(image, temporary_directory))
+    ) -> Result<ImageSelector, AppError> {
+        ImageService::new(config)
+            .map(|service| service.with_streaming_output(verbose))
+            .and_then(|service| service.pull_image(image, temporary_directory))
+            .map_err(|error| image_provision_error(image, error))
+    }
+
+    fn list_images(&self, config: &Config) -> Result<ListReport, AppError> {
+        ImageService::new(config)
+            .and_then(|service| service.list_images())
             .map_err(|error| AppError::Runtime(error.to_string()))
     }
 
-    fn list(&self, path: &Path) -> Result<ListReport, AppError> {
-        let config =
-            StoreConfig::new(path).map_err(|error| AppError::Runtime(error.to_string()))?;
-        Store::new(config)
-            .list()
-            .map_err(|error| AppError::Runtime(error.to_string()))
-    }
-
-    fn remove(&self, path: &Path, image: &LocalRef) -> Result<RemoveReport, AppError> {
-        StoreConfig::new(path)
-            .map(Store::new)
-            .and_then(|store| store.remove(image))
-            .map_err(|error| hpc_operation_error("remove", path, image, error))
+    fn remove_image(&self, config: &Config, image: &str) -> Result<RemoveReport, AppError> {
+        ImageService::new(config)
+            .and_then(|service| service.remove_image(image))
+            .map_err(|error| match error {
+                error @ ProvisionError::Store(ImageStoreError::InvalidRef { .. }) => {
+                    AppError::UnsupportedInput(format!(
+                        "Invalid image argument '{image}' for rmi: {error}"
+                    ))
+                }
+                error => AppError::Runtime(format!("Failed to remove image {image}: {error}")),
+            })
     }
 }
 
-fn hpc_operation_error(
+fn image_provision_error(image: &str, error: ProvisionError) -> AppError {
+    match error {
+        error @ ProvisionError::Store(ImageStoreError::InvalidSelector { .. }) => {
+            AppError::UnsupportedInput(format!(
+                "Error constructing selector for image {image}: {error}"
+            ))
+        }
+        error => AppError::Runtime(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+fn hpc_operation_error<T: fmt::Display + ?Sized>(
     operation: &str,
     path: &Path,
-    image: &impl fmt::Display,
+    image: &T,
     error: impl fmt::Display,
 ) -> AppError {
     AppError::Runtime(format!(
@@ -293,7 +279,7 @@ pub struct AppDeps<'a> {
     pub raster: &'a dyn RasterOps,
     pub runtime: &'a dyn ContainerRuntime,
     pub user: &'a dyn UserContext,
-    pub hpc_store: &'a dyn HpcStoreOps,
+    pub image_service: &'a dyn ImageServiceOps,
 }
 
 pub struct RealRasterOps;
@@ -330,72 +316,6 @@ impl RasterOps for RealRasterOps {
 pub struct RealContainerRuntime;
 
 impl ContainerRuntime for RealContainerRuntime {
-    fn default_graphroot(&self, ctx: &PodmanCtx) -> Result<PathBuf, AppError> {
-        //TODO Revise with logging: println!("Resolving default Podman graphroot...");
-        let output = pmd::info(Some("{{.Store.GraphRoot}}"), Some(ctx))
-            .map_err(|e| AppError::PodmanInfo(e.to_string()))?;
-        let graphroot = str::from_utf8(&output.stdout)
-            .map_err(|e| AppError::PodmanInfo(e.to_string()))?
-            .trim();
-        Ok(PathBuf::from(graphroot))
-    }
-
-    #[instrument(level = "debug")]
-    fn images(&self, ctx: &PodmanCtx, digests: bool) -> Result<(), AppError> {
-        pmd::images(Some(ctx), digests).map_err(|error| AppError::Runtime(error.to_string()))
-    }
-
-    #[instrument(level = "debug")]
-    fn parallax_exist(
-        &self,
-        parallax_path: &Path,
-        ctx: &PodmanCtx,
-        image: &str,
-    ) -> Result<bool, AppError> {
-        pmd::parallax_exist(&parallax_path.to_path_buf(), ctx, image)
-            .map_err(|e| AppError::Runtime(e.to_string()))
-    }
-
-    #[instrument(level = "debug")]
-    fn parallax_migrate(
-        &self,
-        parallax_path: &Path,
-        ctx: &PodmanCtx,
-        image: &str,
-        verbose: bool,
-    ) -> Result<(), AppError> {
-        if verbose {
-            pmd::parallax_migrate_streaming(&parallax_path.to_path_buf(), ctx, image)
-                .map_err(|_| AppError::Runtime(format!("Failed to migrate image {image}")))
-        } else {
-            pmd::parallax_migrate(&parallax_path.to_path_buf(), ctx, image)
-                .map_err(|e| AppError::Runtime(format!("Failed to migrate image {image}: {e}")))
-        }
-    }
-
-    #[instrument(level = "debug")]
-    fn parallax_rmi(
-        &self,
-        parallax_path: &Path,
-        ctx: &PodmanCtx,
-        image: &str,
-        verbose: bool,
-    ) -> Result<(), AppError> {
-        if verbose {
-            pmd::parallax_rmi_streaming(&parallax_path.to_path_buf(), ctx, image).map_err(|_| {
-                AppError::Runtime(format!(
-                    "Failed to remove image {image} from Parallax imagestore"
-                ))
-            })
-        } else {
-            pmd::parallax_rmi(&parallax_path.to_path_buf(), ctx, image).map_err(|e| {
-                AppError::Runtime(format!(
-                    "Failed to remove image {image} from Parallax imagestore: {e}"
-                ))
-            })
-        }
-    }
-
     #[instrument(level = "debug")]
     fn run_from_edf(
         &self,
@@ -473,42 +393,6 @@ fn build_native_ctx(config: &Config) -> PodmanCtx {
         conmon_path: Some(PathBuf::from(&config.conmon_path)),
         module: None,
         graphroot: None,
-        runroot: None,
-        parallax_mount_program: None,
-        ro_store: None,
-        mksquashfs_path: None,
-        podman_env: None,
-    }
-}
-
-/// Seed context for Parallax image-related operations (e.g. ls, migrate, rmi).
-/// Intended to have default graphroot and Parallax imagestore as read-only additionalimagestore.
-/// Functions using this should complete the context by resolving the default graphroot at runtime and setting it explicitly,
-/// because Parallax requires the graphroot to be passed as a CLI argument.
-pub fn build_parallax_seed_ctx(config: &Config) -> PodmanCtx {
-    PodmanCtx {
-        podman_path: PathBuf::from(&config.podman_path),
-        conmon_path: Some(PathBuf::from(&config.conmon_path)),
-        module: None,
-        graphroot: None,
-        runroot: None,
-        parallax_mount_program: None,
-        ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
-        mksquashfs_path: Some(PathBuf::from(&config.mksquashfs_path)),
-        podman_env: None,
-    }
-}
-
-/// Context which uses the Parallax imagestore (normally a read-only additionalimagestore location) as graphroot.
-/// This should be used only for read actions, since the Parallax store is not intended to be manipulated directly by Podman.
-/// This context is mostly useful to check if an image exists in the Parallax store (and therefore if it needs pulling or not)
-/// without using the run_ctx, which would trigger creation of custom Podman rootdirs and require cleanup in case of errors before run.
-pub fn build_readonly_ctx(config: &Config) -> PodmanCtx {
-    PodmanCtx {
-        podman_path: PathBuf::from(&config.podman_path),
-        conmon_path: Some(PathBuf::from(&config.conmon_path)),
-        module: None,
-        graphroot: Some(PathBuf::from(&config.parallax_imagestore)),
         runroot: None,
         parallax_mount_program: None,
         ro_store: None,
@@ -868,9 +752,9 @@ pub fn execute_command_with_options(
     match command {
         CommandSpec::Validate { filepath, .. } => validate_command(&filepath, deps),
         CommandSpec::Render { filepath, .. } => render_command(&filepath, deps),
-        CommandSpec::Images { all, digests } => {
+        CommandSpec::Images { digests } => {
             let config = load_config_with_overrides(deps.raster, &options, None)?;
-            images_command(&config, deps, all, digests)
+            images_command(&config, deps, digests)
         }
         CommandSpec::Pull { image } => {
             let config = load_config_with_overrides(deps.raster, &options, None)?;
@@ -879,14 +763,6 @@ pub fn execute_command_with_options(
         CommandSpec::Rmi { image } => {
             let config = load_config_with_overrides(deps.raster, &options, None)?;
             rmi_command(&image, &config, deps)
-        }
-        CommandSpec::PlxMigrate { image } => {
-            let config = load_config_with_overrides(deps.raster, &options, None)?;
-            migrate_command(&image, &config, deps, &options, None)
-        }
-        CommandSpec::PlxRmi { image } => {
-            let config = load_config_with_overrides(deps.raster, &options, None)?;
-            plx_rmi_command(&image, &config, deps, &options)
         }
         CommandSpec::Run {
             // Run is the only command that loads the config on its own to facilitate testing of invalid EDF files without needing a valid config present
@@ -962,12 +838,11 @@ fn append_listing_diagnostics(output: &mut AppOutput, source: &str, diagnostics:
 fn images_command(
     config: &Config,
     deps: &AppDeps<'_>,
-    all: bool,
     digests: bool,
 ) -> Result<AppOutput, AppError> {
     // Print the contents of the HPC image store
-    let mut output = AppOutput::success(if all { "HPC store:\n" } else { "" });
-    let report = deps.hpc_store.list(Path::new(&config.hpc_image_store));
+    let mut output = AppOutput::success("");
+    let report = deps.image_service.list_images(config);
     match report {
         Ok(report) => {
             output
@@ -997,68 +872,15 @@ fn images_command(
         }
     }
 
-    // Print content of other image stores
-    if all {
-        if !output.stdout.ends_with('\n') {
-            output.stdout.push('\n');
-        }
-        // Release the stream locks before Podman inherits stdout and stderr.
-        (|| -> io::Result<()> {
-            let mut stdout = io::stdout().lock();
-            let mut stderr = io::stderr().lock();
-            stdout.write_all(output.stdout.as_bytes())?;
-            stderr.write_all(output.stderr.as_bytes())?;
-            stdout.write_all(b"\nPodman+Parallax stores:\n")?;
-            stdout.flush()?;
-            stderr.flush()
-        })()
-        .map_err(|error| AppError::Io(format!("Failed to print image listing: {error}")))?;
-        output.stdout.clear();
-        output.stderr.clear();
-
-        // Print Podman and Parallax store contents using passthrough command
-        if let Err(error) = podman_parallax_images(config, deps, digests) {
-            output.return_code = 1;
-            append_listing_diagnostics(&mut output, "Podman+Parallax stores", &error.to_string());
-        }
-    }
     Ok(output)
 }
 
-fn podman_parallax_images(
-    config: &Config,
-    deps: &AppDeps<'_>,
-    digests: bool,
-) -> Result<(), AppError> {
-    let seed_ctx = build_parallax_seed_ctx(config);
-
-    // Use the Parallax seed context to pre-populate the struct with Podman path and additionalimagestore,
-    // then add the default graphroot
-    let graphroot = deps.runtime.default_graphroot(&seed_ctx)?;
-    let ctx = PodmanCtx {
-        graphroot: Some(graphroot),
-        ..seed_ctx
-    };
-
-    setup_parallax_imagestore(config)?;
-    deps.runtime.images(&ctx, digests)
-}
-
-fn image_selector(image: &str) -> Result<ImageSelector, AppError> {
-    ImageSelector::new(image).map_err(|error| {
-        AppError::UnsupportedInput(format!(
-            "Error constructing selector for image {image}: {error}"
-        ))
-    })
-}
-
-fn refresh_image(
+fn pull_command(
     image: &str,
     config: &Config,
     deps: &AppDeps<'_>,
     options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
-    image_selector(image)?;
     let user = deps.user.current_user()?;
     let (roots_base, _) = create_runtime_instance(user.uid)?;
     let podman_ctx = PodmanCtx {
@@ -1070,8 +892,8 @@ fn refresh_image(
         "Refreshing {image} and making it available to Parallax..."
     ));
     let result = deps
-        .hpc_store
-        .refresh_image(config, image, &roots_base, options.verbose)
+        .image_service
+        .pull_image(config, image, &roots_base, options.verbose)
         .map(|_| AppOutput::success(""));
     let warning = cleanup_podman_rootdirs(&roots_base, &podman_ctx, deps.runtime);
     match (result, warning) {
@@ -1084,76 +906,8 @@ fn refresh_image(
     }
 }
 
-fn pull_command(
-    image: &str,
-    config: &Config,
-    deps: &AppDeps<'_>,
-    options: &ExecOptions,
-) -> Result<AppOutput, AppError> {
-    refresh_image(image, config, deps, options)
-}
-
-fn migrate_command(
-    image: &str,
-    config: &Config,
-    deps: &AppDeps<'_>,
-    options: &ExecOptions,
-    graphroot: Option<PathBuf>,
-) -> Result<AppOutput, AppError> {
-    let seed_ctx = build_parallax_seed_ctx(config);
-
-    // We need to explicitly state the graphroot in the PodmanCtx because it needs to be passed to Parallax CLI.
-    // Not necessary on Podman commands, because Podman resolves the graphroot location on its own.
-    let graphroot = match graphroot {
-        Some(path) => path,
-        None => deps.runtime.default_graphroot(&seed_ctx)?,
-    };
-    let ctx = PodmanCtx {
-        graphroot: Some(graphroot),
-        ..seed_ctx
-    };
-    let parallax_path = PathBuf::from(&config.parallax_path);
-    setup_parallax_imagestore(config)?;
-
-    print_progress_message(&format!("Migrating {image} with Parallax..."));
-    deps.runtime
-        .parallax_migrate(&parallax_path, &ctx, image, options.verbose)?;
-    if !deps.runtime.parallax_exist(&parallax_path, &ctx, image)? {
-        return Err(AppError::Runtime(format!(
-            "Image {image} is still missing after migration"
-        )));
-    }
-
-    Ok(AppOutput::success(""))
-}
-
 fn rmi_command(image: &str, config: &Config, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
-    let store_path = Path::new(&config.hpc_image_store);
-    let image = LocalRef::new(image).map_err(|error| {
-        AppError::UnsupportedInput(format!("Invalid image argument '{image}' for rmi: {error}"))
-    })?;
-    deps.hpc_store.remove(store_path, &image)?;
-    Ok(AppOutput::success(""))
-}
-
-fn plx_rmi_command(
-    image: &str,
-    config: &Config,
-    deps: &AppDeps<'_>,
-    options: &ExecOptions,
-) -> Result<AppOutput, AppError> {
-    let seed_ctx = build_parallax_seed_ctx(config);
-
-    // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
-    // Not necessary on Podman commands, because Podman resolves the graphroot location on its own.
-    let graphroot = deps.runtime.default_graphroot(&seed_ctx)?;
-    let ctx = PodmanCtx {
-        graphroot: Some(graphroot),
-        ..seed_ctx
-    };
-    let parallax_path = PathBuf::from(&config.parallax_path);
-    deps.runtime
-        .parallax_rmi(&parallax_path, &ctx, image, options.verbose)?;
+    deps.image_service.remove_image(config, image)?;
     Ok(AppOutput::success(""))
 }
 
@@ -1164,12 +918,9 @@ fn ensure_run_image(
     deps: &AppDeps<'_>,
     options: &ExecOptions,
 ) -> Result<ImageSelector, AppError> {
-    image_selector(image)?;
     print_progress_message(&format!("Ensuring {image} is available to Parallax..."));
-    let resolved =
-        deps.hpc_store
-            .ensure_image(config, image, temporary_directory, options.verbose)?;
-    image_selector(&resolved)
+    deps.image_service
+        .ensure_image(config, image, temporary_directory, options.verbose)
 }
 
 #[instrument(level = "debug", skip(deps))]
@@ -1420,96 +1171,13 @@ fn finalize_podman_cleanup(
     }
 }
 
-#[instrument(level = "debug")]
-fn setup_parallax_imagestore(config: &Config) -> Result<(), AppError> {
-    let path = &config.parallax_imagestore;
-    match fs::metadata(path) {
-        Ok(metadata) if metadata.is_dir() => return Ok(()),
-        Ok(_) => {
-            return Err(AppError::Io(format!(
-                "Parallax imagestore location '{path}' is not a directory"
-            )));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(AppError::Io(format!(
-                "Failed to inspect Parallax imagestore directory '{path}': {error}"
-            )));
-        }
-    }
-    let opt_ec = hook_run(config, "parallax_imagestore_create", vec![path]).map_err(|e| {
-        AppError::Io(format!(
-            "Failed to run parallax_imagestore_create hook: {e}"
-        ))
-    })?;
-
-    if let Some(ec) = opt_ec {
-        log_hook_ec(ec, "parallax_imagestore_create hook")?;
-    }
-
-    if !Path::new(path).exists() {
-        std::fs::create_dir_all(path).map_err(|e| {
-            AppError::Io(format!(
-                "Failed to create imagestore directory '{path}': {e}"
-            ))
-        })?;
-    }
-    Ok(())
-}
-
-fn log_hook_ec(ec: ExecutedCommand, prefix: &str) -> Result<(), AppError> {
-    let rc = match ec.output.status.code() {
-        Some(ok) => format!("{ok}"),
-        None => String::from("UNKNOWN"),
-    };
-
-    let mut stdout = match String::from_utf8(ec.output.stdout) {
-        Ok(ok) => ok,
-        Err(_) => String::from(""),
-    };
-    if stdout.ends_with("\n") {
-        stdout.pop();
-    };
-
-    let mut stderr = match String::from_utf8(ec.output.stderr) {
-        Ok(ok) => ok,
-        Err(_) => String::from(""),
-    };
-    if stderr.ends_with("\n") {
-        stderr.pop();
-    };
-
-    if stderr != "" {
-        let lines = stderr.split("\n");
-        for line in lines {
-            eprintln!("{}", line);
-        }
-    }
-
-    if stdout != "" {
-        let lines = stdout.split("\n");
-        for line in lines {
-            eprintln!("{}", line);
-        }
-    }
-
-    if rc != "0" {
-        if rc == "UNKNOWN" {
-            return Err(AppError::Io(format!("{prefix} exited by signal")));
-        } else {
-            return Err(AppError::Io(format!("{prefix} exit code: {rc}")));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use serial_test::serial;
     use std::cell::RefCell;
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::HashMap;
     use std::ffi::OsStr;
     use std::os::unix::fs::PermissionsExt;
     use std::rc::Rc;
@@ -1539,7 +1207,7 @@ mod tests {
     fn test_digest(image: &str) -> String {
         format!(
             "{}@sha256:{}",
-            ImageSelector::new(image).unwrap().name(),
+            hpc_image_store::ImageSelector::new(image).unwrap().name(),
             "a".repeat(64)
         )
     }
@@ -1652,26 +1320,11 @@ mod tests {
         }
     }
 
-    struct RecordedRmiContext {
-        executable: PathBuf,
-        store: Option<PathBuf>,
-        graphroot: Option<PathBuf>,
-    }
-
     struct FakeContainerRuntime {
         calls: Rc<RefCell<Vec<String>>>,
         create_run_rootdirs: bool,
         created_run_rootdirs: RefCell<Vec<PathBuf>>,
-        migrate_verbose: RefCell<Vec<bool>>,
-        rmi_verbose: RefCell<Vec<bool>>,
-        rmi_contexts: RefCell<Vec<RecordedRmiContext>>,
         run_logfiles: RefCell<Vec<Option<String>>>,
-        graphroot: Result<PathBuf, AppError>,
-        images_result: Result<(), AppError>,
-        parallax_exists_error: Option<AppError>,
-        parallax_exist: RefCell<HashMap<String, VecDeque<bool>>>,
-        migrate_results: RefCell<HashMap<String, Result<(), AppError>>>,
-        rmi_results: RefCell<HashMap<String, Result<(), AppError>>>,
         run_result: Result<i32, AppError>,
         kube_manifests: RefCell<Vec<(String, YamlOwned)>>,
         kube_play_result: Result<(), AppError>,
@@ -1685,16 +1338,7 @@ mod tests {
                 calls: Rc::default(),
                 create_run_rootdirs: false,
                 created_run_rootdirs: RefCell::new(Vec::new()),
-                migrate_verbose: RefCell::new(Vec::new()),
-                rmi_verbose: RefCell::new(Vec::new()),
-                rmi_contexts: RefCell::new(Vec::new()),
                 run_logfiles: RefCell::new(Vec::new()),
-                graphroot: Ok(PathBuf::from("/graphroot")),
-                images_result: Ok(()),
-                parallax_exists_error: None,
-                migrate_results: RefCell::new(HashMap::new()),
-                rmi_results: RefCell::new(HashMap::new()),
-                parallax_exist: RefCell::new(HashMap::new()),
                 run_result: Ok(0),
                 kube_manifests: RefCell::new(Vec::new()),
                 kube_play_result: Ok(()),
@@ -1729,22 +1373,8 @@ mod tests {
             self.created_run_rootdirs.borrow().clone()
         }
 
-        fn push_parallax_exist(&self, image: &str, values: Vec<bool>) {
-            self.parallax_exist
-                .borrow_mut()
-                .insert(image.to_string(), VecDeque::from(values));
-        }
-
         fn calls(&self) -> Vec<String> {
             self.calls.borrow().clone()
-        }
-
-        fn migrate_verbose(&self) -> Vec<bool> {
-            self.migrate_verbose.borrow().clone()
-        }
-
-        fn rmi_verbose(&self) -> Vec<bool> {
-            self.rmi_verbose.borrow().clone()
         }
 
         fn run_logfiles(&self) -> Vec<Option<String>> {
@@ -1763,70 +1393,6 @@ mod tests {
     }
 
     impl ContainerRuntime for FakeContainerRuntime {
-        fn default_graphroot(&self, _ctx: &PodmanCtx) -> Result<PathBuf, AppError> {
-            self.calls
-                .borrow_mut()
-                .push(String::from("default_graphroot"));
-            self.graphroot.clone()
-        }
-
-        fn images(&self, _ctx: &PodmanCtx, _digests: bool) -> Result<(), AppError> {
-            self.calls.borrow_mut().push(String::from("images"));
-            self.images_result.clone()
-        }
-
-        fn parallax_exist(
-            &self,
-            _parallax_path: &Path,
-            _ctx: &PodmanCtx,
-            image: &str,
-        ) -> Result<bool, AppError> {
-            self.calls
-                .borrow_mut()
-                .push(format!("parallax_exist:{image}"));
-            if let Some(error) = &self.parallax_exists_error {
-                return Err(error.clone());
-            }
-            let mut states = self.parallax_exist.borrow_mut();
-            let queue = states.entry(image.to_string()).or_default();
-            Ok(queue.pop_front().unwrap_or(false))
-        }
-
-        fn parallax_migrate(
-            &self,
-            _parallax_path: &Path,
-            _ctx: &PodmanCtx,
-            image: &str,
-            verbose: bool,
-        ) -> Result<(), AppError> {
-            self.calls.borrow_mut().push(format!("migrate:{image}"));
-            self.migrate_verbose.borrow_mut().push(verbose);
-            self.migrate_results
-                .borrow_mut()
-                .remove(image)
-                .unwrap_or(Ok(()))
-        }
-
-        fn parallax_rmi(
-            &self,
-            parallax_path: &Path,
-            ctx: &PodmanCtx,
-            image: &str,
-            verbose: bool,
-        ) -> Result<(), AppError> {
-            self.calls.borrow_mut().push(format!("rmi:{image}"));
-            self.rmi_verbose.borrow_mut().push(verbose);
-            self.rmi_contexts.borrow_mut().push(RecordedRmiContext {
-                executable: parallax_path.to_path_buf(),
-                store: ctx.ro_store.clone(),
-                graphroot: ctx.graphroot.clone(),
-            });
-            self.rmi_results
-                .borrow_mut()
-                .remove(image)
-                .unwrap_or(Ok(()))
-        }
-
         fn run_from_edf(
             &self,
             edf: &EDF,
@@ -1928,7 +1494,7 @@ mod tests {
             raster,
             runtime,
             user,
-            hpc_store: &RealHpcStoreOps,
+            image_service: &RealImageServiceOps,
         }
     }
 
@@ -2238,22 +1804,8 @@ spec:
             uid: 1234,
             gid: 4321,
         };
-        let parallax_imagestore = std::env::temp_dir().join("sarusctl-test-parallax-store");
-
         let ctx = build_native_ctx(&config);
         assert_eq!(ctx.podman_path, PathBuf::from("/usr/bin/podman"));
-
-        let seed = build_parallax_seed_ctx(&config);
-        assert_eq!(seed.podman_path, PathBuf::from("/usr/bin/podman"));
-        assert_eq!(seed.ro_store, Some(parallax_imagestore.clone()));
-        assert_eq!(
-            seed.mksquashfs_path,
-            Some(PathBuf::from(&config.mksquashfs_path))
-        );
-
-        let ro = build_readonly_ctx(&config);
-        assert_eq!(ro.podman_path, PathBuf::from("/usr/bin/podman"));
-        assert_eq!(ro.graphroot, Some(parallax_imagestore.clone()));
 
         let (run, roots_base, run_id) = build_run_ctx(&config, &user).unwrap();
         assert_eq!(run.podman_path, PathBuf::from("/usr/bin/podman"));
@@ -2275,7 +1827,6 @@ spec:
             0o700
         );
         fs::remove_dir_all(roots_base).unwrap();
-        assert_eq!(seed.ro_store, Some(parallax_imagestore));
         let env = run.podman_env.expect("missing env");
         assert_eq!(env.get(OsStr::new("PARALLAX_MP_UID")).unwrap(), "1234");
         assert_eq!(env.get(OsStr::new("PARALLAX_MP_GID")).unwrap(), "4321");
@@ -2494,49 +2045,66 @@ spec:
         }
     }
 
-    impl HpcStoreOps for FakeHpcStore {
+    impl ImageServiceOps for FakeHpcStore {
         fn ensure_image(
             &self,
             config: &Config,
             image: &str,
             temporary_directory: &Path,
             verbose: bool,
-        ) -> Result<String, AppError> {
+        ) -> Result<ImageSelector, AppError> {
+            hpc_image_store::ImageSelector::new(image).map_err(|error| {
+                AppError::UnsupportedInput(format!(
+                    "Error constructing selector for image {image}: {error}"
+                ))
+            })?;
             self.provision_verbose.borrow_mut().push(verbose);
             self.record("ensure", Path::new(&config.hpc_image_store), &image)?;
             self.paths
                 .borrow_mut()
                 .push(temporary_directory.to_path_buf());
-            Ok(self.provisioned_reference(image))
+            ImageSelector::new(self.provisioned_reference(image))
+                .map_err(|error| AppError::Runtime(error.to_string()))
         }
 
-        fn refresh_image(
+        fn pull_image(
             &self,
             config: &Config,
             image: &str,
             temporary_directory: &Path,
             verbose: bool,
-        ) -> Result<String, AppError> {
+        ) -> Result<ImageSelector, AppError> {
+            hpc_image_store::ImageSelector::new(image).map_err(|error| {
+                AppError::UnsupportedInput(format!(
+                    "Error constructing selector for image {image}: {error}"
+                ))
+            })?;
             self.provision_verbose.borrow_mut().push(verbose);
             self.record("refresh", Path::new(&config.hpc_image_store), &image)?;
             self.paths
                 .borrow_mut()
                 .push(temporary_directory.to_path_buf());
-            Ok(self.provisioned_reference(image))
+            ImageSelector::new(self.provisioned_reference(image))
+                .map_err(|error| AppError::Runtime(error.to_string()))
         }
 
-        fn remove(&self, path: &Path, image: &LocalRef) -> Result<RemoveReport, AppError> {
-            self.record("remove", path, image)?;
+        fn remove_image(&self, config: &Config, image: &str) -> Result<RemoveReport, AppError> {
+            let image = hpc_image_store::LocalRef::new(image).map_err(|error| {
+                AppError::UnsupportedInput(format!(
+                    "Invalid image argument '{image}' for rmi: {error}"
+                ))
+            })?;
+            self.record("remove", Path::new(&config.hpc_image_store), &image)?;
             if let Some(error) = &self.remove_error {
                 return Err(error.clone());
             }
-            Ok(RemoveReport {
-                local_ref: image.clone(),
-            })
+            Ok(RemoveReport { local_ref: image })
         }
 
-        fn list(&self, path: &Path) -> Result<ListReport, AppError> {
-            self.paths.borrow_mut().push(path.to_path_buf());
+        fn list_images(&self, config: &Config) -> Result<ListReport, AppError> {
+            self.paths
+                .borrow_mut()
+                .push(PathBuf::from(&config.hpc_image_store));
             self.list_report.clone()
         }
     }
@@ -2568,18 +2136,11 @@ spec:
             ..FakeHpcStore::new(&runtime)
         };
         let deps = AppDeps {
-            hpc_store: &store,
+            image_service: &store,
             ..mock_deps(&raster, &runtime, &user)
         };
         for digests in [false, true] {
-            let output = execute_command(
-                CommandSpec::Images {
-                    all: false,
-                    digests,
-                },
-                &deps,
-            )
-            .unwrap();
+            let output = execute_command(CommandSpec::Images { digests }, &deps).unwrap();
             assert_eq!(output.return_code, 0);
             assert!(output.stderr.is_empty());
             assert!(output.stdout.contains("analysis/tool"));
@@ -2587,172 +2148,6 @@ spec:
             assert_eq!(output.stdout.contains("DIGEST"), digests);
             assert_eq!(output.stdout.contains(&digest), digests);
             assert!(runtime.calls().is_empty());
-        }
-    }
-
-    #[test]
-    fn images_initializes_only_hpc_store_without_podman_or_parallax_hook() {
-        let temp = tempdir().unwrap();
-        let mut config = sample_config();
-        config.parallax_imagestore = temp.path().join("parallax").to_string_lossy().into_owned();
-        config.hpc_image_store = temp
-            .path()
-            .join("hpc-image-store")
-            .to_string_lossy()
-            .into_owned();
-        config.hooks.parallax_imagestore_create = String::from("/missing/hook");
-        let raster = FakeRasterOps::new(config);
-        let runtime = FakeContainerRuntime::new();
-        let user = FakeUserContext {
-            user: CurrentUser { uid: 1, gid: 1 },
-        };
-        let output = execute_command(
-            CommandSpec::Images {
-                all: false,
-                digests: false,
-            },
-            &mock_deps(&raster, &runtime, &user),
-        )
-        .unwrap();
-        assert_eq!(output.return_code, 0);
-        assert!(output.stdout.starts_with("REPOSITORY"));
-        assert!(output.stderr.is_empty());
-        assert!(runtime.calls().is_empty());
-        assert!(temp.path().join("hpc-image-store/store.json").is_file());
-        assert!(!temp.path().join("parallax").exists());
-    }
-
-    #[test]
-    fn images_keeps_inventory_and_appends_legacy_on_report_or_operation_errors() {
-        use hpc_image_store::{DiagnosticCategory, ListDiagnostic, ListStatus};
-        let healthy = hpc_store_inventory(ListStatus::Unverified);
-        let damaged = hpc_store_inventory(ListStatus::Damaged);
-        let mut incomplete = healthy.clone();
-        incomplete.complete = false;
-        incomplete.diagnostics.push(ListDiagnostic {
-            category: DiagnosticCategory::Io,
-            path: PathBuf::from("refs/unreadable"),
-            local_ref: None,
-            message: String::from("permission denied"),
-        });
-        for (report, failed) in [
-            (Ok(healthy), false),
-            (Ok(damaged), true),
-            (Ok(incomplete), true),
-            (
-                Err(AppError::Runtime(String::from("store unavailable"))),
-                true,
-            ),
-        ] {
-            for legacy_failed in [false, true] {
-                let temp = tempdir().unwrap();
-                let mut config = sample_config();
-                config.parallax_imagestore =
-                    temp.path().join("parallax").to_string_lossy().into_owned();
-                config.hpc_image_store = temp
-                    .path()
-                    .join("hpc-image-store")
-                    .to_string_lossy()
-                    .into_owned();
-                let raster = FakeRasterOps::new(config);
-                let mut runtime = FakeContainerRuntime::new();
-                if legacy_failed {
-                    runtime.images_result = Err(AppError::Runtime(String::from("legacy failure")));
-                }
-                let user = FakeUserContext {
-                    user: CurrentUser { uid: 1, gid: 1 },
-                };
-                let store = FakeHpcStore {
-                    list_report: report.clone(),
-                    ..FakeHpcStore::new(&runtime)
-                };
-                let deps = AppDeps {
-                    hpc_store: &store,
-                    ..mock_deps(&raster, &runtime, &user)
-                };
-                let hpc_output = execute_command(
-                    CommandSpec::Images {
-                        all: false,
-                        digests: false,
-                    },
-                    &deps,
-                )
-                .unwrap();
-                assert_eq!(hpc_output.return_code, i32::from(failed));
-                if report.is_ok() {
-                    assert!(hpc_output.stdout.contains("analysis/tool"));
-                }
-                assert_eq!(hpc_output.stderr.contains("HPC store:"), failed);
-                assert!(runtime.calls().is_empty());
-                store.paths.borrow_mut().clear();
-
-                let output = execute_command(
-                    CommandSpec::Images {
-                        all: true,
-                        digests: false,
-                    },
-                    &deps,
-                )
-                .unwrap();
-                assert_eq!(output.return_code, i32::from(failed || legacy_failed));
-                assert!(output.stdout.is_empty());
-                assert!(!output.stderr.contains("HPC store:"));
-                assert_eq!(
-                    output
-                        .stderr
-                        .contains("Podman+Parallax stores: legacy failure"),
-                    legacy_failed
-                );
-                assert_eq!(runtime.calls(), vec!["default_graphroot", "images"]);
-                assert_eq!(
-                    *store.paths.borrow(),
-                    vec![temp.path().join("hpc-image-store")]
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn images_all_does_not_return_printed_output_after_graphroot_or_runtime_error() {
-        for graphroot_failure in [false, true] {
-            let temp = tempdir().unwrap();
-            let mut config = sample_config();
-            config.parallax_imagestore =
-                temp.path().join("parallax").to_string_lossy().into_owned();
-            let raster = FakeRasterOps::new(config);
-            let mut runtime = FakeContainerRuntime::new();
-            let error = AppError::Runtime(String::from("runtime unavailable"));
-            if graphroot_failure {
-                runtime.graphroot = Err(error);
-            } else {
-                runtime.images_result = Err(error);
-            }
-            let user = FakeUserContext {
-                user: CurrentUser { uid: 1, gid: 1 },
-            };
-            let store = FakeHpcStore {
-                list_report: Ok(hpc_store_inventory(hpc_image_store::ListStatus::Unverified)),
-                ..FakeHpcStore::new(&runtime)
-            };
-            let deps = AppDeps {
-                hpc_store: &store,
-                ..mock_deps(&raster, &runtime, &user)
-            };
-            let output = execute_command(
-                CommandSpec::Images {
-                    all: true,
-                    digests: false,
-                },
-                &deps,
-            )
-            .unwrap();
-            assert_eq!(output.return_code, 1);
-            assert!(output.stdout.is_empty());
-            assert!(
-                output
-                    .stderr
-                    .contains("Podman+Parallax stores: runtime unavailable")
-            );
         }
     }
 
@@ -2769,51 +2164,12 @@ spec:
             ..FakeHpcStore::new(&runtime)
         };
         let deps = AppDeps {
-            hpc_store: &store,
+            image_service: &store,
             ..mock_deps(&raster, &runtime, &user)
         };
-        assert!(
-            execute_command(
-                CommandSpec::Images {
-                    all: true,
-                    digests: false
-                },
-                &deps
-            )
-            .is_err()
-        );
+        assert!(execute_command(CommandSpec::Images { digests: false }, &deps).is_err());
         assert!(runtime.calls().is_empty());
         assert!(store.paths.borrow().is_empty());
-    }
-
-    #[test]
-    fn images_creates_missing_imagestore_and_calls_runtime() {
-        let temp = tempdir().unwrap();
-        let imagestore = temp.path().join("imagestore");
-        let mut config = sample_config();
-        config.parallax_imagestore = imagestore.to_string_lossy().into_owned();
-
-        let raster = FakeRasterOps::new(config);
-        let runtime = FakeContainerRuntime::new();
-        let user = FakeUserContext {
-            user: CurrentUser { uid: 1, gid: 1 },
-        };
-
-        let output = execute_command(
-            CommandSpec::Images {
-                all: true,
-                digests: false,
-            },
-            &mock_deps(&raster, &runtime, &user),
-        )
-        .unwrap();
-
-        assert_eq!(output.return_code, 0);
-        assert!(imagestore.exists());
-        assert_eq!(
-            runtime.calls(),
-            vec![String::from("default_graphroot"), String::from("images")]
-        );
     }
 
     #[test]
@@ -2838,7 +2194,7 @@ spec:
                     image: "registry.example/alpine:3.22".into(),
                 },
                 &AppDeps {
-                    hpc_store: &store,
+                    image_service: &store,
                     ..mock_deps(&raster, &runtime, &user)
                 },
                 ExecOptions {
@@ -2890,7 +2246,7 @@ spec:
                 image: "alpine:3.22".into(),
             },
             &AppDeps {
-                hpc_store: &store,
+                image_service: &store,
                 ..mock_deps(&raster, &runtime, &user)
             },
         )
@@ -2918,7 +2274,7 @@ spec:
                     image: image.into(),
                 },
                 &AppDeps {
-                    hpc_store: &store,
+                    image_service: &store,
                     ..mock_deps(&raster, &runtime, &user)
                 },
             );
@@ -2932,61 +2288,7 @@ spec:
     }
 
     #[test]
-    fn plx_migrate_success_runs_migration_steps() {
-        let config = sample_config();
-        let raster = FakeRasterOps::new(config);
-        let runtime = FakeContainerRuntime::new();
-        runtime.push_parallax_exist("alpine:3.22", vec![true]);
-        let user = FakeUserContext {
-            user: CurrentUser { uid: 1, gid: 1 },
-        };
-
-        let output = execute_command(
-            CommandSpec::PlxMigrate {
-                image: String::from("alpine:3.22"),
-            },
-            &mock_deps(&raster, &runtime, &user),
-        )
-        .unwrap();
-
-        assert_eq!(output, AppOutput::success(""));
-        assert_eq!(runtime.migrate_verbose(), vec![false]);
-        assert_eq!(
-            runtime.calls(),
-            vec![
-                String::from("default_graphroot"),
-                String::from("migrate:alpine:3.22"),
-                String::from("parallax_exist:alpine:3.22")
-            ]
-        );
-    }
-
-    #[test]
-    fn plx_migrate_failure_is_returned_as_runtime_error() {
-        let config = sample_config();
-        let raster = FakeRasterOps::new(config);
-        let runtime = FakeContainerRuntime::new();
-        runtime.migrate_results.borrow_mut().insert(
-            String::from("alpine:3.22"),
-            Err(AppError::Runtime(String::from("boom"))),
-        );
-        let user = FakeUserContext {
-            user: CurrentUser { uid: 1, gid: 1 },
-        };
-
-        let err = execute_command(
-            CommandSpec::PlxMigrate {
-                image: String::from("alpine:3.22"),
-            },
-            &mock_deps(&raster, &runtime, &user),
-        )
-        .unwrap_err();
-
-        assert_eq!(err, AppError::Runtime(String::from("boom")));
-    }
-
-    #[test]
-    fn rmi_removes_exact_reference_at_effective_hpc_path_only() {
+    fn rmi_delegates_removal_with_the_effective_configuration() {
         let cwd = std::env::current_dir().unwrap();
         let cases = [
             (
@@ -3023,7 +2325,7 @@ spec:
                     image: "registry.example:5000/analysis/tool:Release_1".into(),
                 },
                 &AppDeps {
-                    hpc_store: &store,
+                    image_service: &store,
                     ..mock_deps(&raster, &runtime, &user)
                 },
                 options,
@@ -3039,7 +2341,7 @@ spec:
     }
 
     #[test]
-    fn rmi_rejects_invalid_references_and_paths_before_removal() {
+    fn rmi_rejects_invalid_store_overrides_before_delegation() {
         let raster = FakeRasterOps::new(sample_config());
         let runtime = FakeContainerRuntime::new();
         let store = FakeHpcStore::new(&runtime);
@@ -3047,192 +2349,49 @@ spec:
             user: CurrentUser { uid: 1, gid: 1 },
         };
         let deps = AppDeps {
-            hpc_store: &store,
+            image_service: &store,
             ..mock_deps(&raster, &runtime, &user)
         };
-        for image in [
-            "alpine",
-            "",
-            "../escape:tag",
-            "image with spaces:tag",
-            "alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "alpine:tag@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ] {
-            let error = execute_command(
+        for path in [PathBuf::new(), PathBuf::from("relative/store")] {
+            let error = execute_command_with_options(
                 CommandSpec::Rmi {
-                    image: image.into(),
+                    image: "alpine:tag".into(),
                 },
                 &deps,
+                ExecOptions {
+                    hpc_imagestore: Some(path),
+                    ..ExecOptions::default()
+                },
             )
             .unwrap_err();
-            assert!(
-                matches!(error, AppError::UnsupportedInput(_)),
-                "{image}: {error}"
-            );
+            assert!(matches!(error, AppError::ConfigLoad(_)));
         }
-        let error = execute_command_with_options(
-            CommandSpec::Rmi {
-                image: "alpine:tag".into(),
-            },
-            &deps,
-            ExecOptions {
-                hpc_imagestore: Some(PathBuf::new()),
-                ..ExecOptions::default()
-            },
-        )
-        .unwrap_err();
-        assert!(matches!(error, AppError::ConfigLoad(_)));
         assert!(runtime.calls().is_empty());
         assert!(store.paths.borrow().is_empty());
     }
 
     #[test]
-    fn rmi_propagates_store_errors_without_retrying() {
+    fn rmi_propagates_image_service_errors_without_retrying() {
         let raster = FakeRasterOps::new(sample_config());
         let runtime = FakeContainerRuntime::new();
         let mut store = FakeHpcStore::new(&runtime);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
-        for message in [
-            "missing reference",
-            "reference removal may be visible; recovery pending at /store/.pending; sync failed",
-        ] {
-            runtime.calls.borrow_mut().clear();
-            store.remove_error = Some(AppError::Runtime(message.into()));
-            let error = execute_command(
-                CommandSpec::Rmi {
-                    image: "alpine:tag".into(),
-                },
-                &AppDeps {
-                    hpc_store: &store,
-                    ..mock_deps(&raster, &runtime, &user)
-                },
-            )
-            .unwrap_err();
-            assert_eq!(error, AppError::Runtime(message.into()));
-            assert_eq!(runtime.calls(), ["hpc_remove:alpine:tag"]);
-        }
-    }
-
-    #[test]
-    fn plx_rmi_stops_after_graphroot_failure() {
-        let raster = FakeRasterOps::new(sample_config());
-        let mut runtime = FakeContainerRuntime::new();
-        runtime.graphroot = Err(AppError::PodmanInfo("graphroot failure".into()));
-        let user = FakeUserContext {
-            user: CurrentUser { uid: 1, gid: 1 },
-        };
+        let message = "image service unavailable";
+        store.remove_error = Some(AppError::Runtime(message.into()));
         let error = execute_command(
-            CommandSpec::PlxRmi {
+            CommandSpec::Rmi {
                 image: "alpine:tag".into(),
             },
-            &mock_deps(&raster, &runtime, &user),
-        )
-        .unwrap_err();
-        assert_eq!(error, AppError::PodmanInfo("graphroot failure".into()));
-        assert_eq!(runtime.calls(), ["default_graphroot"]);
-    }
-
-    #[test]
-    fn plx_rmi_honors_override_without_creating_a_store() {
-        let temp = tempdir().unwrap();
-        let selected = temp.path().join("selected-parallax");
-        let config = sample_config();
-        let executable = PathBuf::from(&config.parallax_path);
-        let raster = FakeRasterOps::new(config);
-        let runtime = FakeContainerRuntime::new();
-        let store = FakeHpcStore::new(&runtime);
-        let user = FakeUserContext {
-            user: CurrentUser { uid: 1, gid: 1 },
-        };
-        let output = execute_command_with_options(
-            CommandSpec::PlxRmi {
-                image: "arbitrary-legacy-reference".into(),
-            },
             &AppDeps {
-                hpc_store: &store,
+                image_service: &store,
                 ..mock_deps(&raster, &runtime, &user)
             },
-            ExecOptions {
-                parallax_imagestore: Some(selected.to_string_lossy().into_owned()),
-                hpc_imagestore: Some(temp.path().join("unused-hpc")),
-                verbose: true,
-            },
-        )
-        .unwrap();
-        assert_eq!(output, AppOutput::success(""));
-        assert_eq!(
-            runtime.calls(),
-            ["default_graphroot", "rmi:arbitrary-legacy-reference"]
-        );
-        let contexts = runtime.rmi_contexts.borrow();
-        assert_eq!(contexts.len(), 1);
-        assert_eq!(contexts[0].executable, executable);
-        assert_eq!(contexts[0].store.as_deref(), Some(selected.as_path()));
-        assert_eq!(
-            contexts[0].graphroot.as_deref(),
-            Some(Path::new("/graphroot"))
-        );
-        assert_eq!(runtime.rmi_verbose(), [true]);
-        assert!(!selected.exists());
-        assert!(store.paths.borrow().is_empty());
-    }
-
-    #[test]
-    fn plx_rmi_success_runs_removal_steps() {
-        let temp = tempdir().unwrap();
-        let mut config = sample_config();
-        config.parallax_imagestore = temp.path().join("parallax").to_string_lossy().into_owned();
-        let raster = FakeRasterOps::new(config);
-        let runtime = FakeContainerRuntime::new();
-        let user = FakeUserContext {
-            user: CurrentUser { uid: 1, gid: 1 },
-        };
-
-        let output = execute_command(
-            CommandSpec::PlxRmi {
-                image: String::from("alpine:3.22"),
-            },
-            &mock_deps(&raster, &runtime, &user),
-        )
-        .unwrap();
-
-        assert_eq!(output, AppOutput::success(""));
-        assert_eq!(runtime.rmi_verbose(), vec![false]);
-        assert_eq!(
-            runtime.calls(),
-            vec![
-                String::from("default_graphroot"),
-                String::from("rmi:alpine:3.22")
-            ]
-        );
-    }
-
-    #[test]
-    fn plx_rmi_failure_is_returned_as_runtime_error() {
-        let temp = tempdir().unwrap();
-        let mut config = sample_config();
-        config.parallax_imagestore = temp.path().join("parallax").to_string_lossy().into_owned();
-        let raster = FakeRasterOps::new(config);
-        let runtime = FakeContainerRuntime::new();
-        runtime.rmi_results.borrow_mut().insert(
-            String::from("alpine:3.22"),
-            Err(AppError::Runtime(String::from("boom"))),
-        );
-        let user = FakeUserContext {
-            user: CurrentUser { uid: 1, gid: 1 },
-        };
-
-        let err = execute_command(
-            CommandSpec::PlxRmi {
-                image: String::from("alpine:3.22"),
-            },
-            &mock_deps(&raster, &runtime, &user),
         )
         .unwrap_err();
-
-        assert_eq!(err, AppError::Runtime(String::from("boom")));
+        assert_eq!(error, AppError::Runtime(message.into()));
+        assert_eq!(runtime.calls(), ["hpc_remove:alpine:tag"]);
     }
 
     #[test]
@@ -3253,7 +2412,7 @@ spec:
                 container_cmd: vec![String::from("sh")],
             },
             &AppDeps {
-                hpc_store: &store,
+                image_service: &store,
                 ..mock_deps(&raster, &runtime, &user)
             },
         )
@@ -3298,7 +2457,7 @@ spec:
                 container_cmd: vec!["true".into()],
             },
             &AppDeps {
-                hpc_store: &store,
+                image_service: &store,
                 ..mock_deps(&raster, &runtime, &user)
             },
             options,
@@ -3320,8 +2479,8 @@ spec:
     }
 
     #[test]
-    fn run_stops_when_ensure_fails_or_returns_an_invalid_reference() {
-        for failure in ["ensure", "invalid_input", "invalid_result"] {
+    fn run_stops_when_ensure_fails_or_receives_invalid_input() {
+        for failure in ["ensure", "invalid_input"] {
             let mut raster = FakeRasterOps::new(sample_config());
             let image = if failure == "invalid_input" {
                 "invalid"
@@ -3334,7 +2493,6 @@ spec:
             let runtime = FakeContainerRuntime::new();
             let store = FakeHpcStore {
                 failure: (failure == "ensure").then_some("ensure"),
-                resolved: (failure == "invalid_result").then(|| "invalid".into()),
                 ..FakeHpcStore::for_run(&runtime)
             };
             let user = FakeUserContext {
@@ -3346,7 +2504,7 @@ spec:
                     container_cmd: vec![],
                 },
                 &AppDeps {
-                    hpc_store: &store,
+                    image_service: &store,
                     ..mock_deps(&raster, &runtime, &user)
                 },
             );
@@ -3403,7 +2561,6 @@ spec:
             .insert(String::from("job.edf"), Ok(edf));
         let runtime = FakeContainerRuntime::new();
         let store = FakeHpcStore::for_run(&runtime);
-        runtime.push_parallax_exist(&test_digest("alpine:3.22"), vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -3414,7 +2571,7 @@ spec:
                 container_cmd: vec![String::from("true")],
             },
             &AppDeps {
-                hpc_store: &store,
+                image_service: &store,
                 ..mock_deps(&raster, &runtime, &user)
             },
         )
@@ -3449,7 +2606,6 @@ spec:
             .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
         let runtime = FakeContainerRuntime::new().with_run_rootdir_creation();
         let store = FakeHpcStore::for_run(&runtime);
-        runtime.push_parallax_exist(&test_digest("alpine:3.22"), vec![true]);
         let user = unique_test_user();
 
         let output = execute_command(
@@ -3458,7 +2614,7 @@ spec:
                 container_cmd: vec![String::from("sh")],
             },
             &AppDeps {
-                hpc_store: &store,
+                image_service: &store,
                 ..mock_deps(&raster, &runtime, &FakeUserContext { user: user.clone() })
             },
         )
@@ -3478,7 +2634,6 @@ spec:
             .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
         let mut runtime = FakeContainerRuntime::new();
         let store = FakeHpcStore::for_run(&runtime);
-        runtime.push_parallax_exist(&test_digest("alpine:3.22"), vec![true]);
         runtime.run_result = Ok(127);
 
         let output = execute_command(
@@ -3487,7 +2642,7 @@ spec:
                 container_cmd: vec![String::from("missing-command")],
             },
             &AppDeps {
-                hpc_store: &store,
+                image_service: &store,
                 ..mock_deps(
                     &raster,
                     &runtime,
@@ -3515,7 +2670,6 @@ spec:
             .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
         let mut runtime = FakeContainerRuntime::new().with_run_rootdir_creation();
         let store = FakeHpcStore::for_run(&runtime);
-        runtime.push_parallax_exist(&test_digest("alpine:3.22"), vec![true]);
         runtime.cleanup_container_result =
             Err(AppError::Runtime(String::from("cleanup still active")));
 
@@ -3525,7 +2679,7 @@ spec:
                 container_cmd: vec![String::from("true")],
             },
             &AppDeps {
-                hpc_store: &store,
+                image_service: &store,
                 ..mock_deps(
                     &raster,
                     &runtime,
@@ -3569,7 +2723,7 @@ spec:
                 container_cmd: vec![String::from("sh")],
             },
             &AppDeps {
-                hpc_store: &store,
+                image_service: &store,
                 ..mock_deps(&raster, &runtime, &user)
             },
         )
@@ -3623,7 +2777,7 @@ spec:
                 container_cmd: vec![],
             },
             &AppDeps {
-                hpc_store: &store,
+                image_service: &store,
                 ..mock_deps(&raster, &runtime, &user)
             },
         )
@@ -3701,7 +2855,7 @@ spec:
                 container_cmd: vec![],
             },
             &AppDeps {
-                hpc_store: &store,
+                image_service: &store,
                 ..mock_deps(&raster, &runtime, &user)
             },
         )
@@ -3737,7 +2891,6 @@ spec:
         );
         let runtime = FakeContainerRuntime::new().with_run_rootdir_creation();
         let store = FakeHpcStore::for_run(&runtime);
-        runtime.push_parallax_exist(&test_digest("alpine:3.22"), vec![true]);
         let user = unique_test_user();
 
         let output = execute_command(
@@ -3746,7 +2899,7 @@ spec:
                 container_cmd: vec![],
             },
             &AppDeps {
-                hpc_store: &store,
+                image_service: &store,
                 ..mock_deps(&raster, &runtime, &FakeUserContext { user: user.clone() })
             },
         )
@@ -3784,7 +2937,6 @@ spec:
         );
         let mut runtime = FakeContainerRuntime::new().with_run_rootdir_creation();
         let store = FakeHpcStore::for_run(&runtime);
-        runtime.push_parallax_exist(&test_digest("alpine:3.22"), vec![true]);
         runtime.kube_down_result = Err(AppError::Runtime(String::from("pod still active")));
 
         let err = execute_command(
@@ -3793,7 +2945,7 @@ spec:
                 container_cmd: vec![],
             },
             &AppDeps {
-                hpc_store: &store,
+                image_service: &store,
                 ..mock_deps(
                     &raster,
                     &runtime,
@@ -3840,7 +2992,6 @@ spec:
         );
         let mut runtime = FakeContainerRuntime::new().with_run_rootdir_creation();
         let store = FakeHpcStore::for_run(&runtime);
-        runtime.push_parallax_exist(&test_digest("alpine:3.22"), vec![true]);
         runtime.kube_play_result = Err(AppError::Runtime(String::from("play failed")));
 
         let err = execute_command(
@@ -3849,7 +3000,7 @@ spec:
                 container_cmd: vec![],
             },
             &AppDeps {
-                hpc_store: &store,
+                image_service: &store,
                 ..mock_deps(
                     &raster,
                     &runtime,
@@ -3907,8 +3058,6 @@ spec:
         );
         let runtime = FakeContainerRuntime::new();
         let store = FakeHpcStore::for_run(&runtime);
-        runtime.push_parallax_exist(&test_digest("alpine:3.22"), vec![true]);
-        runtime.push_parallax_exist(&test_digest("ubuntu:24.04"), vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -3919,7 +3068,7 @@ spec:
                 container_cmd: vec![],
             },
             &AppDeps {
-                hpc_store: &store,
+                image_service: &store,
                 ..mock_deps(&raster, &runtime, &user)
             },
         )
@@ -3949,7 +3098,7 @@ spec:
                 image: String::from("alpine:3.22"),
             },
             &AppDeps {
-                hpc_store: &store,
+                image_service: &store,
                 ..mock_deps(&raster, &runtime, &user)
             },
             ExecOptions {
@@ -3961,33 +3110,6 @@ spec:
 
         assert_eq!(output, AppOutput::success(""));
         assert_eq!(*store.provision_verbose.borrow(), vec![true]);
-    }
-
-    #[test]
-    fn plx_rmi_propagates_verbose_option() {
-        let temp = tempdir().unwrap();
-        let mut config = sample_config();
-        config.parallax_imagestore = temp.path().join("parallax").to_string_lossy().into_owned();
-        let raster = FakeRasterOps::new(config);
-        let runtime = FakeContainerRuntime::new();
-        let user = FakeUserContext {
-            user: CurrentUser { uid: 1, gid: 1 },
-        };
-
-        let output = execute_command_with_options(
-            CommandSpec::PlxRmi {
-                image: String::from("alpine:3.22"),
-            },
-            &mock_deps(&raster, &runtime, &user),
-            ExecOptions {
-                verbose: true,
-                ..ExecOptions::default()
-            },
-        )
-        .unwrap();
-
-        assert_eq!(output, AppOutput::success(""));
-        assert_eq!(runtime.rmi_verbose(), vec![true]);
     }
 
     #[test]
@@ -4008,7 +3130,7 @@ spec:
                 container_cmd: vec![String::from("sh")],
             },
             &AppDeps {
-                hpc_store: &store,
+                image_service: &store,
                 ..mock_deps(&raster, &runtime, &user)
             },
             ExecOptions {
@@ -4046,7 +3168,7 @@ spec:
                     container_cmd: vec![],
                 },
                 &AppDeps {
-                    hpc_store: &store,
+                    image_service: &store,
                     ..mock_deps(&raster, &runtime, &user)
                 },
             )

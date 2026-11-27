@@ -22,7 +22,11 @@ impl Fixture {
         fs::create_dir(fixture.root().join("runtime")).unwrap();
         for tool in ["skopeo", "podman", "parallax", "hook"] {
             let path = fixture.root().join("bin").join(tool);
-            fs::write(&path, include_str!("fixtures/pull-tools.py")).unwrap();
+            fs::write(
+                &path,
+                include_str!("../../hpc-image-store/tests/fixtures/image-service-tools.py"),
+            )
+            .unwrap();
             fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
         }
         let config = fixture.root().join("config/sarus-suite");
@@ -99,135 +103,6 @@ impl Fixture {
     }
 }
 
-#[test]
-fn pull_refreshes_store_and_exports_resolved_digest_before_migration() {
-    let fixture = Fixture::new();
-    let first = fixture.resolved();
-    for revision in ["first", "second"] {
-        fixture.select_image(revision);
-        fs::write(fixture.root().join("calls"), "").unwrap();
-        fixture
-            .command()
-            .args(["pull", SOURCE])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("captured transfer progress").not());
-        let resolved = fixture.resolved();
-        let store = fixture.store("hpc-image-store");
-        assert_eq!(
-            store.resolve(&ImageSelector::new(SOURCE).unwrap()).unwrap(),
-            Some(resolved.clone())
-        );
-        assert_eq!(
-            fs::read_to_string(fixture.root().join("migrated")).unwrap(),
-            resolved
-        );
-
-        let calls = fixture.calls();
-        let actions: Vec<_> = calls
-            .iter()
-            .filter(|entry| !args(entry).contains(&"--help"))
-            .map(|entry| (entry["tool"].as_str().unwrap(), args(entry)))
-            .collect();
-        let setup_calls = usize::from(actions.first().is_some_and(|action| action.0 == "hook"));
-        assert_eq!(
-            actions[setup_calls..]
-                .iter()
-                .map(|(tool, _)| *tool)
-                .collect::<Vec<_>>(),
-            [
-                "skopeo", "skopeo", "parallax", "skopeo", "parallax", "parallax", "podman",
-                "podman"
-            ]
-        );
-        if setup_calls == 1 {
-            assert_eq!(
-                actions[0].1,
-                [fixture.root().join("parallax-store").to_str().unwrap()]
-            );
-        }
-        let actions = &actions[setup_calls..];
-        assert_eq!(
-            fs::metadata(fixture.root().join("parallax-store"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o750
-        );
-        assert_eq!(
-            fs::metadata(fixture.root().join("hpc-image-store"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-        assert!(
-            actions[0]
-                .1
-                .contains(&format!("docker://{SOURCE}").as_str())
-        );
-        assert!(
-            actions[1]
-                .1
-                .contains(&format!("docker://{resolved}").as_str())
-        );
-        assert!(actions[1].1.contains(&"--dest-shared-blob-dir"));
-        assert!(actions[1].1.contains(&"--preserve-digests"));
-        assert!(actions[2].1.contains(&"--exist"));
-        assert_eq!(actions[2].1.last(), Some(&resolved.as_str()));
-        assert!(
-            actions[2]
-                .1
-                .contains(&fixture.root().join("parallax-store").to_str().unwrap())
-        );
-        assert!(
-            actions[2]
-                .1
-                .contains(&fixture.root().join("mksquashfs").to_str().unwrap())
-        );
-        let storage: Value =
-            serde_json::from_slice(&fs::read(fixture.root().join("export-storage")).unwrap())
-                .unwrap();
-        let graphroot = storage["graphroot"].as_str().unwrap();
-        let runroot = storage["runroot"].as_str().unwrap();
-        assert!(actions[3].1.contains(
-            &format!("containers-storage:[overlay@{graphroot}+{runroot}]{resolved}").as_str()
-        ));
-        assert!(!Path::new(graphroot).parent().unwrap().exists());
-        assert!(actions[3].1.contains(&"--src-shared-blob-dir"));
-        assert!(actions[3].1.contains(&"--preserve-digests"));
-        for (_, arguments) in &actions[4..6] {
-            assert_eq!(arguments.last(), Some(&resolved.as_str()));
-            assert!(arguments.contains(&graphroot));
-            assert!(arguments.contains(&fixture.root().join("parallax-store").to_str().unwrap()));
-            assert!(arguments.contains(&fixture.root().join("mksquashfs").to_str().unwrap()));
-        }
-        assert!(actions[4].1.contains(&"--migrate"));
-        assert!(actions[5].1.contains(&"--exist"));
-        assert_eq!(actions[6].1.last(), Some(&resolved.as_str()));
-        assert!(actions[7].1.contains(&"unshare"));
-        for entry in &calls {
-            assert_eq!(
-                entry["auth"],
-                fixture.root().join("auth.json").to_str().unwrap()
-            );
-            assert_eq!(
-                entry["storage"],
-                fixture.root().join("storage.conf").to_str().unwrap()
-            );
-        }
-    }
-    assert_ne!(fixture.resolved(), first);
-    assert!(
-        !fixture
-            .store("hpc-image-store")
-            .exists(&ImageSelector::new(first).unwrap())
-            .unwrap()
-    );
-}
-
 fn args(entry: &Value) -> Vec<&str> {
     entry["args"]
         .as_array()
@@ -235,62 +110,6 @@ fn args(entry: &Value) -> Vec<&str> {
         .iter()
         .map(|value| value.as_str().unwrap())
         .collect()
-}
-
-#[test]
-fn repeated_pull_skips_export_and_migration_until_digest_changes() {
-    let fixture = Fixture::new();
-    fixture.command().args(["pull", SOURCE]).assert().success();
-    let first = fixture.resolved();
-
-    // The fast path must not depend on the image still being in Podman storage.
-    fs::remove_file(fixture.root().join("exported")).unwrap();
-    fs::write(fixture.root().join("calls"), "").unwrap();
-    fixture
-        .command()
-        .args(["pull", SOURCE])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("Exporting").not())
-        .stderr(predicate::str::contains("Migrating").not());
-    let calls = fixture.calls();
-    let actions: Vec<_> = calls
-        .iter()
-        .filter(|entry| !args(entry).contains(&"--help"))
-        .collect();
-    assert_eq!(
-        actions
-            .iter()
-            .map(|entry| entry["tool"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        ["skopeo", "skopeo", "parallax"]
-    );
-    assert!(args(actions[2]).contains(&"--exist"));
-    assert_eq!(args(actions[2]).last(), Some(&first.as_str()));
-    assert!(!fixture.root().join("exported").exists());
-    assert_eq!(
-        fixture
-            .store("hpc-image-store")
-            .resolve(&ImageSelector::new(SOURCE).unwrap())
-            .unwrap(),
-        Some(first.clone())
-    );
-
-    fixture.select_image("second");
-    fs::write(fixture.root().join("calls"), "").unwrap();
-    fixture.command().args(["pull", SOURCE]).assert().success();
-    let second = fixture.resolved();
-    assert_ne!(first, second);
-    assert_eq!(
-        fs::read_to_string(fixture.root().join("exported")).unwrap(),
-        second
-    );
-    assert_eq!(
-        fs::read_to_string(fixture.root().join("migrated")).unwrap(),
-        second
-    );
-    let calls = fixture.calls();
-    assert!(calls.iter().any(|entry| args(entry).contains(&"--migrate")));
 }
 
 #[test]
@@ -326,90 +145,6 @@ fn pull_overrides_and_digest_inputs_use_the_selected_store() {
         assert!(!fixture.root().join("hpc-image-store").exists());
         assert!(fixture.root().join("selected-parallax").is_dir());
     }
-}
-
-#[test]
-fn pull_failures_stop_pipeline_and_preserve_completed_acquisitions() {
-    for stage in ["inspect", "pull", "export", "migrate", "exist"] {
-        let fixture = Fixture::new();
-        let result = fixture
-            .command()
-            .env("FAIL_STAGE", stage)
-            .args(["pull", SOURCE])
-            .assert()
-            .code(1);
-        if ["inspect", "pull", "export"].contains(&stage) {
-            result
-                .stderr(predicate::str::contains(format!("{stage} diagnostic")))
-                .stderr(predicate::str::contains("registry.example/image"));
-        }
-        let calls = fixture.calls();
-        let migrated = calls.iter().any(|entry| args(entry).contains(&"--migrate"));
-        let exist_checks = calls
-            .iter()
-            .filter(|entry| entry["tool"] == "parallax" && args(entry).contains(&"--exist"))
-            .count();
-        assert_eq!(migrated, matches!(stage, "migrate" | "exist"), "{stage}");
-        assert_eq!(
-            exist_checks,
-            match stage {
-                "export" => 1,
-                "migrate" | "exist" => 2,
-                _ => 0,
-            },
-            "{stage}"
-        );
-        assert_eq!(
-            calls
-                .iter()
-                .filter(|entry| args(entry).contains(&"unshare"))
-                .count(),
-            usize::from(matches!(stage, "export" | "migrate" | "exist")),
-            "{stage}"
-        );
-        let runtime_base = fixture.root().join("runtime/sarus-suite");
-        if runtime_base.exists() {
-            assert_eq!(fs::read_dir(runtime_base).unwrap().count(), 0, "{stage}");
-        }
-        if ["export", "podman", "migrate", "exist"].contains(&stage) {
-            assert_eq!(
-                fixture
-                    .store("hpc-image-store")
-                    .resolve(&ImageSelector::new(SOURCE).unwrap())
-                    .unwrap(),
-                Some(fixture.resolved())
-            );
-        }
-        assert!(fixture.root().join("parallax-store").is_dir(), "{stage}");
-        assert!(fixture.root().join("hpc-image-store").is_dir(), "{stage}");
-    }
-}
-
-#[test]
-fn pull_reports_creation_hook_failures_before_acquisition() {
-    let fixture = Fixture::new();
-    fixture
-        .command()
-        .env("FAIL_STAGE", "hook")
-        .args(["pull", SOURCE])
-        .assert()
-        .code(1)
-        .stderr(predicate::str::contains("hook diagnostic"));
-    assert_eq!(
-        fixture
-            .store("hpc-image-store")
-            .resolve(&ImageSelector::new(SOURCE).unwrap())
-            .unwrap(),
-        None
-    );
-    assert_eq!(
-        fixture
-            .calls()
-            .iter()
-            .filter(|entry| entry["tool"] == "hook")
-            .count(),
-        1
-    );
 }
 
 #[test]

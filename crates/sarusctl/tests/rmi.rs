@@ -8,10 +8,8 @@ use std::path::Path;
 use tempfile::{TempDir, tempdir};
 
 const IMAGE: &str = "registry.example:5000/analysis/tool:Release_1";
-const KEEPER: &str = "analysis/keeper:tag";
 
-// The producer seeds real stores through the public API, without registry or
-// containers-storage access. Both aliases of a source share the same content.
+// Seed real stores through the public API without registry or containers-storage access.
 const PRODUCER: &str = r#"#!/usr/bin/python3
 import hashlib, json, pathlib, sys
 a = sys.argv[1:]
@@ -37,15 +35,12 @@ else:
 "#;
 
 const LEGACY_TOOL: &str = r#"#!/usr/bin/python3
-import json, os, pathlib, sys
+import json, pathlib, sys
 tool = pathlib.Path(__file__).name
 a = sys.argv[1:]
 root = pathlib.Path(__file__).parent
 with (root / 'calls').open('a') as log:
     log.write(json.dumps({'tool': tool, 'args': a}) + '\n')
-if os.getenv('FAIL_STAGE') == tool:
-    sys.stderr.write(tool + ' failure diagnostic\n')
-    sys.exit(19)
 if tool == 'podman':
     assert 'info' in a
     print(root / 'graphroot')
@@ -124,8 +119,7 @@ impl Fixture {
             .current_dir(self.root())
             .env("XDG_CONFIG_HOME", self.root().join("config"))
             .env("XDG_CONFIG_DIRS", self.root().join("system-config"))
-            .env("PATH", "")
-            .env_remove("FAIL_STAGE");
+            .env("PATH", "");
         command
     }
 
@@ -144,40 +138,7 @@ impl Fixture {
 }
 
 #[test]
-fn rmi_removes_only_the_exact_hpc_ref_and_preserves_shared_content() {
-    let fixture = Fixture::new();
-    let store = fixture.store("hpc-image-store");
-    fixture.seed(&store, "source:tag", IMAGE);
-    fixture.seed(&store, "source:tag", KEEPER);
-    let keeper = ImageSelector::new(KEEPER).unwrap();
-    let resolved = store.resolve(&keeper).unwrap();
-    fixture
-        .command()
-        .args(["rmi", IMAGE])
-        .assert()
-        .success()
-        .stdout("")
-        .stderr("");
-    assert!(!store.exists(&ImageSelector::new(IMAGE).unwrap()).unwrap());
-    assert_eq!(store.resolve(&keeper).unwrap(), resolved);
-    assert!(
-        !store
-            .check(&hpc_image_store::CheckScope::All)
-            .unwrap()
-            .has_errors()
-    );
-    fixture
-        .command()
-        .args(["rmi", IMAGE])
-        .assert()
-        .code(1)
-        .stdout("")
-        .stderr(predicate::str::contains("reference does not exist"));
-    assert!(fixture.calls().is_empty());
-}
-
-#[test]
-fn rmi_honors_hpc_override_over_the_effective_parallax_sibling() {
+fn rmi_smoke_uses_the_effective_hpc_and_parallax_configuration() {
     let fixture = Fixture::new();
     let default = fixture.store("hpc-image-store");
     let selected = fixture.store("selected");
@@ -196,47 +157,27 @@ fn rmi_honors_hpc_override_over_the_effective_parallax_sibling() {
     assert!(default.exists(&selector).unwrap());
     assert!(!selected.exists(&selector).unwrap());
     assert!(!fixture.root().join("other/parallax").exists());
-    assert!(fixture.calls().is_empty());
+    let calls = fixture.calls();
+    assert_eq!(calls.len(), 2);
+    let args = calls[1]["args"].as_array().unwrap();
+    let store_index = args
+        .iter()
+        .position(|arg| arg == "--roStoragePath")
+        .unwrap()
+        + 1;
+    assert_eq!(args[store_index], "other/parallax");
 }
 
 #[test]
-fn rmi_preserves_configured_hpc_store_with_parallax_override() {
+fn rmi_reports_invalid_input_without_store_or_tool_side_effects() {
     let fixture = Fixture::new();
-    fs::create_dir(fixture.root().join("other")).unwrap();
-    let store = fixture.store("hpc-image-store");
-    fixture.seed(&store, "source:tag", IMAGE);
     fixture
         .command()
-        .args(["--parallax-imagestore", "other/parallax", "rmi", IMAGE])
+        .args(["rmi", "alpine"])
         .assert()
-        .success()
+        .code(1)
         .stdout("")
-        .stderr("");
-    assert!(!store.exists(&ImageSelector::new(IMAGE).unwrap()).unwrap());
-    assert!(!fixture.root().join("other/parallax").exists());
-    assert!(!fixture.root().join("other/hpc-image-store").exists());
-    assert!(fixture.calls().is_empty());
-}
-
-#[test]
-fn rmi_rejects_invalid_inputs_without_store_or_tool_side_effects() {
-    let fixture = Fixture::new();
-    for image in [
-        "alpine",
-        "",
-        "../escape:tag",
-        "bad image:tag",
-        "alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "alpine:tag@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    ] {
-        fixture
-            .command()
-            .args(["rmi", image])
-            .assert()
-            .code(1)
-            .stdout("")
-            .stderr(predicate::str::contains("Invalid image argument"));
-    }
+        .stderr(predicate::str::contains("Invalid image argument"));
     fixture
         .command()
         .args(["--hpc-image-store", "", "rmi", IMAGE])
@@ -250,182 +191,7 @@ fn rmi_rejects_invalid_inputs_without_store_or_tool_side_effects() {
 }
 
 #[test]
-fn rmi_does_not_create_or_initialize_missing_stores() {
-    for empty in [false, true] {
-        let fixture = Fixture::new();
-        let root = fixture.root().join("hpc-image-store");
-        if empty {
-            fs::create_dir(&root).unwrap();
-        }
-        fixture
-            .command()
-            .args(["rmi", IMAGE])
-            .assert()
-            .code(1)
-            .stdout("")
-            .stderr(predicate::str::contains("HPC store remove failed"))
-            .stderr(predicate::str::contains(root.to_str().unwrap()))
-            .stderr(predicate::str::contains(IMAGE));
-        assert_eq!(root.exists(), empty);
-        if empty {
-            assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
-        }
-        assert!(fixture.calls().is_empty());
-    }
-}
-
-#[test]
-fn rmi_reports_recovery_failure_even_after_the_reference_is_removed() {
-    let fixture = Fixture::new();
-    let store = fixture.store("hpc-image-store");
-    fixture.seed(&store, "source:tag", IMAGE);
-    fixture.seed(&store, "other:tag", KEEPER);
-    let keeper = store
-        .resolve(&ImageSelector::new(KEEPER).unwrap())
-        .unwrap()
-        .unwrap();
-    let digest = keeper.split_once("@sha256:").unwrap().1;
-    let declaration = store.config().root().join("blobs/sha256").join(digest);
-    fs::remove_file(&declaration).unwrap();
-    fixture
-        .command()
-        .args(["rmi", IMAGE])
-        .assert()
-        .code(1)
-        .stdout("")
-        .stderr(predicate::str::contains("HPC store remove failed"))
-        .stderr(predicate::str::contains("RefRemoved"))
-        .stderr(predicate::str::contains("mutation recovery"))
-        .stderr(predicate::str::contains(declaration.to_str().unwrap()));
-    // Inspect only the namespace: normal queries are blocked by pending recovery.
-    let terminal = store
-        .config()
-        .root()
-        .join("refs")
-        .join(
-            hpc_image_store::LocalRef::new(IMAGE)
-                .unwrap()
-                .encoded_path(),
-        )
-        .join("ref");
-    assert_eq!(
-        terminal.symlink_metadata().unwrap_err().kind(),
-        std::io::ErrorKind::NotFound
-    );
-    assert!(fixture.calls().is_empty());
-}
-
-#[test]
-fn plx_rmi_passes_legacy_context_and_preserves_hpc_contents() {
-    for verbose in [false, true] {
-        let fixture = Fixture::new();
-        let store = fixture.store("hpc-image-store");
-        fixture.seed(&store, "source:tag", IMAGE);
-        let before = store.resolve(&ImageSelector::new(IMAGE).unwrap()).unwrap();
-        let selected = fixture.root().join("selected-parallax");
-        let mut command = fixture.command();
-        if verbose {
-            command.arg("-v");
-        }
-        command
-            .arg("--hpc-image-store")
-            .arg(fixture.root().join("selected-hpc"))
-            .args([
-                "--parallax-imagestore",
-                selected.to_str().unwrap(),
-                "plx",
-                "rmi",
-                IMAGE,
-            ]);
-        let output = command.assert().success();
-        if verbose {
-            output
-                .stdout(predicate::str::contains("removal progress"))
-                .stderr(predicate::str::contains("removal diagnostic"));
-        } else {
-            output.stdout("").stderr("");
-        }
-        let calls = fixture.calls();
-        assert_eq!(
-            calls
-                .iter()
-                .map(|call| call["tool"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            ["podman", "parallax"]
-        );
-        let args: Vec<_> = calls[1]["args"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|arg| arg.as_str().unwrap())
-            .collect();
-        for (flag, value) in [
-            ("--roStoragePath", selected.to_str().unwrap()),
-            (
-                "--podmanRoot",
-                fixture.root().join("graphroot").to_str().unwrap(),
-            ),
-            ("--image", IMAGE),
-        ] {
-            assert_eq!(
-                args[args.iter().position(|arg| *arg == flag).unwrap() + 1],
-                value
-            );
-        }
-        assert!(args.contains(&"--rmi"));
-        assert!(!selected.exists());
-        assert!(!fixture.root().join("parallax-store").exists());
-        assert!(!fixture.root().join("selected-hpc").exists());
-        assert_eq!(
-            store.resolve(&ImageSelector::new(IMAGE).unwrap()).unwrap(),
-            before
-        );
-    }
-}
-
-#[test]
-fn plx_rmi_stops_at_each_legacy_failure() {
-    for (stage, count, diagnostic) in [
-        ("podman", 1, "podman failure diagnostic"),
-        ("parallax", 2, "parallax failure diagnostic"),
-    ] {
-        let fixture = Fixture::new();
-        fixture
-            .command()
-            .env("FAIL_STAGE", stage)
-            .args(["plx", "rmi", IMAGE])
-            .assert()
-            .code(1)
-            .stderr(predicate::str::contains(diagnostic));
-        assert_eq!(fixture.calls().len(), count);
-        assert!(!fixture.root().join("hpc-image-store").exists());
-    }
-}
-
-#[test]
-fn plx_rmi_does_not_run_creation_hooks() {
-    let fixture = Fixture::new();
-    fixture
-        .command()
-        .env("FAIL_STAGE", "hook")
-        .args(["plx", "rmi", IMAGE])
-        .assert()
-        .success()
-        .stderr("");
-    let calls = fixture.calls();
-    assert_eq!(
-        calls
-            .iter()
-            .map(|call| call["tool"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        ["podman", "parallax"]
-    );
-    assert!(!fixture.root().join("parallax-store").exists());
-    assert!(!fixture.root().join("hpc-image-store").exists());
-}
-
-#[test]
-fn plx_is_hidden_until_explicitly_requested() {
+fn plx_commands_are_not_available() {
     let fixture = Fixture::new();
     for args in [vec!["-h"], vec!["--help"], vec!["help"], vec![]] {
         let mut command = fixture.command();
@@ -444,6 +210,7 @@ fn plx_is_hidden_until_explicitly_requested() {
     for args in [
         vec!["plx", "--help"],
         vec!["plx", "rmi", "--help"],
+        vec!["plx", "migrate", "--help"],
         vec!["help", "plx"],
     ] {
         fixture
@@ -451,21 +218,15 @@ fn plx_is_hidden_until_explicitly_requested() {
             .args(args)
             .env("XDG_CONFIG_HOME", "/nonexistent/sarusctl-rmi-config")
             .assert()
-            .success()
-            .stdout(predicate::str::contains("rmi"));
+            .code(2)
+            .stderr(predicate::str::contains("unrecognized subcommand"));
     }
-    fixture
-        .command()
-        .args(["plx", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Advanced, low-level"));
     fixture
         .command()
         .args(["rmi", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("HPC store"))
+        .stdout(predicate::str::contains("HPC and Parallax stores"))
         .stdout(predicate::str::contains("name:tag"));
     fixture.assert_no_tool_calls();
 }

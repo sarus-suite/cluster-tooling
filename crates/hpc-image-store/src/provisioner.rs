@@ -1,8 +1,8 @@
 //! High-level provisioning from a registry reference into the Parallax runtime store.
 
 use crate::{
-    Error, ImageSelector, OverlayStorage, PullContext, PullOptions, Store, StoreConfig,
-    TransferContext,
+    Error, ImageSelector, ListReport, LocalRef, OverlayStorage, PullContext, PullOptions,
+    RemoveReport, Store, StoreConfig, TransferContext,
 };
 use raster::{Config, hook_run};
 use sarus_suite_podman_driver::{self as podman_driver, PodmanCtx};
@@ -12,6 +12,7 @@ use std::{
     io,
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
+    str,
 };
 
 pub type ProvisionResult<T> = std::result::Result<T, ProvisionError>;
@@ -52,17 +53,19 @@ pub enum ProvisionError {
     InvalidLockPath { store_root: PathBuf },
     #[error("image {reference} is unavailable in Parallax after migration")]
     ImageUnavailable { reference: String },
+    #[error("Podman returned an invalid default graphroot: {reason}")]
+    InvalidGraphroot { reason: String },
 }
 
-/// Ensures that registry references are stored and available to Parallax
-pub struct ImageProvisioner<'a> {
+/// Coordinates the authoritative image store and the Parallax runtime cache.
+pub struct ImageService<'a> {
     config: &'a Config,
     store: Store,
     lock_path: PathBuf,
     stream_output: bool,
 }
 
-impl<'a> ImageProvisioner<'a> {
+impl<'a> ImageService<'a> {
     pub fn new(config: &'a Config) -> ProvisionResult<Self> {
         let store_config = StoreConfig::new(&config.hpc_image_store)?;
         let lock_path = provision_lock_path(store_config.root())?;
@@ -80,22 +83,66 @@ impl<'a> ImageProvisioner<'a> {
         self
     }
 
-    /// Ensure that an image is available to the configured Parallax runtime store
+    /// Ensure that an image is available to Parallax and return its resolved selector.
     pub fn ensure_image(
         &self,
         reference: &str,
         temporary_directory: &Path,
-    ) -> ProvisionResult<String> {
+    ) -> ProvisionResult<ImageSelector> {
         self.provision_image(reference, temporary_directory, Acquisition::CachedOrPull)
     }
 
-    /// Refresh an image from its registry
-    pub fn refresh_image(
+    /// Refresh an image, make it available to Parallax, and return its resolved selector.
+    pub fn pull_image(
         &self,
         reference: &str,
         temporary_directory: &Path,
-    ) -> ProvisionResult<String> {
+    ) -> ProvisionResult<ImageSelector> {
         self.provision_image(reference, temporary_directory, Acquisition::Refresh)
+    }
+
+    /// Ensure that the configured Parallax runtime store is ready for use.
+    pub fn prepare_runtime_store(&self) -> ProvisionResult<()> {
+        if self.inspect_parallax_store()? == StoreState::Ready {
+            return Ok(());
+        }
+
+        let _mutation_lock = ProvisionLock::acquire(&self.lock_path)?;
+        // Another process may have initialized the runtime store while this
+        // process waited for the service-wide mutation lock.
+        self.ensure_runtime_store()
+    }
+
+    /// Return the authoritative image inventory.
+    pub fn list_images(&self) -> ProvisionResult<ListReport> {
+        self.store.list().map_err(Into::into)
+    }
+
+    /// Remove an exact tagged reference from Parallax and the authoritative image store.
+    /// Runtime cleanup happens first, so its failure leaves the authoritative ref retryable.
+    pub fn remove_image(&self, reference: &str) -> ProvisionResult<RemoveReport> {
+        let reference = LocalRef::new(reference)?;
+        let _mutation_lock = ProvisionLock::acquire(&self.lock_path)?;
+
+        // Resolve before touching Parallax so a missing or damaged authoritative
+        // reference has no runtime-store side effects. Provisioning migrates the
+        // digest selector, so use that same identity for removal.
+        let selector = ImageSelector::new(reference.to_string())?;
+        let resolved = self
+            .store
+            .resolve(&selector)?
+            .ok_or_else(|| Error::RefMissing(reference.clone()))?;
+
+        let context = self.parallax_removal_context()?;
+        podman_driver::parallax_rmi(
+            &PathBuf::from(&self.config.parallax_path),
+            &context,
+            &resolved,
+        )?;
+
+        // Parallax is a reconstructible cache. Removing it first leaves the
+        // authoritative reference available when runtime cleanup fails.
+        self.store.remove(&reference).map_err(Into::into)
     }
 
     fn provision_image(
@@ -103,7 +150,7 @@ impl<'a> ImageProvisioner<'a> {
         reference: &str,
         temporary_directory: &Path,
         acquisition: Acquisition,
-    ) -> ProvisionResult<String> {
+    ) -> ProvisionResult<ImageSelector> {
         let selector = ImageSelector::new(reference)?;
         // TODO: future optimization to more narrowly scope to only when we need exclusive locks
         let _mutation_lock = ProvisionLock::acquire(&self.lock_path)?;
@@ -118,7 +165,7 @@ impl<'a> ImageProvisioner<'a> {
 
         // Fast path: the image is already provisioned in Parallax
         if podman_driver::parallax_exist(&parallax_path, &parallax_context, &digest_reference)? {
-            return Ok(digest_reference);
+            return ImageSelector::new(digest_reference).map_err(Into::into);
         }
 
         let local_context = self.local_context(temporary_directory);
@@ -148,7 +195,7 @@ impl<'a> ImageProvisioner<'a> {
             };
         }
 
-        Ok(digest_reference)
+        ImageSelector::new(digest_reference).map_err(Into::into)
     }
 
     fn resolve_or_pull(&self, selector: &ImageSelector) -> ProvisionResult<String> {
@@ -226,6 +273,13 @@ impl<'a> ImageProvisioner<'a> {
             }
         }
         Ok(())
+    }
+
+    fn ensure_runtime_store(&self) -> ProvisionResult<()> {
+        match self.inspect_parallax_store()? {
+            StoreState::Ready => Ok(()),
+            StoreState::NeedsInitialization => self.initialize_parallax_store(),
+        }
     }
 
     // TODO: this should be a parallax store function
@@ -315,6 +369,27 @@ impl<'a> ImageProvisioner<'a> {
 
     fn local_context(&self, temporary_directory: &Path) -> PodmanCtx {
         self.context(temporary_directory, None, None)
+    }
+
+    fn parallax_removal_context(&self) -> ProvisionResult<PodmanCtx> {
+        let mut context = PodmanCtx {
+            podman_path: PathBuf::from(&self.config.podman_path),
+            conmon_path: Some(PathBuf::from(&self.config.conmon_path)),
+            module: None,
+            graphroot: None,
+            runroot: None,
+            parallax_mount_program: None,
+            ro_store: Some(PathBuf::from(&self.config.parallax_imagestore)),
+            mksquashfs_path: Some(PathBuf::from(&self.config.mksquashfs_path)),
+            podman_env: None,
+        };
+        let output = podman_driver::info(Some("{{.Store.GraphRoot}}"), Some(&context))?;
+        let graphroot =
+            str::from_utf8(&output.stdout).map_err(|error| ProvisionError::InvalidGraphroot {
+                reason: error.to_string(),
+            })?;
+        context.graphroot = Some(PathBuf::from(graphroot.trim()));
+        Ok(context)
     }
 
     fn context(
@@ -558,7 +633,7 @@ mod tests {
         let store = Store::new(StoreConfig::new(&config.hpc_image_store).unwrap());
         store.initialize().unwrap();
 
-        let provisioner = ImageProvisioner::new(&config).unwrap();
+        let provisioner = ImageService::new(&config).unwrap();
         provisioner.ensure_store_locations().unwrap();
     }
 
@@ -570,7 +645,7 @@ mod tests {
         write_hook(&hook, "mkdir -p \"$1\"");
         config.hooks.parallax_imagestore_create = hook.display().to_string();
 
-        let provisioner = ImageProvisioner::new(&config).unwrap();
+        let provisioner = ImageService::new(&config).unwrap();
         provisioner.ensure_store_locations().unwrap();
         assert!(Path::new(&config.parallax_imagestore).is_dir());
         provisioner.store.require_initialized().unwrap();
@@ -578,6 +653,36 @@ mod tests {
         // Once both stores are ready, even a failing hook is not invoked.
         write_hook(&hook, "exit 97");
         provisioner.ensure_store_locations().unwrap();
+    }
+
+    #[test]
+    fn preparing_runtime_store_does_not_initialize_authoritative_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = provisioner_config(directory.path());
+        let hook = directory.path().join("create-parallax");
+        write_hook(&hook, "mkdir -p \"$1\"");
+        config.hooks.parallax_imagestore_create = hook.display().to_string();
+
+        let provisioner = ImageService::new(&config).unwrap();
+        provisioner.prepare_runtime_store().unwrap();
+
+        assert!(Path::new(&config.parallax_imagestore).is_dir());
+        assert!(matches!(
+            provisioner.store.require_initialized(),
+            Err(Error::MissingStore(_))
+        ));
+    }
+
+    #[test]
+    fn ready_runtime_store_does_not_require_the_mutation_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = provisioner_config(directory.path());
+        std::fs::create_dir(&config.parallax_imagestore).unwrap();
+        let lock_path = provision_lock_path(Path::new(&config.hpc_image_store)).unwrap();
+        std::fs::create_dir(&lock_path).unwrap();
+
+        let provisioner = ImageService::new(&config).unwrap();
+        provisioner.prepare_runtime_store().unwrap();
     }
 
     #[test]
@@ -593,7 +698,7 @@ mod tests {
             Err(Error::InitializationIncomplete { .. })
         ));
 
-        let provisioner = ImageProvisioner::new(&config).unwrap();
+        let provisioner = ImageService::new(&config).unwrap();
         provisioner.ensure_store_locations().unwrap();
         provisioner.store.require_initialized().unwrap();
     }
@@ -604,7 +709,7 @@ mod tests {
         let config = provisioner_config(directory.path());
         File::create(&config.parallax_imagestore).unwrap();
 
-        let provisioner = ImageProvisioner::new(&config).unwrap();
+        let provisioner = ImageService::new(&config).unwrap();
         let error = provisioner.ensure_store_locations().unwrap_err();
         assert!(matches!(
             error,
@@ -626,7 +731,7 @@ mod tests {
         std::fs::create_dir(&config.hpc_image_store).unwrap();
         File::create(Path::new(&config.hpc_image_store).join("unexpected")).unwrap();
 
-        let provisioner = ImageProvisioner::new(&config).unwrap();
+        let provisioner = ImageService::new(&config).unwrap();
         let error = provisioner.ensure_store_locations().unwrap_err();
         assert!(matches!(
             error,
@@ -646,7 +751,7 @@ mod tests {
             mksquashfs_path: "/tools/mksquashfs".into(),
             ..Config::default()
         };
-        let provisioner = ImageProvisioner::new(&config).unwrap();
+        let provisioner = ImageService::new(&config).unwrap();
         let job = directory.path().join("job");
 
         let context = provisioner.parallax_context(&job);

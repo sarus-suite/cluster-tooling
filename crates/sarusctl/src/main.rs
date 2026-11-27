@@ -2,7 +2,7 @@ mod logging;
 
 use clap::{ArgAction, Parser, Subcommand};
 use sarusctl::{
-    AppDeps, CommandSpec, ExecOptions, FormatOutput, RealContainerRuntime, RealHpcStoreOps,
+    AppDeps, CommandSpec, ExecOptions, FormatOutput, RealContainerRuntime, RealImageServiceOps,
     RealRasterOps, RealUserContext, execute_command_with_options, format_output,
 };
 use std::path::PathBuf;
@@ -58,25 +58,16 @@ enum Command {
     },
     /// List HPC store images
     Images {
-        /// Append the combined Podman and Parallax image listing
-        #[arg(long)]
-        all: bool,
         /// Show digests
         #[arg(long)]
         digests: bool,
     },
     /// Pull into the HPC store, resolve and export to Podman, then migrate to Parallax
     Pull { image: String },
-    /// Remove an explicitly tagged image from the HPC store
+    /// Remove an explicitly tagged image from the HPC and Parallax stores
     Rmi {
         /// Exact local reference (name:tag)
         image: String,
-    },
-    /// Advanced, low-level Parallax operations
-    #[command(hide = true)]
-    Plx {
-        #[command(subcommand)]
-        command: PlxCommand,
     },
     /// Run container from EDF file
     Run {
@@ -85,28 +76,14 @@ enum Command {
     },
 }
 
-#[derive(Subcommand)]
-enum PlxCommand {
-    /// Migrate an image from Podman to Parallax storage
-    Migrate { image: String },
-    /// Remove an image directly from Parallax storage
-    Rmi { image: String },
-}
-
 impl From<Command> for CommandSpec {
     fn from(value: Command) -> Self {
         match value {
             Command::Validate { filepath, output } => CommandSpec::Validate { filepath, output },
             Command::Render { filepath, output } => CommandSpec::Render { filepath, output },
-            Command::Images { all, digests } => CommandSpec::Images { all, digests },
+            Command::Images { digests } => CommandSpec::Images { digests },
             Command::Pull { image } => CommandSpec::Pull { image },
             Command::Rmi { image } => CommandSpec::Rmi { image },
-            Command::Plx {
-                command: PlxCommand::Migrate { image },
-            } => CommandSpec::PlxMigrate { image },
-            Command::Plx {
-                command: PlxCommand::Rmi { image },
-            } => CommandSpec::PlxRmi { image },
             Command::Run {
                 filepath,
                 container_cmd,
@@ -129,12 +106,12 @@ fn main() -> ExitCode {
     let raster = RealRasterOps;
     let runtime = RealContainerRuntime;
     let user = RealUserContext;
-    let hpc_store = RealHpcStoreOps;
+    let image_service = RealImageServiceOps;
     let deps = AppDeps {
         raster: &raster,
         runtime: &runtime,
         user: &user,
-        hpc_store: &hpc_store,
+        image_service: &image_service,
     };
     let options = ExecOptions {
         verbose: args.verbose > 0,

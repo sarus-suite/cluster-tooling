@@ -107,7 +107,6 @@ fn images_option_placement_and_help() {
         .args(["images", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("--all"))
         .stdout(predicate::str::contains("--digests"));
     Command::cargo_bin("sarusctl")
         .unwrap()
@@ -116,7 +115,7 @@ fn images_option_placement_and_help() {
         .success()
         .stdout(predicate::str::contains("--hpc-image-store"));
     for args in [
-        vec!["--all", "images"],
+        vec!["images", "--all"],
         vec!["validate", "--all"],
         vec!["--digests", "images"],
         vec!["validate", "--digests"],
@@ -132,69 +131,22 @@ fn images_option_placement_and_help() {
 }
 
 #[test]
-fn digests_controls_hpc_column_and_podman_flag() {
-    for all in [false, true] {
-        for digests in [false, true] {
-            let fixture = Fixture::new();
-            let mut command = fixture.command();
-            command.arg("images");
-            if all {
-                command.arg("--all");
-            }
-            if digests {
-                command.arg("--digests");
-            }
-            let result = command.assert().success();
-            let stdout = String::from_utf8_lossy(&result.get_output().stdout);
-            assert_eq!(stdout.contains("DIGEST"), digests);
-            assert_eq!(stdout.contains("LEGACY IMAGE TABLE"), all);
-            if all {
-                let calls = fs::read_to_string(fixture.root().join("calls")).unwrap();
-                let calls: Vec<_> = calls.lines().collect();
-                assert_eq!(calls.len(), 2);
-                assert!(!calls[0].contains("--digests"));
-                assert!(calls[1].ends_with(if digests {
-                    "images --digests"
-                } else {
-                    "images"
-                }));
-            } else {
-                assert!(!fixture.root().join("calls").exists());
-                result.stderr("");
-            }
-            let paths = [fixture.root().join("parallax")];
-            let expected: Vec<_> = paths
-                .iter()
-                .map(PathBuf::as_path)
-                .take(usize::from(all))
-                .collect();
-            fixture.assert_hook_paths(&expected);
+fn digests_controls_hpc_column() {
+    for digests in [false, true] {
+        let fixture = Fixture::new();
+        let mut command = fixture.command();
+        command.arg("images");
+        if digests {
+            command.arg("--digests");
         }
+        let result = command.assert().success();
+        let stdout = String::from_utf8_lossy(&result.get_output().stdout);
+        assert_eq!(stdout.contains("DIGEST"), digests);
+        assert!(!stdout.contains("LEGACY IMAGE TABLE"));
+        assert!(!fixture.root().join("calls").exists());
+        result.stderr("");
+        fixture.assert_hook_paths(&[]);
     }
-}
-
-#[test]
-fn default_images_initializes_only_the_hpc_store_without_podman_or_hook() {
-    let fixture = Fixture::new();
-    fixture.configure(
-        &fixture.root().join("parallax"),
-        &fixture.root().join("missing-podman"),
-        &fixture.hook,
-    );
-    fixture
-        .command()
-        .env("PATH", "")
-        .arg("images")
-        .assert()
-        .success()
-        .stdout(predicate::str::starts_with("REPOSITORY"))
-        .stdout(predicate::str::contains("IMAGE ID"))
-        .stdout(predicate::str::contains("HPC store:").not())
-        .stderr("");
-    assert!(fixture.root().join("hpc-image-store/store.json").is_file());
-    assert!(!fixture.root().join("parallax").exists());
-    assert!(!fixture.root().join("calls").exists());
-    fixture.assert_hook_paths(&[]);
 }
 
 #[test]
@@ -215,25 +167,20 @@ fn absolute_hpc_override_works_with_empty_parallax() {
 
 #[test]
 fn relative_hpc_override_fails_before_listing_or_running_tools() {
-    for all in [false, true] {
-        let fixture = Fixture::new();
-        let mut command = fixture.command();
-        command.args(["--hpc-image-store", "selected-hpc", "images"]);
-        if all {
-            command.arg("--all");
-        }
-        command
-            .assert()
-            .code(1)
-            .stdout(predicate::str::is_empty())
-            .stderr(predicate::str::contains(
-                "--hpc-image-store value must be an absolute path",
-            ));
-        assert!(!fixture.root().join("selected-hpc").exists());
-        assert!(!fixture.root().join("hpc-image-store").exists());
-        assert!(!fixture.root().join("calls").exists());
-        assert!(!fixture.root().join("hook-calls").exists());
-    }
+    let fixture = Fixture::new();
+    fixture
+        .command()
+        .args(["--hpc-image-store", "selected-hpc", "images"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "--hpc-image-store value must be an absolute path",
+        ));
+    assert!(!fixture.root().join("selected-hpc").exists());
+    assert!(!fixture.root().join("hpc-image-store").exists());
+    assert!(!fixture.root().join("calls").exists());
+    assert!(!fixture.root().join("hook-calls").exists());
 }
 
 #[test]
@@ -290,156 +237,4 @@ fn images_requires_the_hpc_parent_and_does_not_adopt_occupied_store() {
     fixture.configure(Path::new(""), &fixture.podman, &fixture.hook);
     fixture.command().arg("images").assert().success();
     assert!(fixture.root().join("hpc-image-store/store.json").is_file());
-}
-
-#[test]
-fn all_orders_sections_and_preserves_legacy_context_and_hook() {
-    let fixture = Fixture::new();
-    let result = fixture
-        .command()
-        .args(["images", "--all"])
-        .assert()
-        .success();
-    let stdout = String::from_utf8_lossy(&result.get_output().stdout);
-    assert!(stdout.starts_with("HPC store:\nREPOSITORY"));
-    assert!(stdout.contains("\n\nPodman+Parallax stores:\nLEGACY IMAGE TABLE\n"));
-    assert_eq!(stdout.matches("HPC store:").count(), 1);
-    assert_eq!(stdout.matches("REPOSITORY").count(), 1);
-    assert_eq!(stdout.matches("Podman+Parallax stores:").count(), 1);
-    assert_eq!(stdout.matches("LEGACY IMAGE TABLE").count(), 1);
-    result.stderr("hook stderr\nhook stdout\nlegacy warning\n");
-    let calls = fs::read_to_string(fixture.root().join("calls")).unwrap();
-    let lines: Vec<_> = calls.lines().collect();
-    assert_eq!(lines.len(), 2);
-    assert!(lines[0].contains("info"));
-    assert!(lines[1].contains("--root /stub/graphroot"));
-    assert!(lines[1].contains(&format!(
-        "additionalimagestore={}",
-        fixture.root().join("parallax").display()
-    )));
-    assert!(lines[1].ends_with("images"));
-    fixture.assert_hook_paths(&[&fixture.root().join("parallax")]);
-    assert!(fixture.root().join("parallax").is_dir());
-}
-
-#[test]
-fn all_continues_after_hpc_path_failure_and_retains_both_errors() {
-    let fixture = Fixture::new();
-    fs::write(fixture.root().join("blocked-parent"), "file").unwrap();
-    fixture
-        .command()
-        .env("IMAGES_EXIT", "7")
-        .arg("--hpc-image-store")
-        .arg(fixture.root().join("blocked-parent/hpc"))
-        .args(["images", "--all"])
-        .assert()
-        .code(1)
-        .stdout(predicate::str::contains(
-            "Podman+Parallax stores:\nLEGACY IMAGE TABLE",
-        ))
-        .stderr(predicate::str::contains("HPC store:"))
-        .stderr(predicate::str::contains("legacy warning"))
-        .stderr(predicate::str::contains("failed with exit status: 7"));
-}
-
-#[test]
-fn all_preserves_hpc_table_when_podman_fails() {
-    let fixture = Fixture::new();
-    fixture
-        .command()
-        .env("IMAGES_EXIT", "7")
-        .args(["images", "--all"])
-        .assert()
-        .code(1)
-        .stdout(predicate::str::starts_with("HPC store:\nREPOSITORY"))
-        .stdout(predicate::str::contains("LEGACY IMAGE TABLE"));
-    fixture.configure(
-        &fixture.root().join("parallax"),
-        &fixture.root().join("missing-podman"),
-        &fixture.hook,
-    );
-    fixture
-        .command()
-        .args(["images", "--all"])
-        .assert()
-        .code(1)
-        .stdout(predicate::str::starts_with("HPC store:\nREPOSITORY"))
-        .stderr(predicate::str::contains(
-            "Podman+Parallax stores: Failed to query Podman info",
-        ));
-}
-
-#[test]
-fn all_continues_listing_existing_stores_when_hook_fails() {
-    let fixture = Fixture::new();
-    fs::create_dir(fixture.root().join("parallax")).unwrap();
-    fixture
-        .command()
-        .env("HOOK_EXIT", "9")
-        .args(["images", "--all"])
-        .assert()
-        .success()
-        .stdout(predicate::str::starts_with("HPC store:\nREPOSITORY"))
-        .stdout(predicate::str::contains("LEGACY IMAGE TABLE"))
-        .stderr("legacy warning\n");
-}
-
-#[test]
-fn all_continues_after_hpc_failure_when_podman_succeeds() {
-    let fixture = Fixture::new();
-    fs::write(fixture.root().join("blocked-parent"), "file").unwrap();
-    fixture
-        .command()
-        .arg("--hpc-image-store")
-        .arg(fixture.root().join("blocked-parent/hpc"))
-        .args(["images", "--all"])
-        .assert()
-        .code(1)
-        .stdout(predicate::str::contains(
-            "Podman+Parallax stores:\nLEGACY IMAGE TABLE\n",
-        ))
-        .stderr(predicate::str::contains("HPC store:"))
-        .stderr(predicate::str::contains("legacy warning"));
-}
-
-#[test]
-fn all_reports_images_spawn_failure_after_successful_graphroot_lookup() {
-    let fixture = Fixture::new();
-    executable(
-        &fixture.hook,
-        // Disable Podman only after its graphroot lookup has been recorded.
-        "#!/bin/sh\n[ ! -f \"$CALLS_FILE\" ] || /bin/chmod 600 \"$PODMAN_STUB\"\n",
-    );
-    fixture
-        .command()
-        .env("PODMAN_STUB", &fixture.podman)
-        .args(["images", "--all"])
-        .assert()
-        .code(1)
-        .stdout(predicate::str::starts_with("HPC store:\nREPOSITORY"))
-        .stdout(predicate::str::contains("Podman+Parallax stores:"))
-        .stderr(predicate::str::contains(
-            "Podman+Parallax stores: failed to execute",
-        ));
-    let calls = fs::read_to_string(fixture.root().join("calls")).unwrap();
-    assert_eq!(calls.lines().count(), 1);
-    assert!(calls.contains("info"));
-}
-
-#[test]
-fn all_stops_before_podman_when_printing_fails() {
-    let fixture = Fixture::new();
-    let mut command = fixture.std_command();
-    command.args(["images", "--all"]);
-    command.stdout(
-        fs::OpenOptions::new()
-            .write(true)
-            .open("/dev/full")
-            .unwrap(),
-    );
-    let output = command.output().unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Failed to print image listing:"));
-    assert!(!fixture.root().join("calls").exists());
-    fixture.assert_hook_paths(&[]);
 }
