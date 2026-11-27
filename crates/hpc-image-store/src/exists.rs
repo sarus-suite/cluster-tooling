@@ -45,7 +45,7 @@ impl Store {
             let path = refs::raw_image_path(&guard, &reference)?;
             Some(oci::index_root(&path)?.digest)
         };
-        Ok(digest.map(|digest| format!("{}@{digest}", selector.name())))
+        Ok(digest.map(|digest| format!("{}@{digest}", selector.reference())))
     }
 }
 
